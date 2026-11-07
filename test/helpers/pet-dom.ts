@@ -69,7 +69,8 @@ export class ElementStub extends ListenerTarget {
   }
   contains(node: unknown): boolean { return node === this || this.children.some((child) => child.contains(node)); }
   attachShadow(): ElementStub {
-    const root = new ElementStub('shadow-root', this.ownerDocument);
+    // A shadow root is a document fragment.
+    const root = Object.assign(new ElementStub('shadow-root', this.ownerDocument), { nodeType: 11 });
     root.host = this;
     this.shadowRoot = root;
     return root;

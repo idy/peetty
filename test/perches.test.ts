@@ -114,6 +114,7 @@ function hits(root: TestNode, x: number, y: number): TestElement[] {
 }
 
 class TestDocument {
+  readonly nodeType = 9;
   documentElement = new TestElement('HTML', rect(0, 0, 800, 700));
   body = new TestElement('BODY', rect(0, 0, 800, 700));
   activeElement: TestElement | null = this.body;
@@ -262,6 +263,22 @@ describe('whole-footprint perch clearance', () => {
     const found = perchOf(asElement(card), fixture.opts);
     assert.ok(found, 'the hit test finds its shadow content, which belongs to the host');
     assert.ok(support(found, 200, fixture.opts, true));
+  });
+
+  it('stops walking up at the document, whatever a page names "host"', () => {
+    const edge = perch(rect(0, 400, 400, 40));
+    // <form name="host"> makes document.host that form; two such forms make it a collection.
+    const form = element('form', rect(0, 0, 800, 100));
+    for (const host of [form, { length: 2 }]) {
+      Object.assign(fixture.document, { host });
+      fixture.now += 300;
+      assert.ok(perchOf(asElement(edge), fixture.opts), 'the walk ends at the document instead of looping or throwing');
+    }
+    // A menu over the edge does not become part of it through a form named "host" inside the edge.
+    Object.assign(fixture.document, { host: element('form', rect(0, 420, 100, 10), edge) });
+    element('div', rect(0, 395, 800, 20));
+    fixture.now += 300;
+    assert.equal(perchOf(asElement(edge), fixture.opts), null);
   });
 
   it('keeps clear of a stretched link whose click area covers the card above a lower edge', () => {
@@ -652,6 +669,26 @@ describe('bounded discovery and shared rechecks', () => {
     scroller.style.position = 'relative';
     fixture.now += 300;
     assert.ok(floor(fixture.opts), 'positioned against the scroller, it is clipped');
+  });
+
+  it('clips positioned content by an unpositioned wrapper that is still its containing block', () => {
+    const wrapper = element('div', rect(0, 100, 800, 100));
+    wrapper.style.overflowX = 'hidden';
+    wrapper.style.overflowY = 'hidden';
+    element('button', rect(0, 640, 800, 40), wrapper).style.position = 'absolute';
+    element('button', rect(0, 600, 800, 40), wrapper).style.position = 'fixed';
+    assert.equal(floor(fixture.opts), null, 'both escape a plain wrapper');
+    // A transform, filter or containment makes it hold absolute and fixed content, so its overflow clips them.
+    const plain = { ...wrapper.style };
+    const holders = [['transform', 'translateZ(0)'], ['translate', '0px 0px'], ['filter', 'blur(0px)'], ['willChange', 'transform'], ['contain', 'layout'], ['containerType', 'inline-size']] as const;
+    for (const [property, value] of holders) {
+      wrapper.style = { ...plain, [property]: value };
+      fixture.now += 300;
+      assert.ok(floor(fixture.opts), `clipped with ${property}: ${value}`);
+    }
+    wrapper.style = { ...plain, position: 'relative' };
+    fixture.now += 300;
+    assert.equal(floor(fixture.opts), null, 'positioned, it holds the absolute button but not the fixed one');
   });
 
   it('shares text measurement across candidates, floor and rechecks', () => {

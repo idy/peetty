@@ -50,6 +50,8 @@ const MAX_PERCHES = 40;
 const HIT_BUDGET = 128;
 /** Open shadow roots a hit test descends through. */
 const SHADOW_DEPTH = 16;
+/** Node.DOCUMENT_FRAGMENT_NODE: the node type of a shadow root, and never of a document. */
+const FRAGMENT = 11;
 /** How far above an edge a hit test looks for a click area she would cover. */
 const ABOVE = 6;
 /** Below this effective opacity, or this height, an element cannot carry her. */
@@ -81,11 +83,11 @@ interface Metrics { rect: DOMRect; input: boolean; preferred: boolean }
 interface Placement { key: string; width: number; height: number; vw: number; vh: number }
 /**
  * What is visible inside the current element: `clip` after paint containment,
- * which clips everything, including fixed content; `flow` after overflow clips
- * too, for text and in-flow content; `absolute` for absolutely positioned
- * content, which escapes the overflow clips below its containing block.
+ * which clips everything; `flow` after overflow clips too, for text and in-flow
+ * content; `absolute` and `fixed` for positioned content, which escapes the
+ * overflow clips below its containing block.
  */
-interface Context { opacity: number; avoid: boolean; clip: Box; flow: Box; absolute: Box; visible: boolean }
+interface Context { opacity: number; avoid: boolean; clip: Box; flow: Box; absolute: Box; fixed: Box; visible: boolean }
 const scans = new WeakMap<Element, Scan>();
 const placements = new WeakMap<Perch, Placement>();
 
@@ -106,9 +108,17 @@ function limitsOf(body: Footprint) {
 }
 
 function parentOf(el: Element): Element | null {
-  if (el.parentElement) return el.parentElement;
-  const root = el.getRootNode();
-  return 'host' in root ? (root as ShadowRoot).host : null;
+  return el.parentElement ?? hostOf(el);
+}
+
+/**
+ * The element hosting the shadow tree node is in, or null outside one. Only a
+ * shadow root has a host: a document's `host` is whatever form or image the
+ * page names "host", or a collection of them.
+ */
+function hostOf(node: Node): Element | null {
+  const root = node.getRootNode();
+  return root.nodeType === FRAGMENT ? (root as ShadowRoot).host ?? null : null;
 }
 
 /** The topmost page element at a point, including open shadow trees. */
@@ -161,8 +171,7 @@ function clickable(node: Element): boolean {
   let current: Element | null = node;
   for (let depth = 0; current && depth <= SHADOW_DEPTH; depth++) {
     if (current.closest(INTERACTIVE)) return true;
-    const root = current.getRootNode();
-    current = 'host' in root ? (root as ShadowRoot).host : null;
+    current = hostOf(current);
   }
   return false;
 }
@@ -175,8 +184,7 @@ function encloses(el: Element, node: Element): boolean {
   let current: Element | null = node;
   for (let depth = 0; current && depth <= SHADOW_DEPTH; depth++) {
     if (el.contains(current)) return true;
-    const root = current.getRootNode();
-    current = 'host' in root ? (root as ShadowRoot).host : null;
+    current = hostOf(current);
   }
   return false;
 }
@@ -270,6 +278,26 @@ function overflowClip(el: Element, style: CSSStyleDeclaration, rect: Box, clip: 
   );
 }
 
+/**
+ * Which positioned descendants an element is the containing block of: `fixed`
+ * ones, and absolutely positioned ones too, when a transform, filter or
+ * containment makes it one, positioned or not; `absolute` ones when it is only
+ * positioned; none when they escape it. Its overflow clips the ones it holds.
+ */
+function holds(style: CSSStyleDeclaration): 'fixed' | 'absolute' | null {
+  // A contents box is no box at all, and inline boxes are neither transformed nor contained.
+  if (style.display === 'contents') return null;
+  const set = (value: string | undefined) => !!value && value !== 'none';
+  if (style.display !== 'inline' && (
+    set(style.transform) || set(style.translate) || set(style.rotate) || set(style.scale)
+    || set(style.perspective) || set(style.filter) || set(style.backdropFilter)
+    || /\b(transform|translate|rotate|scale|perspective|filter|contain)\b/.test(style.willChange ?? '')
+    || /\b(layout|paint|strict|content)\b/.test(style.contain ?? '')
+    || (!!style.containerType && style.containerType !== 'normal')
+  )) return 'fixed';
+  return style.position && style.position !== 'static' ? 'absolute' : null;
+}
+
 function empty(rect: Box): boolean {
   return rect.width <= 0 || rect.height <= 0;
 }
@@ -293,7 +321,7 @@ function scan(opts: PerchOptions): Scan {
   const ordinary: Element[] = [];
   const viewport = box(0, 0, innerWidth, innerHeight);
   const pending: { node: Node; context: Context }[] = [
-    { node: document.documentElement, context: { opacity: 1, avoid: false, clip: viewport, flow: viewport, absolute: viewport, visible: true } },
+    { node: document.documentElement, context: { opacity: 1, avoid: false, clip: viewport, flow: viewport, absolute: viewport, fixed: viewport, visible: true } },
   ];
   let visited = 0;
   // Created on the first text node, one range measures all text of this scan.
@@ -337,9 +365,9 @@ function scan(opts: PerchOptions): Scan {
     const clip = /\b(paint|strict|content)\b/.test(style.contain) ? intersection(context.clip, rect) : context.clip;
     if (empty(clip)) continue;
     // Overflow clips in-flow content; positioned content escapes the overflow clips
-    // below its containing block, and fixed content escapes them all.
-    const position = style.position;
-    const own = position === 'fixed' ? context.clip : position === 'absolute' ? context.absolute : context.flow;
+    // below its containing block. A contents box is never positioned.
+    const position = style.display === 'contents' ? 'static' : style.position;
+    const own = position === 'fixed' ? context.fixed : position === 'absolute' ? context.absolute : context.flow;
     if (visible && (avoid || el.matches(INTERACTIVE) || MEDIA_TAGS.has(el.tagName.toUpperCase()))) addObstacle(rect, el, avoid, own);
     if (!avoid && opacity >= MIN_OPACITY && rect.width > 0 && rect.top >= own.top && rect.top < own.bottom && carries(el, style, rect)) {
       const list = el.getAttribute('data-peetty') === 'perch' ? preferred : ordinary;
@@ -348,8 +376,13 @@ function scan(opts: PerchOptions): Scan {
     // content-visibility: hidden skips the contents; the element's own box above still counts.
     if (style.contentVisibility === 'hidden') continue;
     const flow = overflowClip(el, style, rect, intersection(own, clip));
-    const positioned = !!position && position !== 'static';
-    const childContext = { opacity, avoid, clip, flow, absolute: positioned ? flow : intersection(context.absolute, clip), visible };
+    const held = holds(style);
+    const childContext = {
+      opacity, avoid, clip, flow,
+      absolute: held ? flow : intersection(context.absolute, clip),
+      fixed: held === 'fixed' ? flow : intersection(context.fixed, clip),
+      visible,
+    };
     if (el.firstChild) pending.push({ node: el.firstChild, context: childContext });
     if (el.shadowRoot?.firstChild) pending.push({ node: el.shadowRoot.firstChild, context: childContext });
   }
