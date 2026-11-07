@@ -274,6 +274,13 @@ describe('whole-footprint perch clearance', () => {
     link.hitArea = card.bounds;
     assert.equal(perchOf(asElement(footer), fixture.opts), null, 'she would cover the card where it is a link');
     assert.ok(perchOf(asElement(card), fixture.opts), 'on the card itself she stands above the link');
+    // A click area that covers only the upper part of her, ending well above her feet.
+    link.hitArea = rect(100, 200, 400, 150);
+    fixture.now += 300;
+    assert.equal(perchOf(asElement(footer), fixture.opts), null, 'her head would cover it');
+    link.hitArea = rect(100, 200, 400, 60);
+    fixture.now += 300;
+    assert.ok(perchOf(asElement(footer), fixture.opts), 'above her head it is out of her way');
   });
 
   it('keeps the box of an element whose contents are hidden, but not its contents', () => {
@@ -397,7 +404,7 @@ describe('support', () => {
     fixture.now += 300;
     const before = fixture.hitTests;
     assert.deepEqual(where(support(found, 300, fixture.opts, true)), where(found));
-    assert.equal(fixture.hitTests - before, 4, 'at the edge and just above it, for the span and under her feet');
+    assert.equal(fixture.hitTests - before, 8, 'at the edge and three heights above it, for the span and under her feet');
     assert.equal(support(found, 150, fixture.opts, true), null, 'covered under her feet');
     assert.equal(support(found, 60, fixture.opts, true), null, 'off the span');
   });
@@ -704,6 +711,6 @@ describe('bounded discovery and shared rechecks', () => {
     Object.defineProperty(globalThis, 'innerWidth', { value: 1_000_000, configurable: true, writable: true });
     const edge = perch(rect(0, 400, 1_000_000, 40));
     assert.ok(perchOf(asElement(edge), fixture.opts));
-    assert.ok(fixture.hitTests <= 2);
+    assert.ok(fixture.hitTests <= 4, 'the edge and three heights above it, at one x');
   });
 });

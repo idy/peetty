@@ -140,15 +140,20 @@ function hitAt(x: number, y: number, host: Element, budget: Budget): Element | n
 
 /**
  * Whether el's top edge at y is on top at x, not covered by a menu or dialog,
- * with nothing clickable just above it, where she stands. Rect clearance cannot
- * see a click area that reaches past its control's box, such as a stretched
- * link's ::after across a card.
+ * with nothing clickable where she stands above it. Rect clearance cannot see a
+ * click area that reaches past its control's box, such as a stretched link's
+ * ::after across a card, so a few hit tests up her height at x look for one.
  */
-function exposed(el: Element, x: number, y: number, host: Element, budget: Budget = { left: HIT_BUDGET }): boolean {
+function exposed(el: Element, x: number, y: number, body: Footprint, host: Element, budget: Budget = { left: HIT_BUDGET }): boolean {
   const hit = hitAt(x, y + 2, host, budget);
   if (!hit || !encloses(el, hit)) return false;
-  const above = y - ABOVE >= 0 ? hitAt(x, y - ABOVE, host, budget) : null;
-  return !above || !clickable(above);
+  // Just above her feet, at her middle, and just below the top of her head.
+  for (const h of [ABOVE, body.above / 2, body.above - ABOVE]) {
+    if (h < ABOVE || y - h < 0) continue;
+    const above = hitAt(x, y - h, host, budget);
+    if (above && clickable(above)) return false;
+  }
+  return true;
 }
 
 /** Whether a click on node reaches a control, including from inside open shadow roots. */
@@ -413,7 +418,7 @@ function perchWith(el: Element, opts: PerchOptions, body: Footprint, data: Scan)
   const [left, right] = anchorBounds(live.rect, body);
   const span = freeSpan(left, right, live.rect.top, body, data, el);
   // The edge must be on top in the middle of its span.
-  if (!span || !exposed(el, (span[0] + span[1]) / 2, live.rect.top, opts.host, data.budget) || data.budget.left < 0) return null;
+  if (!span || !exposed(el, (span[0] + span[1]) / 2, live.rect.top, body, opts.host, data.budget) || data.budget.left < 0) return null;
   return remember({
     el, left: span[0], right: span[1], y: live.rect.top, input: live.input, preferred: live.preferred, clear: true,
     offset: [span[0] - live.rect.left, span[1] - live.rect.left],
@@ -513,7 +518,8 @@ export function support(perch: Perch, x: number, opts: PerchOptions, recheck = f
   if (!perch.clear) return recheck ? bottom(opts, x) : catchAll(opts);
   if (!recheck) return refresh(perch, opts);
   const live = refresh(perch, opts, true);
-  return live && under(live, x) && (!perch.el || exposed(perch.el, x, live.y, opts.host)) ? live : null;
+  // A live recheck means her footprint is valid.
+  return live && under(live, x) && (!perch.el || exposed(perch.el, x, live.y, footprint(opts)!, opts.host)) ? live : null;
 }
 
 /** Whether the edge is under x, tested as physics.landing() tests it. */
