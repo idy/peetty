@@ -50,6 +50,8 @@ const MAX_PERCHES = 40;
 const HIT_BUDGET = 128;
 /** Open shadow roots a hit test descends through. */
 const SHADOW_DEPTH = 16;
+/** How far above an edge a hit test looks for a click area she would cover. */
+const ABOVE = 6;
 /** Below this effective opacity, or this height, an element cannot carry her. */
 const MIN_OPACITY = 0.2;
 const MIN_HEIGHT = 14;
@@ -136,10 +138,28 @@ function hitAt(x: number, y: number, host: Element, budget: Budget): Element | n
   return null;
 }
 
-/** Whether el's top edge at y is on top at x, not covered by a menu or dialog. */
+/**
+ * Whether el's top edge at y is on top at x, not covered by a menu or dialog,
+ * with nothing clickable just above it, where she stands. Rect clearance cannot
+ * see a click area that reaches past its control's box, such as a stretched
+ * link's ::after across a card.
+ */
 function exposed(el: Element, x: number, y: number, host: Element, budget: Budget = { left: HIT_BUDGET }): boolean {
   const hit = hitAt(x, y + 2, host, budget);
-  return !!hit && encloses(el, hit);
+  if (!hit || !encloses(el, hit)) return false;
+  const above = y - ABOVE >= 0 ? hitAt(x, y - ABOVE, host, budget) : null;
+  return !above || !clickable(above);
+}
+
+/** Whether a click on node reaches a control, including from inside open shadow roots. */
+function clickable(node: Element): boolean {
+  let current: Element | null = node;
+  for (let depth = 0; current && depth <= SHADOW_DEPTH; depth++) {
+    if (current.closest(INTERACTIVE)) return true;
+    const root = current.getRootNode();
+    current = 'host' in root ? (root as ShadowRoot).host : null;
+  }
+  return false;
 }
 
 /**
@@ -190,11 +210,6 @@ function transparent(color: string): boolean {
   return parts.length === 4 && parseFloat(parts[3]!) < 0.08;
 }
 
-/** Display rules that remove an element together with everything inside it. */
-function hides(style: CSSStyleDeclaration): boolean {
-  return style.display === 'none' || style.contentVisibility === 'hidden';
-}
-
 /** Whether an element's own box can carry her: visible, with a visible edge, and tall enough. */
 function carries(el: Element, style: CSSStyleDeclaration, rect: Box): boolean {
   return style.visibility === 'visible' && rect.height >= MIN_HEIGHT && visibleEdge(el, style);
@@ -212,13 +227,16 @@ function metrics(el: Element, opts: PerchOptions, body: Footprint): Metrics | nu
   for (let depth = 0; ancestor; depth++) {
     if (depth >= MAX_ANCESTORS) return null;
     const appearance = ancestor === el ? style : getComputedStyle(ancestor);
-    if (ancestor.getAttribute('data-peetty') === 'avoid' || hides(appearance)) return null;
+    if (ancestor.getAttribute('data-peetty') === 'avoid' || appearance.display === 'none') return null;
+    // Hidden contents leave the element's own box painted: they only hide what is inside.
+    if (ancestor !== el && appearance.contentVisibility === 'hidden') return null;
     opacity *= Number(appearance.opacity);
     if (opacity < MIN_OPACITY) return null;
     ancestor = parentOf(ancestor);
   }
   const input = isEditable(el);
-  if (input && ((el.tagName === 'INPUT' && SKIP_INPUTS.has((el as HTMLInputElement).type)) || inUse(el) || el.matches(':disabled') || (el as HTMLInputElement).disabled)) return null;
+  // Tag names are lowercase in XHTML documents.
+  if (input && ((el.tagName.toUpperCase() === 'INPUT' && SKIP_INPUTS.has((el as HTMLInputElement).type)) || inUse(el) || el.matches(':disabled') || (el as HTMLInputElement).disabled)) return null;
   return { rect, input, preferred: el.getAttribute('data-peetty') === 'perch' };
 }
 
@@ -306,7 +324,7 @@ function scan(opts: PerchOptions): Scan {
     if (!spend(result.budget, 2)) { result.complete = false; break; }
     const style = getComputedStyle(el);
     const opacity = context.opacity * Number(style.opacity);
-    if (hides(style) || opacity === 0) continue;
+    if (style.display === 'none' || opacity === 0) continue;
     const rect = el.getBoundingClientRect();
     const visible = style.visibility === 'visible';
     const avoid = context.avoid || el.getAttribute('data-peetty') === 'avoid';
@@ -322,6 +340,8 @@ function scan(opts: PerchOptions): Scan {
       const list = el.getAttribute('data-peetty') === 'perch' ? preferred : ordinary;
       if (list.length < MAX_CANDIDATES) list.push(el);
     }
+    // content-visibility: hidden skips the contents; the element's own box above still counts.
+    if (style.contentVisibility === 'hidden') continue;
     const flow = overflowClip(el, style, rect, intersection(own, clip));
     const positioned = !!position && position !== 'static';
     const childContext = { opacity, avoid, clip, flow, absolute: positioned ? flow : intersection(context.absolute, clip), visible };

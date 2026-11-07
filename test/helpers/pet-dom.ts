@@ -89,6 +89,10 @@ export class ElementStub extends ListenerTarget {
     if (selector.includes('[contenteditable]') && this.attrs.has('contenteditable') && this.getAttribute('contenteditable') !== 'false') return true;
     return selector.includes('button') && this.tagName === 'BUTTON';
   }
+  closest(selector: string): ElementStub | null {
+    for (let current: ElementStub | null = this; current; current = current.parentElement) if (current.matches(selector)) return current;
+    return null;
+  }
   setPointerCapture(id: number): void { this.captures.add(id); }
   releasePointerCapture(id: number): void { this.captures.delete(id); }
   elementsFromPoint(x: number, y: number): ElementStub[] {

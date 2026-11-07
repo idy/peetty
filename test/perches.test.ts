@@ -82,11 +82,19 @@ class TestElement extends TestNode {
       }
       return false;
     }
-    const editable = ['INPUT', 'TEXTAREA', 'SELECT'].includes(this.tagName) || (this.attributes.has('contenteditable') && this.getAttribute('contenteditable') !== 'false');
+    // Selectors match whatever the case of the tag name, as in XHTML documents.
+    const tag = this.tagName.toUpperCase();
+    const editable = ['INPUT', 'TEXTAREA', 'SELECT'].includes(tag) || (this.attributes.has('contenteditable') && this.getAttribute('contenteditable') !== 'false');
     if (selector.startsWith('input,')) return editable;
-    return editable || ['BUTTON', 'LABEL', 'SUMMARY', 'VIDEO', 'AUDIO', 'IFRAME'].includes(this.tagName)
-      || (this.tagName === 'A' && this.attributes.has('href')) || this.attributes.has('role') || this.attributes.has('tabindex');
+    return editable || ['BUTTON', 'LABEL', 'SUMMARY', 'VIDEO', 'AUDIO', 'IFRAME'].includes(tag)
+      || (tag === 'A' && this.attributes.has('href')) || this.attributes.has('role') || this.attributes.has('tabindex');
   }
+  closest(selector: string): TestElement | null {
+    for (let current: TestElement | null = this; current; current = current.parentElement) if (current.matches(selector)) return current;
+    return null;
+  }
+  /** Where hit tests find the element when it differs from its box, like a stretched link's ::after. */
+  hitArea: Rect | null = null;
 }
 
 function children(root: TestNode): TestElement[] {
@@ -99,7 +107,10 @@ function children(root: TestNode): TestElement[] {
 }
 
 function hits(root: TestNode, x: number, y: number): TestElement[] {
-  return children(root).filter((el) => el.style.visibility === 'visible' && x >= el.bounds.left && x < el.bounds.right && y >= el.bounds.top && y < el.bounds.bottom).reverse();
+  return children(root).filter((el) => {
+    const area = el.hitArea ?? el.bounds;
+    return el.style.visibility === 'visible' && x >= area.left && x < area.right && y >= area.top && y < area.bottom;
+  }).reverse();
 }
 
 class TestDocument {
@@ -253,6 +264,45 @@ describe('whole-footprint perch clearance', () => {
     assert.ok(support(found, 200, fixture.opts, true));
   });
 
+  it('keeps clear of a stretched link whose click area covers the card above a lower edge', () => {
+    const card = element('article', rect(100, 200, 400, 300));
+    card.style.backgroundColor = 'rgb(255, 255, 255)';
+    const footer = perch(rect(100, 420, 400, 80), card);
+    const link = element('a', rect(120, 460, 80, 16), footer);
+    link.setAttribute('href', '#');
+    // .stretched-link::after { position: absolute; inset: 0 } against the card.
+    link.hitArea = card.bounds;
+    assert.equal(perchOf(asElement(footer), fixture.opts), null, 'she would cover the card where it is a link');
+    assert.ok(perchOf(asElement(card), fixture.opts), 'on the card itself she stands above the link');
+  });
+
+  it('keeps the box of an element whose contents are hidden, but not its contents', () => {
+    const area = element('section', rect(0, 600, 800, 100));
+    area.setAttribute('data-peetty', 'avoid');
+    area.style.contentVisibility = 'hidden';
+    assert.equal(floor(fixture.opts), null, 'the avoid area itself still blocks the floor');
+    const card = perch(rect(0, 300, 400, 40));
+    card.style.contentVisibility = 'hidden';
+    element('button', rect(100, 250, 60, 20), card);
+    fixture.now += 300;
+    assert.ok(perchOf(asElement(card), fixture.opts), 'its own edge still carries her, and its skipped button does not block it');
+  });
+
+  it('filters input types whatever the case of the tag name, as in XHTML', () => {
+    const field = (type: string, bounds: Rect) => {
+      const el = new TestElement('input', bounds);
+      el.type = type;
+      fixture.document.body.append(el);
+      return el;
+    };
+    const password = field('password', rect(0, 300, 300, 40));
+    const file = field('file', rect(400, 300, 300, 40));
+    const plain = field('text', rect(0, 600, 300, 40));
+    assert.equal(perchOf(asElement(password), fixture.opts), null);
+    assert.equal(perchOf(asElement(file), fixture.opts), null);
+    assert.ok(perchOf(asElement(plain), fixture.opts), 'a text field still carries her');
+  });
+
   it('stands on a linked or responsive image whose wrapper shares its box', () => {
     const link = element('a', rect(0, 400, 300, 120));
     link.setAttribute('href', '#');
@@ -347,7 +397,7 @@ describe('support', () => {
     fixture.now += 300;
     const before = fixture.hitTests;
     assert.deepEqual(where(support(found, 300, fixture.opts, true)), where(found));
-    assert.equal(fixture.hitTests - before, 2, 'one hit test for the span, one under her feet');
+    assert.equal(fixture.hitTests - before, 4, 'at the edge and just above it, for the span and under her feet');
     assert.equal(support(found, 150, fixture.opts, true), null, 'covered under her feet');
     assert.equal(support(found, 60, fixture.opts, true), null, 'off the span');
   });
