@@ -35,6 +35,12 @@ describe('landing', () => {
     assert.equal(landing(edges, 50, 205, 270)?.y, 260);
   });
 
+  it('falls past the perch she just left and lands on a lower edge', () => {
+    assert.equal(landing(edges, 50, 200, 200.4), null);
+    assert.equal(landing(edges, 50, 200, 270)?.y, 260);
+    assert.equal(landing(edges, 50, 200.25, 270)?.y, 260);
+  });
+
   it('ignores edges not under her or not crossed this frame', () => {
     assert.equal(landing(edges, 150, 0, 400), null);
     assert.equal(landing(edges, 250, 160, 200), null);

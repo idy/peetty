@@ -52,7 +52,9 @@ export function landing(edges: readonly Edge[], x: number, fromY: number, toY: n
   let best: Edge | null = null;
   for (const edge of edges) {
     if (x < edge.left || x > edge.right) continue;
-    if (edge.y < fromY - 0.5 || edge.y > toY) continue;
+    // An edge at or above the starting point was not crossed during this
+    // frame. In particular, do not land again on the perch she just left.
+    if (edge.y <= fromY || edge.y > toY) continue;
     if (!best || edge.y < best.y) best = edge;
   }
   return best;
