@@ -1,0 +1,125 @@
+{
+  "format": "peetty.catalog",
+  "version": 1,
+  "figures": [
+    {
+      "id": "miru",
+      "name": {
+        "en": "Miru",
+        "zh": "米露",
+        "ja": "ミル"
+      },
+      "description": {
+        "en": "Curious and quick. Hops between cards and waves when you look her way.",
+        "zh": "好奇又轻快，在卡片之间蹦来蹦去，你看她时会挥手。"
+      },
+      "author": "Peetty",
+      "license": "CC-BY-4.0",
+      "renderer": "rig",
+      "bundled": true,
+      "url": "https://peetty.idy.dev/figures/miru.json"
+    },
+    {
+      "id": "koharu",
+      "name": {
+        "en": "Koharu",
+        "zh": "小春",
+        "ja": "こはる"
+      },
+      "description": {
+        "en": "Warm and drowsy. Naps on sunny cards and stretches when she wakes.",
+        "zh": "暖洋洋、懒洋洋，在晒得到太阳的卡片上打盹，醒来伸个懒腰。"
+      },
+      "author": "Peetty",
+      "license": "CC-BY-4.0",
+      "renderer": "rig",
+      "bundled": true,
+      "url": "https://peetty.idy.dev/figures/koharu.json"
+    },
+    {
+      "id": "xiaoxiao",
+      "name": {
+        "en": "Xiaoxiao",
+        "zh": "林筱筱",
+        "ja": "シャオシャオ"
+      },
+      "description": {
+        "en": "Bright and quick, with a cup of milk tea never far away. Loves to run and hop around.",
+        "zh": "机灵爱笑，手边总有一杯奶茶，喜欢跑来跑去、蹦蹦跳跳。"
+      },
+      "author": "Peetty",
+      "license": "CC-BY-4.0",
+      "renderer": "rig",
+      "bundled": true,
+      "url": "https://peetty.idy.dev/figures/xiaoxiao.json"
+    },
+    {
+      "id": "riley",
+      "name": {
+        "en": "Riley",
+        "zh": "莱莉",
+        "ja": "ライリー"
+      },
+      "description": {
+        "en": "Sunny and outgoing. Waves at everyone, jumps the highest, and blows bubble gum when she gets bored.",
+        "zh": "阳光外向，见谁都挥手，跳得最高，无聊了就吹泡泡糖。"
+      },
+      "author": "Peetty",
+      "license": "CC-BY-4.0",
+      "renderer": "rig",
+      "bundled": true,
+      "url": "https://peetty.idy.dev/figures/riley.json"
+    },
+    {
+      "id": "amara",
+      "name": {
+        "en": "Amara",
+        "zh": "阿玛拉",
+        "ja": "アマラ"
+      },
+      "description": {
+        "en": "Curious about everything. Hops from card to card with her camera and snaps whatever catches her eye.",
+        "zh": "对什么都好奇，带着相机在卡片之间跳来跳去，看到喜欢的就拍下来。"
+      },
+      "author": "Peetty",
+      "license": "CC-BY-4.0",
+      "renderer": "rig",
+      "bundled": true,
+      "url": "https://peetty.idy.dev/figures/amara.json"
+    },
+    {
+      "id": "elsie",
+      "name": {
+        "en": "Elsie",
+        "zh": "艾尔西",
+        "ja": "エルシー"
+      },
+      "description": {
+        "en": "Quiet and polite. Sits down for a cup of tea and floats down gently under her umbrella.",
+        "zh": "安静有礼貌，喜欢坐下来喝杯茶，掉下来时会撑开小伞慢慢飘落。"
+      },
+      "author": "Peetty",
+      "license": "CC-BY-4.0",
+      "renderer": "rig",
+      "bundled": true,
+      "url": "https://peetty.idy.dev/figures/elsie.json"
+    },
+    {
+      "id": "shiori",
+      "name": {
+        "en": "Shiori",
+        "zh": "栞",
+        "ja": "しおり"
+      },
+      "description": {
+        "en": "Calm and gentle. Finds a quiet edge, sits down, and reads along with you.",
+        "zh": "安静温柔，找个安稳的边角坐下，陪你一起读。"
+      },
+      "author": "Peetty",
+      "license": "CC-BY-4.0",
+      "renderer": "rig",
+      "bundled": false,
+      "url": "https://peetty.idy.dev/figures/shiori.json"
+    }
+  ]
+}

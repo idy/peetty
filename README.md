@@ -6,7 +6,7 @@ Peetty is an open-source, local-first browser pet. The idea is simple: a small c
 
 Bring your own AI API key, shape its personality, and take its memories with you.
 
-> **Status: early planning.** This repository currently contains project documentation only. The capabilities below describe the intended product; no installable extension or application is available yet.
+> **Status: early development.** The companion works on real pages: six animated preset characters, a JSON format for your own, and one-script embedding. Chat, memory and the management page are not built yet, and publishing to GitHub Packages is configured but no package has been published yet. The capabilities below describe the intended product.
 
 ## The experience
 
@@ -49,11 +49,82 @@ Browser data can be cleared or lost. Export and import are part of the initial s
 
 Browser connections also depend on the selected provider's cross-origin support and authentication requirements. Compatibility will be documented as integrations are implemented.
 
+## Figures
+
+Peetty's look is a JSON figure pack: layered vector parts on a standard skeleton, a palette, and expression states. The SDK animates any figure, with breathing, blinking, pointer-following eyes, spring-driven hair, and squash and stretch on jumps. Six original presets are bundled:
+
+- **Miru**: lavender twin tails and a cursor hair clip. Quick and bouncy.
+- **Koharu** (Japan): a peach bob and a cat-ear beret. Sleepy, naps and stretches.
+- **Xiaoxiao** (China): black double buns and a cup of milk tea.
+- **Riley** (US): a chestnut ponytail; blows bubble gum and jumps the highest.
+- **Amara** (US): curly afro puffs and a camera she snaps photos with.
+- **Elsie** (UK): a blonde bob and freckles; sips tea and floats down under her umbrella.
+
+More characters, such as Shiori, live in the catalog in `figures/` and load on demand. See [Figure packs](docs/figures.md) to make your own or recolor a preset.
+
 ## Project direction
 
-The initial target is a browser extension for desktop browsing, with a reusable web core for pet behavior, animation, conversation, and storage. An embeddable web component and a Tauri desktop companion are possible future directions.
+Peetty is first built as an npm SDK that any page can embed with one script, which is how [peetty.idy.dev](https://peetty.idy.dev/) will host it. A browser extension then reuses the same core, so the same companion follows you across websites with its key in extension storage. A Tauri desktop companion is a possible later direction.
 
-Implementation, supported browsers, dependencies, installation, and build instructions will be documented when working code is available.
+When embedded through the SDK, settings and any saved key live in that website's own storage, where other scripts on the same site could read them. Key handling for SDK embeds will be documented with the chat feature, including a mode that does not persist the key.
+
+## Install from GitHub Packages
+
+The package is named `@idy/peetty` and is published to GitHub Packages. GitHub Packages requires authentication, including for public packages. Configure the scope and authenticate with a GitHub account that can read the package, using a personal access token (classic) with `read:packages`:
+
+```bash
+npm config set @idy:registry https://npm.pkg.github.com
+```
+
+```bash
+npm login --scope=@idy --auth-type=legacy --registry=https://npm.pkg.github.com
+```
+
+```bash
+npm install @idy/peetty
+```
+
+Release workflow: after the intended version is on the repository, push a matching tag such as `v0.1.0`. The package workflow checks that the tag matches `package.json`, runs the checks, tests and build, then publishes to GitHub Packages using `GITHUB_TOKEN`. Publishing a new version and changing the package's visibility are separate GitHub operations.
+
+## Development
+
+Requires Node.js 22.18 or later.
+
+```bash
+npm install
+```
+
+```bash
+npm run dev
+```
+
+```bash
+npm test
+```
+
+```bash
+npm run check
+```
+
+`npm run dev` serves the figure sheet at `http://127.0.0.1:4180/dev/figures.html` and the website at `http://127.0.0.1:4180/site/`, rebuilding on each change. `npm run build` writes `dist/index.js` (ESM) and `dist/peetty.global.js` (a `Peetty` global for script tags). `npm run figures` regenerates the preset JSON from its sources; `npm run check` type-checks and verifies that the generated JSON is current.
+
+| Path | Purpose |
+| --- | --- |
+| `src/figure/types.ts` | Figure format types, bones, slots and states |
+| `src/figure/validate.ts` | Validator for untrusted figure data |
+| `src/figure/rig.ts` | SVG renderer: bone matrices, springs, slots, gaze |
+| `src/figure/motion.ts` | Procedural animation for every state |
+| `src/figure/view.ts` | Animated figure element with its frame loop |
+| `figures/src/` | Preset sources and the drawing kit |
+| `figures/*.json` | Generated preset figure packs |
+| `schema/figure-v1.json` | JSON Schema for editors |
+| `src/pet/` | The companion: perch finding, jump physics, behaviour, dragging, hover menu and bubble |
+| `src/global.ts` | Script-tag build with `data-peetty-auto` |
+| `site/` | peetty.idy.dev, with the shared idy.dev shell in `site/shared/` |
+| `.github/workflows/pages.yml` | Checks on every PR; builds and deploys `site/` to GitHub Pages from `main` |
+| `.github/workflows/package.yml` | Checks and publishes matching version tags to GitHub Packages |
+| `dev/figures.html` | Figure sheet for reviewing presets |
+| `test/` | Validator, preset and motion tests |
 
 ## Contributing
 

@@ -8,3 +8,6 @@ coverage/
 *.log
 .claude/
 .codex/
+site/sdk/
+site/figures/
+site/schema/
