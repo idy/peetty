@@ -318,6 +318,19 @@ describe('whole-footprint perch clearance', () => {
     assert.equal(reach(found, 500, 750, fixture.opts), 500, 'right beside it she does not step closer');
   });
 
+  it('checks every column of a wide footprint, each hit test with a budget of its own', () => {
+    // A figure so wide that one shared budget would run out before her far side was checked.
+    const opts: PerchOptions = { ...fixture.opts, width: 760 };
+    const edge = perch(rect(0, 400, 800, 40));
+    const button = element('button', rect(700, 200, 40, 14));
+    button.hitArea = rect(760, 300, 40, 100);
+    const found = perchOf(asElement(edge), opts)!;
+    assert.ok(found, 'the middle of the edge is clear');
+    assert.equal(clearAt(found, 400, opts), false, 'her far right side would cover it');
+    fixture.now += 300;
+    assert.equal(support(found, 400, opts, true), null);
+  });
+
   it('keeps the box of an element whose contents are hidden, but not its contents', () => {
     const area = element('section', rect(0, 600, 800, 100));
     area.setAttribute('data-peetty', 'avoid');

@@ -157,13 +157,20 @@ function hitAt(x: number, y: number, host: Element, budget: Budget): Element | n
  * with nothing clickable where she would stand on it: in her column at x, or,
  * when `wide`, in columns across her whole footprint. Rect clearance cannot see
  * a click area that reaches past its control's box, such as a stretched link's
- * ::after across a card, so hit tests look for one.
+ * ::after across a card, so hit tests look for one. Without a shared budget each
+ * hit test has its own, and one that cannot finish fails the check.
  */
-function exposed(el: Element, x: number, y: number, body: Footprint, host: Element, budget: Budget = { left: HIT_BUDGET }, wide = false): boolean {
-  const hit = hitAt(x, y + 2, host, budget);
+function exposed(el: Element, x: number, y: number, body: Footprint, host: Element, budget?: Budget, wide = false): boolean {
+  const hit = probe(x, y + 2, host, budget);
   if (!hit || !encloses(el, hit)) return false;
   const across = wide ? columns(x - body.left + INSET, x + body.right - INSET) : [x];
   return !across.some((column) => clickableAbove(column, y, body, host, budget));
+}
+
+/** The element on top at a point, or undefined when the hit test ran out of budget and could not tell. */
+function probe(x: number, y: number, host: Element, budget: Budget = { left: HIT_BUDGET }): Element | null | undefined {
+  const hit = hitAt(x, y, host, budget);
+  return budget.left < 0 ? undefined : hit;
 }
 
 /** Evenly spaced columns from `from` to `to`, at most COLUMN apart. */
@@ -179,8 +186,9 @@ function columns(from: number, to: number): number[] {
 function clickableAbove(x: number, y: number, body: Footprint, host: Element, budget?: Budget): boolean {
   for (const h of [INSET, body.above / 2, body.above - INSET]) {
     if (h < INSET || y - h < 0) continue;
-    const hit = hitAt(x, y - h, host, budget ?? { left: HIT_BUDGET });
-    if (hit && clickable(hit)) return true;
+    const hit = probe(x, y - h, host, budget);
+    // A hit test that cannot finish counts as finding something: what it missed might be clickable.
+    if (hit === undefined || (hit && clickable(hit))) return true;
   }
   return false;
 }
