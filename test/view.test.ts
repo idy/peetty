@@ -155,6 +155,17 @@ describe('figure view frame lifecycle', () => {
     view.destroy();
   });
 
+  it('follows the newest record when one notification holds several', (t) => {
+    const dom = installDOM(t);
+    const view = new FigureView(fixture(), { track: false });
+    const observer = dom.observers[0]!;
+    observer.notify(view.element, false, true);
+    assert.equal(dom.frames.size, 1, 'back on screen by the end of the batch');
+    observer.notify(view.element, true, false);
+    assert.equal(dom.frames.size, 0, 'offscreen by the end of the batch');
+    view.destroy();
+  });
+
   it('does not schedule an initial frame while the document is hidden', (t) => {
     const dom = installDOM(t);
     dom.visibility(true);

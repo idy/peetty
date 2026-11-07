@@ -4,7 +4,7 @@ import { Peetty } from '../src/pet/pet.ts';
 import { AUTONOMOUS_ACTIONS, type Figure, type RigFigure } from '../src/figure/types.ts';
 import type { FigureView } from '../src/figure/view.ts';
 import { PRESETS } from '../src/presets.ts';
-import { floor, type Perch } from '../src/pet/perches.ts';
+import { floor, limits, type Perch, type PerchOptions } from '../src/pet/perches.ts';
 import { planJump, weighted } from '../src/pet/physics.ts';
 import type { Overlay } from '../src/pet/ui.ts';
 import { deferred, ElementStub, installPetDOM, pointer } from './helpers/pet-dom.ts';
@@ -24,6 +24,7 @@ interface Controller {
   walkTo: number;
   until: number;
   perch: Perch | null;
+  perchOptions: PerchOptions;
   jump: unknown;
   press: { id: number } | null;
   lastKey: number;
@@ -52,7 +53,7 @@ async function mountPet(t: Parameters<typeof installPetDOM>[0], options: Constru
 }
 
 function stand(state: Controller, x = 300) {
-  const perch = floor({ host: state.overlay.host, width: state.view.width, height: state.view.height, anchor: state.view.anchor });
+  const perch = floor(state.perchOptions);
   assert.ok(perch);
   state.x = x;
   state.land(perch, 0.2);
@@ -353,9 +354,61 @@ describe('safe surfaces and autonomous walking', () => {
     state.overlay.pet.dispatchEvent(pointer('pointerdown', 1));
     dom.window.dispatchEvent(pointer('pointermove', 1, -200, -300));
     assert.equal(state.mode, 'drag');
-    assert.deepEqual([state.x, state.y], [anchor[0], anchor[1]]);
+    const half = Math.max(anchor[0], width - anchor[0]);
+    assert.deepEqual([state.x, state.y], [half, anchor[1]]);
     dom.window.dispatchEvent(pointer('pointermove', 1, 5000, 5000));
-    assert.deepEqual([state.x, state.y], [1024 - (width - anchor[0]), 768 - (height - anchor[1])]);
+    assert.deepEqual([state.x, state.y], [1024 - half, 768 - (height - anchor[1])]);
+  });
+
+  it('keeps an off-center figure on screen in either facing, and its perch as she turns', async (t) => {
+    const figure = { ...PRESETS.miru, id: 'leaning', anchor: [60, 256] };
+    const { dom, state } = await mountPet(t, { figure });
+    const { width, anchor } = state.view;
+    const [left, right] = [anchor[0], width - anchor[0]];
+    assert.ok(right > left + 10, 'her feet are left of center');
+    // She turns by mirroring around her feet: at either limit, facing either way, all of her is on screen.
+    const fit = limits(state.perchOptions)!;
+    for (const x of [fit.left, fit.right]) {
+      for (const [before, after] of [[left, right], [right, left]] as const) {
+        assert.ok(x - before >= -1e-9 && x + after <= 1024 + 1e-9, `fits at ${x}`);
+      }
+    }
+    dom.frame(300);
+    const ground = stand(state, 500);
+    state.until = state.clock / 1000 + 60;
+    for (const facing of [-1, 1, -1] as const) {
+      state.view.setFacing(facing);
+      for (let i = 0; i < 20; i++) dom.frame(20);
+      assert.equal(state.mode, 'ground', 'turning around does not drop her');
+      assert.equal(state.perch?.el, ground.el);
+    }
+  });
+
+  it('lands on a lower edge crossed in the same frame when the higher one is covered', async (t) => {
+    const { dom, state } = await mountPet(t);
+    const shelf = (top: number) => {
+      const el = dom.document.createElement('div');
+      el.setAttribute('data-peetty', 'perch');
+      el.rect = { left: 300, top, width: 300, height: 40 };
+      dom.document.body.append(el);
+      return el as unknown as Element;
+    };
+    const high = shelf(400);
+    const low = shelf(440);
+    dom.frame(300);
+    const perches = state.scan(true);
+    for (const el of [high, low]) assert.ok(perches.some((p) => p.el === el));
+    // A menu opens over the higher edge after the scan.
+    const menu = dom.document.createElement('div');
+    menu.rect = { left: 0, top: 380, width: 1024, height: 40 };
+    dom.document.body.append(menu);
+    state.startFall();
+    state.x = 450;
+    state.y = 390;
+    state.vy = 2400;
+    dom.frame(50); // One frame carries her past both edges.
+    assert.equal(state.mode, 'ground');
+    assert.equal(state.perch?.el, low);
   });
 
   it('does not leap to a perch whose arc would leave the top of the viewport', async (t) => {

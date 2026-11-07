@@ -87,8 +87,10 @@ export function installDOM(t: TestContext, options: { intersectionObserver?: boo
       this.targets.clear();
     }
 
-    notify(target: Element, isIntersecting: boolean): void {
-      this.callback([{ target, isIntersecting } as IntersectionObserverEntry], this as unknown as IntersectionObserver);
+    /** Delivers one notification holding a record per state, oldest first. */
+    notify(target: Element, ...states: boolean[]): void {
+      const records = states.map((isIntersecting) => ({ target, isIntersecting }) as IntersectionObserverEntry);
+      this.callback(records, this as unknown as IntersectionObserver);
     }
   }
 

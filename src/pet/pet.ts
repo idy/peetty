@@ -269,8 +269,20 @@ export class Peetty {
     });
   }
 
+  /**
+   * How far she reaches to either side of her feet. She turns by mirroring
+   * around them, which swaps the two sides of an off-center figure, so this
+   * covers both facings.
+   */
+  private get halfWidth(): number {
+    const { width, anchor } = this.view!;
+    return Math.max(anchor[0], width - anchor[0]);
+  }
+
+  /** Her footprint in either facing, so it, and every placement remembered for it, holds as she turns. */
   private get perchOptions(): PerchOptions {
-    return { host: this.overlay!.host, width: this.view!.width, height: this.view!.height, anchor: this.view!.anchor };
+    const half = this.halfWidth;
+    return { host: this.overlay!.host, width: 2 * half, height: this.view!.height, anchor: [half, this.view!.anchor[1]] };
   }
 
   /** Drops in from the top of the viewport above a good perch. */
@@ -478,12 +490,16 @@ export class Peetty {
     }
     // A fall frightens her once she is on the way down; a throw carries her up calmly first.
     this.view!.motion.setFright(!this.calmFall && this.vy >= 0);
-    const hit = crossing(this.scan(), this.x, fromY, this.y, opts);
-    if (hit) {
-      const safe = support(hit, this.x, opts, true);
-      if (safe) return this.land(safe, impact(this.vy));
-      this.scanned = -Infinity;
-    }
+    // She lands on the highest edge crossed this frame that still holds her. One that
+    // no longer does sends her on to the next edge down and makes the last scan stale.
+    let stale = false;
+    const hit = crossing(this.scan(), this.x, fromY, this.y, opts, (perch) => {
+      const safe = support(perch, this.x, opts, true);
+      if (!safe) stale = true;
+      return safe;
+    });
+    if (stale) this.scanned = -Infinity;
+    if (hit) return this.land(hit, impact(this.vy));
     // The viewport bottom always catches her; over page content she only stays briefly.
     const ground = this.y >= fit.bottom && bottom(opts, this.x);
     if (ground) this.land(ground, impact(this.vy));
@@ -774,9 +790,11 @@ export class Peetty {
     if (this.mode !== 'ground' && this.mode !== 'hang') return;
     const onIt = this.perch?.el === field || (this.perch?.el ? field.contains(this.perch.el) : false);
     const r = field.getBoundingClientRect();
-    const box = this.overlay!.pet.firstElementChild?.getBoundingClientRect();
+    // Her box in either facing, as perch clearance sees it.
+    const half = this.halfWidth;
+    const top = this.y - this.view!.anchor[1];
     const pad = 10;
-    const overlaps = !!box && box.right > r.left - pad && box.left < r.right + pad && box.bottom > r.top - pad && box.top < r.bottom + pad;
+    const overlaps = this.x + half > r.left - pad && this.x - half < r.right + pad && top + this.view!.height > r.top - pad && top < r.bottom + pad;
     if (!onIt && !overlaps) return;
     this.view!.motion.exclaim();
     if (inUse(field)) this.say(pickOne(this.text.moved), 1.6);

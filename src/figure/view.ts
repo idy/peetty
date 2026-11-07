@@ -90,9 +90,11 @@ export class FigureView {
       if (typeof IntersectionObserver === 'function') {
         this.observer = new IntersectionObserver((entries) => {
           if (this.destroyed) return;
-          const entry = entries.find((item) => item.target === this.element);
-          if (!entry) return;
-          this.intersecting = entry.isIntersecting;
+          // Records arrive oldest first, and one notification may hold several for her.
+          let latest: IntersectionObserverEntry | null = null;
+          for (const entry of entries) if (entry.target === this.element) latest = entry;
+          if (!latest) return;
+          this.intersecting = latest.isIntersecting;
           this.syncPlayback();
         });
         this.observer.observe(this.element);

@@ -243,6 +243,15 @@ describe('whole-footprint perch clearance', () => {
     assert.ok(found);
     assert.ok(found.left > 280 || found.right < 120);
   });
+
+  it('accepts a component host whose open shadow root paints its top edge', () => {
+    const card = perch(rect(0, 400, 400, 40));
+    card.shadowRoot = new TestShadow(card);
+    card.shadowRoot.append(new TestElement('DIV', rect(0, 400, 400, 40)));
+    const found = perchOf(asElement(card), fixture.opts);
+    assert.ok(found, 'the hit test finds its shadow content, which belongs to the host');
+    assert.ok(support(found, 200, fixture.opts, true));
+  });
 });
 
 describe('safe viewport floor', () => {
@@ -404,6 +413,21 @@ describe('crossing', () => {
     fixture.styled.clear();
     assert.equal(crossing(perches, 200, 290, 400, fixture.opts)?.el, asElement(middle));
     for (const el of [beside, low]) assert.ok(!fixture.styled.has(el), 'not refreshed');
+  });
+
+  it('moves on to the next crossed edge down when one does not hold her', () => {
+    const high = perch(rect(100, 300, 300, 30));
+    const middle = perch(rect(100, 350, 300, 30));
+    perch(rect(0, 550, 800, 30));
+    const perches = findPerches(fixture.opts);
+    const tried: (Element | null)[] = [];
+    const landed = crossing(perches, 200, 290, 400, fixture.opts, (p) => {
+      tried.push(p.el);
+      return p.el === asElement(high) ? null : p;
+    });
+    assert.equal(landed?.el, asElement(middle));
+    assert.deepEqual(tried, [asElement(high), asElement(middle)]);
+    assert.equal(crossing(perches, 200, 290, 400, fixture.opts, () => null), null, 'nothing crossed holds her');
   });
 });
 

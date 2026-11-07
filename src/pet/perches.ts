@@ -48,6 +48,8 @@ const MAX_ANCESTORS = 64;
 const MAX_CANDIDATES = 160;
 const MAX_PERCHES = 40;
 const HIT_BUDGET = 128;
+/** Open shadow roots a hit test descends through. */
+const SHADOW_DEPTH = 16;
 /** Below this effective opacity, or this height, an element cannot carry her. */
 const MIN_OPACITY = 0.2;
 const MIN_HEIGHT = 14;
@@ -109,7 +111,7 @@ export function topAt(x: number, y: number, host: Element): Element | null {
 function hitAt(x: number, y: number, host: Element, budget: Budget): Element | null {
   let root: Document | ShadowRoot = document;
   let last: Element | null = null;
-  for (let depth = 0; depth < 16; depth++) {
+  for (let depth = 0; depth < SHADOW_DEPTH; depth++) {
     if (!spend(budget) || typeof root.elementsFromPoint !== 'function') return last;
     const hits: Element[] = root.elementsFromPoint(x, y);
     let hit: Element | null = null;
@@ -131,7 +133,21 @@ function hitAt(x: number, y: number, host: Element, budget: Budget): Element | n
 /** Whether el's top edge at y is on top at x, not covered by a menu or dialog. */
 function exposed(el: Element, x: number, y: number, host: Element, budget: Budget = { left: HIT_BUDGET }): boolean {
   const hit = hitAt(x, y + 2, host, budget);
-  return !!hit && (hit === el || el.contains(hit));
+  return !!hit && encloses(el, hit);
+}
+
+/**
+ * Whether node is el or inside it, including inside open shadow roots: a hit
+ * test returns the innermost element, and contains() stops at a shadow root.
+ */
+function encloses(el: Element, node: Element): boolean {
+  let current: Element | null = node;
+  for (let depth = 0; current && depth <= SHADOW_DEPTH; depth++) {
+    if (el.contains(current)) return true;
+    const root = current.getRootNode();
+    current = 'host' in root ? (root as ShadowRoot).host : null;
+  }
+  return false;
 }
 
 export function isEditable(el: Element | null): boolean {
@@ -456,12 +472,17 @@ function crosses(edge: Edge, x: number, fromY: number, toY: number): boolean {
 }
 
 /**
- * Where a body falling at x from fromY to toY lands this frame: the perch that
- * physics.landing() picks among all refreshed perches (the highest crossed
- * edge under x, ties in input order). One geometry read per element finds the
- * crossed edges; only those are refreshed, highest first.
+ * Where a body falling at x from fromY to toY lands this frame: the highest
+ * crossed edge under x that `holds` accepts, ties in input order. By default it
+ * accepts every edge, which picks the perch physics.landing() picks among all
+ * refreshed perches; a caller that rechecks each edge returns null to move on to
+ * the next one down. One geometry read per element finds the crossed edges;
+ * only those are refreshed, highest first, until one holds.
  */
-export function crossing(perches: readonly Perch[], x: number, fromY: number, toY: number, opts: PerchOptions): Perch | null {
+export function crossing(
+  perches: readonly Perch[], x: number, fromY: number, toY: number, opts: PerchOptions,
+  holds: (perch: Perch) => Perch | null = (perch) => perch,
+): Perch | null {
   const crossed: { perch: Perch; y: number }[] = [];
   for (const perch of perches) {
     // A refresh keeps the edge's y and can only narrow this span.
@@ -473,7 +494,8 @@ export function crossing(perches: readonly Perch[], x: number, fromY: number, to
   crossed.sort((a, b) => a.y - b.y);
   for (const { perch } of crossed) {
     const live = refresh(perch, opts);
-    if (live && crosses(live, x, fromY, toY)) return live;
+    const landed = live && crosses(live, x, fromY, toY) ? holds(live) : null;
+    if (landed) return landed;
   }
   return null;
 }
