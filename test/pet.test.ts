@@ -37,6 +37,7 @@ interface Controller {
   scan: (force?: boolean) => Perch[];
   place: () => void;
   makeRoom: (field: Element) => void;
+  walkOver: (target: number) => void;
 }
 const controller = (pet: Peetty) => pet as unknown as Controller;
 const response = (figure: Figure) => ({ ok: true, json: async () => figure }) as Response;
@@ -316,6 +317,44 @@ describe('safe surfaces and autonomous walking', () => {
     assert.equal(state.perch?.el, null);
     assert.ok(state.x >= state.perch!.left && state.x <= state.perch!.right);
     assert.ok(state.x - state.view.anchor[0] > 400, 'clear of the button');
+  });
+
+  it('fades out instead of walking or leaping off a covered spot when motion is reduced', async (t) => {
+    const { dom, state } = await mountPet(t);
+    Object.defineProperty(state.view, 'reducedMotion', { get: () => true });
+    const wall = dom.document.createElement('button');
+    wall.rect = { left: 0, top: 0, width: 400, height: 768 };
+    dom.document.body.append(wall);
+    dom.frame(300);
+    state.scanned = -Infinity;
+    state.x = 380;
+    state.y = 700;
+    state.vx = 0;
+    state.vy = 400;
+    for (let i = 0; state.mode === 'fall' && i < 50; i++) dom.frame(20);
+    assert.equal(state.perch?.clear, false, 'caught by the viewport bottom over the button');
+    // Read through a function: the loop condition would narrow the field inside the loop.
+    const mode = () => state.mode;
+    let moved = false;
+    for (let i = 0; mode() === 'ground' && i < 400; i++) {
+      dom.frame(20);
+      moved ||= state.action === 'walk' || mode() === 'jump';
+    }
+    assert.equal(moved, false, 'no walk or leap');
+    assert.equal(state.mode, 'paused');
+    assert.ok(state.overlay.pet.classList.contains('gone'), 'she fades out where she stands');
+  });
+
+  it('takes the last step of a walk that is too short to walk, so a narrow clear spot is reached', async (t) => {
+    const { dom, state } = await mountPet(t);
+    dom.frame(300);
+    stand(state, 300);
+    state.walkOver(301);
+    assert.equal(state.x, 301, 'a step too short to walk is taken at once');
+    state.walkOver(400);
+    assert.equal(state.action, 'walk');
+    for (let i = 0; state.action === 'walk' && i < 400; i++) dom.frame(20);
+    assert.equal(state.x, 400, 'a walk ends exactly where it was going');
   });
 
   it('drops off clear floor that becomes covered under her, and moves on soon after', async (t) => {

@@ -380,8 +380,10 @@ function scan(opts: PerchOptions): Scan {
     const rect = el.getBoundingClientRect();
     const visible = style.visibility === 'visible';
     const avoid = context.avoid || el.getAttribute('data-peetty') === 'avoid';
-    // Paint containment keeps every descendant inside, so offscreen bulk can be skipped.
-    const clip = /\b(paint|strict|content)\b/.test(style.contain) ? intersection(context.clip, rect) : context.clip;
+    // Paint containment keeps every descendant inside, so offscreen bulk can be skipped. It needs a
+    // box of its own: contents and inline boxes contain nothing, and their rects may be empty.
+    const contained = style.display !== 'contents' && style.display !== 'inline' && /\b(paint|strict|content)\b/.test(style.contain);
+    const clip = contained ? intersection(context.clip, rect) : context.clip;
     if (empty(clip)) continue;
     // Overflow clips in-flow content; positioned content escapes the overflow clips
     // below its containing block. A contents box is never positioned.

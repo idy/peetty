@@ -412,7 +412,11 @@ export class Peetty {
       this.walkTo = clamp(this.walkTo, live.left, live.right);
       const dx = this.walkTo - this.x;
       this.view!.motion.setWalkSpeed(this.pace * this.view!.unitsPerPixel);
-      if (Math.abs(dx) < 2 || now / 1000 >= this.until) this.setAction('idle', rand(0.8, 2));
+      if (Math.abs(dx) < 2 || now / 1000 >= this.until) {
+        // A last step too short to walk is taken at once, so even a narrow clear spot is reached.
+        if (Math.abs(dx) < 2) this.x = this.walkTo;
+        this.setAction('idle', rand(0.8, 2));
+      }
       else {
         this.face(Math.sign(dx));
         this.x += Math.sign(dx) * Math.min(Math.abs(dx), this.pace * dt);
@@ -508,8 +512,13 @@ export class Peetty {
     if (ground) this.land(ground, impact(this.vy));
   }
 
-  /** Off the uncleared viewport bottom: walk to clear floor nearby, else hop to a perch, else step out of view. */
+  /**
+   * Off the uncleared viewport bottom: walk to clear floor nearby, else hop to a
+   * perch, else step out of view. With reduced motion she only fades out of view,
+   * and comes back the usual way.
+   */
   private leaveEdge() {
+    if (this.view!.reducedMotion) return this.park(true);
     const clear = floor(this.perchOptions);
     if (clear) {
       const margin = Math.min(12, (clear.right - clear.left) / 2);
@@ -595,7 +604,11 @@ export class Peetty {
   /** Walks along her current perch toward `target`, stopping short of anything clickable on the way. */
   private walkOver(target: number) {
     const end = this.perch ? reach(this.perch, this.x, target, this.perchOptions) : target;
-    if (Math.abs(end - this.x) < 2) return this.setAction('idle', rand(1.5, 3));
+    if (Math.abs(end - this.x) < 2) {
+      // Too short to walk: the step is taken at once, so even a narrow clear spot is reached.
+      this.x = end;
+      return this.setAction('idle', rand(1.5, 3));
+    }
     this.walkTo = end;
     this.setAction('walk', Math.abs(end - this.x) / this.pace + 0.5);
   }

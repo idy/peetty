@@ -88,16 +88,19 @@ export class FigureView {
     if (!this.manual) {
       document.addEventListener('visibilitychange', this.onVisibility);
       if (typeof IntersectionObserver === 'function') {
+        // Watch the drawing itself: turning mirrors it around her feet, which can carry
+        // much of it out of the wrapper's box, and so into view while the box is not.
+        const drawing = this.renderer.svg;
         this.observer = new IntersectionObserver((entries) => {
           if (this.destroyed) return;
           // Records arrive oldest first, and one notification may hold several for her.
           let latest: IntersectionObserverEntry | null = null;
-          for (const entry of entries) if (entry.target === this.element) latest = entry;
+          for (const entry of entries) if (entry.target === drawing) latest = entry;
           if (!latest) return;
           this.intersecting = latest.isIntersecting;
           this.syncPlayback();
         });
-        this.observer.observe(this.element);
+        this.observer.observe(drawing);
       }
       this.syncPlayback();
     }

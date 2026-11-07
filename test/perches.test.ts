@@ -709,6 +709,16 @@ describe('bounded discovery and shared rechecks', () => {
     assert.equal(floor(fixture.opts), null, 'positioned, it holds the absolute button but not the fixed one');
   });
 
+  it('ignores paint containment on a wrapper with no box of its own', () => {
+    const wrapper = element('div', empty());
+    Object.assign(wrapper.style, { display: 'contents', contain: 'paint' });
+    const edge = perch(rect(0, 400, 400, 40), wrapper);
+    const content = element('p', rect(0, 620, 800, 20), wrapper);
+    text(content, content.bounds);
+    assert.ok(findPerches(fixture.opts).some((found) => found.el === asElement(edge)), 'its children are still perches');
+    assert.equal(floor(fixture.opts), null, 'and their text still blocks the floor');
+  });
+
   it('shares text measurement across candidates, floor and rechecks', () => {
     const edge = perch();
     const content = element('p', rect(600, 10, 100, 14));
