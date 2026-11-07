@@ -135,6 +135,8 @@ Pull requests use the [shared GizClaw Codex reviewer](https://github.com/GizClaw
 
 Once the caller is on `main`, opening or updating a ready PR starts a review automatically. A new PR comment with `@codex review` on its own line requests another review; **Actions → OpenAI PR review → Run workflow** accepts a PR number as a manual fallback. Linked-Issue updates also refresh the associated open PRs. Results appear on the reviewed commit as `OpenAI PR Review`, `OpenAI Issue Review`, and `OpenAI Code Review`. These checks complement the project's tests and human review; closing Issues are optional.
 
+For a CI smoke test, use a temporary documentation-only PR and close it without merging after its checks succeed.
+
 ## License
 
 [MIT](LICENSE)
