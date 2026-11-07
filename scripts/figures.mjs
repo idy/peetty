@@ -7,11 +7,8 @@
 //
 // `--check` writes nothing and fails if any generated file is out of date.
 import { readdir, readFile, writeFile } from 'node:fs/promises';
+import { CATALOG_FORMAT, FIGURE_CATALOG, PRESET_IDS } from '../src/catalog.ts';
 import { validateFigure } from '../src/figure/validate.ts';
-
-/** Bundled into the SDK; every other catalog figure loads on demand. */
-export const PRESETS = ['miru', 'koharu', 'xiaoxiao', 'riley', 'amara', 'elsie'];
-export const CATALOG_URL = 'https://peetty.idy.dev/figures/';
 
 const check = process.argv.includes('--check');
 const dir = new URL('../figures/', import.meta.url);
@@ -58,14 +55,15 @@ for (const file of files) {
     author: figure.author,
     license: figure.license,
     renderer: figure.renderer,
-    bundled: PRESETS.includes(figure.id),
-    url: `${CATALOG_URL}${file}`,
+    // Bundled into the SDK; every other catalog figure loads on demand.
+    bundled: PRESET_IDS.includes(figure.id),
+    url: `${FIGURE_CATALOG}${file}`,
   });
 }
 // Bundled presets first in their own order, then the rest by id.
-const rank = (e) => (e.bundled ? PRESETS.indexOf(e.id) : PRESETS.length);
+const rank = (e) => (e.bundled ? PRESET_IDS.indexOf(e.id) : PRESET_IDS.length);
 entries.sort((a, b) => rank(a) - rank(b) || a.id.localeCompare(b.id));
-await output('index.json', `${JSON.stringify({ format: 'peetty.catalog', version: 1, figures: entries }, null, 2)}\n`);
+await output('index.json', `${JSON.stringify({ format: CATALOG_FORMAT, version: 1, figures: entries }, null, 2)}\n`);
 if (!check) console.log(`figures/index.json  ${entries.length} figures`);
 
 if (problems.length) {

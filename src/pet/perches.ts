@@ -1,28 +1,33 @@
 import type { Edge } from './physics.ts';
 
 /**
- * Finding places to stand: the visible top edges of page elements that have
- * a visible edge (a background, border, shadow or a control), with free
- * space above them. Text and controls above an edge are never covered.
+ * Places to stand: the visible top edges of page elements, and the viewport
+ * bottom, wherever her whole figure fits without covering text, controls or
+ * areas the page asks her to avoid.
  */
 
+/** A place to stand; left and right bound her anchor (feet) on it. */
 export interface Perch extends Edge {
-  /** The element whose top edge this is; null for the bottom of the viewport. */
+  /** The supporting element; null for the bottom of the viewport. */
   el: Element | null;
   /** A form field: she may sit or lie on it while it is not in use, never walk. */
   input: boolean;
   /** Marked by the page with data-peetty="perch". */
   preferred: boolean;
-  /** The free span relative to the element's left edge, so it follows the element. */
+  /** False only for the catch-all viewport bottom over page content: it holds her, but is not a place to stay. */
+  clear: boolean;
+  /** The anchor span relative to the element's left edge, so it follows the element. */
   offset: [number, number];
 }
 
 export interface PerchOptions {
   /** Our own overlay, ignored during hit testing. */
   host: Element;
-  /** Figure size in CSS pixels. */
+  /** Figure size in CSS pixels, including transparent margins. */
   width: number;
   height: number;
+  /** Feet from the figure's top-left corner; defaults to bottom center. */
+  anchor?: [number, number];
 }
 
 const INTERACTIVE = [
@@ -34,33 +39,121 @@ const EDITABLE = 'input, textarea, select, [contenteditable]:not([contenteditabl
 const SOLID_TAGS = new Set(['IMG', 'VIDEO', 'CANVAS', 'SVG', 'BUTTON', 'INPUT', 'TEXTAREA', 'SELECT', 'HR', 'PICTURE']);
 const MEDIA_TAGS = new Set(['IMG', 'VIDEO', 'CANVAS', 'SVG', 'PICTURE', 'IFRAME']);
 const SKIP_INPUTS = new Set(['password', 'hidden', 'checkbox', 'radio', 'range', 'color', 'file', 'button', 'submit', 'reset', 'image']);
+const CACHE_MS = 250;
+const MAX_NODES = 6000;
+const MAX_WORK = 40_000;
+const MAX_RECTS = 2048;
+const MAX_TEXT = 16_384;
+const MAX_ANCESTORS = 64;
+const MAX_CANDIDATES = 160;
+const MAX_PERCHES = 40;
+const HIT_BUDGET = 128;
+/** Below this effective opacity, or this height, an element cannot carry her. */
+const MIN_OPACITY = 0.2;
+const MIN_HEIGHT = 14;
+const PAD = 3;
+const EPSILON = 0.5;
 
-/** The topmost page element at a point, ignoring the overlay. */
+type Box = Pick<DOMRectReadOnly, 'left' | 'right' | 'top' | 'bottom' | 'width' | 'height'>;
+interface Budget { left: number }
+/** The figure's extents around its anchor; key identifies it for remembered placements. */
+interface Footprint { left: number; right: number; above: number; below: number; key: string }
+/** Something she must not cover; owner is the element whose own box it is, null for text. */
+interface Obstacle { box: Box; owner: Element | null; avoid: boolean }
+interface Scan {
+  time: number;
+  vw: number;
+  vh: number;
+  complete: boolean;
+  /** Work left once collection finished; every lookup on the snapshot starts with this much. */
+  allowance: number;
+  /** The current lookup's own work budget. */
+  budget: Budget;
+  obstacles: Obstacle[];
+  candidates: Element[];
+  spans: Map<Element | null, { key: string; span: [number, number] | null }>;
+}
+interface Metrics { rect: DOMRect; input: boolean; preferred: boolean }
+interface Placement { key: string; width: number; height: number; vw: number; vh: number }
+interface Context { opacity: number; avoid: boolean; clip: Box; visible: boolean }
+const scans = new WeakMap<Element, Scan>();
+const placements = new WeakMap<Perch, Placement>();
+
+function spend(budget: Budget, amount = 1): boolean {
+  budget.left -= amount;
+  return budget.left >= 0;
+}
+
+function footprint(opts: PerchOptions): Footprint | null {
+  const [left, above] = opts.anchor ?? [opts.width / 2, opts.height];
+  if (![opts.width, opts.height, left, above].every(Number.isFinite) || opts.width <= 0 || opts.height <= 0) return null;
+  return { left, right: opts.width - left, above, below: opts.height - above, key: `${opts.width}:${opts.height}:${left}:${above}` };
+}
+
+function limitsOf(body: Footprint) {
+  const fit = { left: body.left, right: innerWidth - body.right, top: body.above, bottom: innerHeight - Math.max(0, body.below) };
+  return fit.left <= fit.right && fit.top <= fit.bottom ? fit : null;
+}
+
+function parentOf(el: Element): Element | null {
+  if (el.parentElement) return el.parentElement;
+  const root = el.getRootNode();
+  return 'host' in root ? (root as ShadowRoot).host : null;
+}
+
+/** The topmost page element at a point, including open shadow trees. */
 export function topAt(x: number, y: number, host: Element): Element | null {
-  for (const el of document.elementsFromPoint(x, y)) {
-    if (el === host || host.contains(el)) continue;
-    return el;
+  return hitAt(x, y, host, { left: HIT_BUDGET });
+}
+
+function hitAt(x: number, y: number, host: Element, budget: Budget): Element | null {
+  let root: Document | ShadowRoot = document;
+  let last: Element | null = null;
+  for (let depth = 0; depth < 16; depth++) {
+    if (!spend(budget) || typeof root.elementsFromPoint !== 'function') return last;
+    const hits: Element[] = root.elementsFromPoint(x, y);
+    let hit: Element | null = null;
+    for (let i = 0; i < Math.min(hits.length, 64); i++) {
+      if (!spend(budget)) return null;
+      const el: Element = hits[i]!;
+      if (el === host || host.contains(el)) continue;
+      hit = el;
+      break;
+    }
+    if (!hit || hit === last) return last ?? hit;
+    last = hit;
+    if (!hit.shadowRoot || typeof hit.shadowRoot.elementsFromPoint !== 'function') return hit;
+    root = hit.shadowRoot;
   }
   return null;
+}
+
+/** Whether el's top edge at y is on top at x, not covered by a menu or dialog. */
+function exposed(el: Element, x: number, y: number, host: Element, budget: Budget = { left: HIT_BUDGET }): boolean {
+  const hit = hitAt(x, y + 2, host, budget);
+  return !!hit && (hit === el || el.contains(hit));
 }
 
 export function isEditable(el: Element | null): boolean {
   return !!el && el.matches(EDITABLE);
 }
 
-/** True when the element is in use: focused, or containing the focus. */
+/** Resolve focus in the element's own tree, including focus inside open shadows. */
 export function inUse(el: Element | null): boolean {
-  const active = document.activeElement;
-  return !!el && !!active && active !== document.body && (el === active || el.contains(active));
-}
-
-function avoided(el: Element): boolean {
-  return !!el.closest('[data-peetty="avoid"]');
+  if (!el) return false;
+  if (el.matches(':focus-within')) return true;
+  const root = el.getRootNode() as Document | ShadowRoot;
+  let active = root.activeElement;
+  for (let depth = 0; active && depth < MAX_ANCESTORS; depth++) {
+    if (active !== document.body && (active === el || el.contains(active))) return true;
+    active = active.shadowRoot?.activeElement ?? null;
+  }
+  return false;
 }
 
 function visibleEdge(el: Element, style: CSSStyleDeclaration): boolean {
   if (SOLID_TAGS.has(el.tagName.toUpperCase())) return true;
-  if ((el as HTMLElement).dataset?.peetty === 'perch') return true;
+  if (el.getAttribute('data-peetty') === 'perch') return true;
   if (style.backgroundImage !== 'none') return true;
   if (style.boxShadow !== 'none') return true;
   if (parseFloat(style.borderTopWidth) > 0 && style.borderTopStyle !== 'none' && !transparent(style.borderTopColor)) return true;
@@ -75,136 +168,312 @@ function transparent(color: string): boolean {
   return parts.length === 4 && parseFloat(parts[3]!) < 0.08;
 }
 
-/** Text or a control at a point, which she must not cover. */
-function occupied(x: number, y: number, host: Element): boolean {
-  const el = topAt(x, y, host);
-  if (!el) return false;
-  if (el.closest(INTERACTIVE)) return true;
-  if (MEDIA_TAGS.has(el.tagName.toUpperCase())) return true;
-  let checked = 0;
-  for (const node of el.childNodes) {
-    if (node.nodeType !== Node.TEXT_NODE || !node.textContent?.trim()) continue;
-    if (++checked > 24) break;
-    const range = document.createRange();
-    range.selectNodeContents(node);
-    for (const r of range.getClientRects()) {
-      if (x >= r.left - 3 && x <= r.right + 3 && y >= r.top - 3 && y <= r.bottom + 3) return true;
-    }
-  }
-  return false;
+/** Display rules that remove an element together with everything inside it. */
+function hides(style: CSSStyleDeclaration): boolean {
+  return style.display === 'none' || style.contentVisibility === 'hidden';
 }
 
-/** The free stretch of an edge, or null if too little of it is free. */
-function freeSpan(left: number, right: number, y: number, opts: PerchOptions, input: boolean): [number, number] | null {
-  const step = 14;
-  const heights = input ? [6, opts.height * 0.45] : [6, opts.height * 0.4, opts.height * 0.85];
-  let best: [number, number] | null = null;
-  let start: number | null = null;
-  for (let x = left; x <= right + 0.1; x += step) {
-    const free = heights.every((h) => y - h < 0 || !occupied(x, y - h, opts.host));
-    if (free && start === null) start = x;
-    if ((!free || x + step > right + 0.1) && start !== null) {
-      const end = free ? x : x - step;
-      if (!best || end - start > best[1] - best[0]) best = [start, end];
-      start = null;
-    }
-  }
-  const need = input ? opts.width * 0.5 : opts.width * 0.7;
-  return best && best[1] - best[0] >= need ? best : null;
+/** Whether an element's own box can carry her: visible, with a visible edge, and tall enough. */
+function carries(el: Element, style: CSSStyleDeclaration, rect: Box): boolean {
+  return style.visibility === 'visible' && rect.height >= MIN_HEIGHT && visibleEdge(el, style);
 }
 
-/** Checks an element's top edge; returns a perch or null. */
-export function perchOf(el: Element, opts: PerchOptions): Perch | null {
-  const vw = innerWidth;
-  const vh = innerHeight;
-  if (el === document.body || el === document.documentElement || avoided(el)) return null;
-  if (el === opts.host || opts.host.contains(el)) return null;
-  const rect = el.getBoundingClientRect();
-  if (rect.width < opts.width * 0.8 || rect.height < 14) return null;
-  if (rect.top < opts.height * 0.6 || rect.top > vh - 8) return null;
-  if (rect.right < 20 || rect.left > vw - 20) return null;
+/** Cheap, bounded eligibility checks also used between full clearance checks. */
+function metrics(el: Element, opts: PerchOptions, body: Footprint): Metrics | null {
+  if (!el.isConnected || el === document.body || el === document.documentElement || el === opts.host || opts.host.contains(el)) return null;
   const style = getComputedStyle(el);
-  if (style.visibility !== 'visible' || Number(style.opacity) < 0.2) return null;
-  if (!visibleEdge(el, style)) return null;
-
+  const rect = el.getBoundingClientRect();
+  if (!finiteBox(rect) || !carries(el, style, rect) || rect.width < opts.width * 0.8) return null;
+  if (rect.top - body.above < 0 || rect.top + body.below > innerHeight - 1 || rect.right <= 0 || rect.left >= innerWidth) return null;
+  let opacity = 1;
+  let ancestor: Element | null = el;
+  for (let depth = 0; ancestor; depth++) {
+    if (depth >= MAX_ANCESTORS) return null;
+    const appearance = ancestor === el ? style : getComputedStyle(ancestor);
+    if (ancestor.getAttribute('data-peetty') === 'avoid' || hides(appearance)) return null;
+    opacity *= Number(appearance.opacity);
+    if (opacity < MIN_OPACITY) return null;
+    ancestor = parentOf(ancestor);
+  }
   const input = isEditable(el);
-  if (input) {
-    if (el instanceof HTMLInputElement && SKIP_INPUTS.has(el.type)) return null;
-    if (inUse(el) || (el as HTMLInputElement).disabled) return null;
-  }
-
-  const left = Math.max(rect.left, 0) + 6;
-  const right = Math.min(rect.right, vw) - 6;
-  // The edge must actually be on top at its middle, not covered by something.
-  const mid = (left + right) / 2;
-  const hit = topAt(mid, rect.top + 2, opts.host);
-  if (!hit || (hit !== el && !el.contains(hit))) return null;
-
-  const span = freeSpan(left, right, rect.top, opts, input);
-  if (!span) return null;
-  return {
-    el, left: span[0], right: span[1], y: rect.top, input,
-    preferred: (el as HTMLElement).dataset?.peetty === 'perch',
-    offset: [span[0] - rect.left, span[1] - rect.left],
-  };
+  if (input && ((el.tagName === 'INPUT' && SKIP_INPUTS.has((el as HTMLInputElement).type)) || inUse(el) || el.matches(':disabled') || (el as HTMLInputElement).disabled)) return null;
+  return { rect, input, preferred: el.getAttribute('data-peetty') === 'perch' };
 }
 
-/** The bottom of the viewport, always available. */
-export function floor(): Perch {
-  return { el: null, left: 0, right: innerWidth, y: innerHeight, input: false, preferred: false, offset: [0, innerWidth] };
+function finiteBox(rect: Box): boolean {
+  return [rect.left, rect.right, rect.top, rect.bottom, rect.width, rect.height].every(Number.isFinite);
 }
 
-/** Scans the visible page for perches. Bounded: about 150 hit tests. */
-export function findPerches(opts: PerchOptions): Perch[] {
-  const vw = innerWidth;
-  const vh = innerHeight;
-  const seen = new Set<Element>();
-  const candidates: Element[] = [...document.querySelectorAll('[data-peetty="perch"]')];
-  const cols = Math.max(4, Math.min(12, Math.round(vw / 110)));
-  const rows = Math.max(4, Math.min(10, Math.round(vh / 90)));
-  for (let i = 0; i < cols; i++) {
-    for (let j = 0; j < rows; j++) {
-      const x = ((i + 0.5) / cols) * vw;
-      const y = ((j + 0.5) / rows) * vh;
-      let depth = 0;
-      for (const el of document.elementsFromPoint(x, y)) {
-        if (el === opts.host || opts.host.contains(el)) continue;
-        if (++depth > 5) break;
-        candidates.push(el);
-      }
-    }
-  }
-  const perches: Perch[] = [];
-  for (const el of candidates) {
-    if (seen.has(el)) continue;
-    seen.add(el);
-    const perch = perchOf(el, opts);
-    if (perch) perches.push(perch);
-    if (perches.length >= 40) break;
-  }
-  return [...perches, floor()];
+function box(left: number, top: number, right: number, bottom: number): Box {
+  return { left, top, right, bottom, width: right - left, height: bottom - top };
+}
+
+function intersection(a: Box, b: Box): Box {
+  return box(Math.max(a.left, b.left), Math.max(a.top, b.top), Math.min(a.right, b.right), Math.min(a.bottom, b.bottom));
+}
+
+function empty(rect: Box): boolean {
+  return rect.width <= 0 || rect.height <= 0;
 }
 
 /**
- * Re-reads a perch's live position as the page scrolls or changes; null when
- * it is gone, hidden, out of view, or a field that came into use.
+ * A snapshot is shared by all candidates, the floor and cadence-based rechecks.
+ * Each call is one lookup: it reuses the snapshot but gets its own work budget,
+ * so a discovery that spends its budget cannot fail the rechecks that follow it.
  */
-export function refresh(perch: Perch): Perch | null {
-  if (!perch.el) return floor();
-  const el = perch.el;
-  // A field coming into use is handled by the pet (it hops away), not by dropping her.
-  if (!el.isConnected || avoided(el)) return null;
-  const rect = el.getBoundingClientRect();
-  if (!rect.width || !rect.height || rect.top < 0 || rect.top > innerHeight) return null;
-  const left = Math.max(rect.left + perch.offset[0], 0);
-  const right = Math.min(rect.left + perch.offset[1], innerWidth);
-  if (right - left < 10) return null;
-  return { ...perch, left, right, y: rect.top };
+function scan(opts: PerchOptions): Scan {
+  const time = performance.now();
+  const previous = scans.get(opts.host);
+  if (previous && time - previous.time < CACHE_MS && previous.vw === innerWidth && previous.vh === innerHeight) {
+    return { ...previous, budget: { left: previous.allowance } };
+  }
+  const result: Scan = {
+    time, vw: innerWidth, vh: innerHeight, complete: true, allowance: 0, budget: { left: MAX_WORK },
+    obstacles: [], candidates: [], spans: new Map(),
+  };
+  const preferred: Element[] = [];
+  const ordinary: Element[] = [];
+  const pending: { node: Node; context: Context }[] = [
+    { node: document.documentElement, context: { opacity: 1, avoid: false, clip: box(0, 0, innerWidth, innerHeight), visible: true } },
+  ];
+  let visited = 0;
+  // Created on the first text node, one range measures all text of this scan.
+  let range: Range | undefined;
+  const addObstacle = (rect: Box, owner: Element | null, avoid: boolean, clip: Box) => {
+    if (!finiteBox(rect) || empty(rect)) return;
+    const clipped = intersection(rect, clip);
+    if (empty(clipped)) return;
+    if (result.obstacles.length >= MAX_RECTS || !spend(result.budget)) { result.complete = false; return; }
+    result.obstacles.push({ box: box(clipped.left - PAD, clipped.top - PAD, clipped.right + PAD, clipped.bottom + PAD), owner, avoid });
+  };
+  while (pending.length && result.complete) {
+    const { node, context } = pending.pop()!;
+    if (++visited > MAX_NODES || !spend(result.budget)) { result.complete = false; break; }
+    // Queue siblings lazily; a huge child list cannot bypass the node budget.
+    if (node.nextSibling) pending.push({ node: node.nextSibling, context });
+    if (node.nodeType === Node.TEXT_NODE) {
+      if (!context.visible || !context.opacity) continue;
+      const text = node.textContent ?? '';
+      if (text.length > MAX_TEXT || !spend(result.budget, Math.ceil(text.length / 64))) { result.complete = false; break; }
+      if (!text.trim()) continue;
+      range ??= document.createRange();
+      range.selectNodeContents(node);
+      if (empty(intersection(range.getBoundingClientRect(), context.clip))) continue;
+      const rects = range.getClientRects();
+      if (rects.length > MAX_RECTS - result.obstacles.length) { result.complete = false; break; }
+      for (const rect of rects) addObstacle(rect, null, false, context.clip);
+      continue;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) continue;
+    const el = node as Element;
+    if (el === opts.host || opts.host.contains(el)) continue;
+    if (!spend(result.budget, 2)) { result.complete = false; break; }
+    const style = getComputedStyle(el);
+    const opacity = context.opacity * Number(style.opacity);
+    if (hides(style) || opacity === 0) continue;
+    const rect = el.getBoundingClientRect();
+    const visible = style.visibility === 'visible';
+    const avoid = context.avoid || el.getAttribute('data-peetty') === 'avoid';
+    // Fixed or absolute descendants can escape ordinary overflow clipping, but
+    // paint containment guarantees that offscreen descendants stay offscreen.
+    const clip = /\b(paint|strict|content)\b/.test(style.contain) ? intersection(context.clip, rect) : context.clip;
+    if (empty(clip)) continue;
+    if (visible && (avoid || el.matches(INTERACTIVE) || MEDIA_TAGS.has(el.tagName.toUpperCase()))) addObstacle(rect, el, avoid, context.clip);
+    if (!avoid && opacity >= MIN_OPACITY && rect.width > 0 && rect.top >= 0 && rect.top < innerHeight && carries(el, style, rect)) {
+      const list = el.getAttribute('data-peetty') === 'perch' ? preferred : ordinary;
+      if (list.length < MAX_CANDIDATES) list.push(el);
+    }
+    const childContext = { opacity, avoid, clip, visible };
+    if (el.firstChild) pending.push({ node: el.firstChild, context: childContext });
+    if (el.shadowRoot?.firstChild) pending.push({ node: el.shadowRoot.firstChild, context: childContext });
+  }
+  result.candidates = [...preferred, ...ordinary].slice(0, MAX_CANDIDATES);
+  result.allowance = result.budget.left;
+  // Start the cache lifetime after collection.
+  result.time = performance.now();
+  scans.set(opts.host, result);
+  return { ...result, budget: { left: result.allowance } };
 }
 
-/** Whether something now covers the edge at x (a menu or dialog opened over it). */
-export function covered(perch: Perch, x: number, host: Element): boolean {
-  if (!perch.el) return false;
-  const hit = topAt(x, perch.y + 2, host);
-  return !!hit && hit !== perch.el && !perch.el.contains(hit);
+function anchorBounds(rect: Box, body: Footprint): [number, number] {
+  return [Math.max(rect.left + 6, body.left), Math.min(rect.right - 6, innerWidth - body.right)];
+}
+
+/** Subtract whole rectangles expanded by the asymmetric anchor-relative footprint. */
+function freeSpan(left: number, right: number, y: number, body: Footprint, data: Scan, el: Element | null): [number, number] | null {
+  if (!data.complete || left > right || y - body.above < 0 || y + body.below > innerHeight) return null;
+  const key = `${body.key}:${left}:${right}:${y}`;
+  const cached = data.spans.get(el);
+  if (cached?.key === key) return cached.span;
+  const blocked: [number, number][] = [];
+  for (const obstacle of data.obstacles) {
+    if (!spend(data.budget)) return null;
+    // Standing on this control or media edge is intended; avoid areas never qualify.
+    if (el && obstacle.owner === el && !obstacle.avoid) continue;
+    const r = obstacle.box;
+    if (r.bottom <= y - body.above || r.top >= y + body.below) continue;
+    const lo = r.left - body.right;
+    const hi = r.right + body.left;
+    if (hi >= left && lo <= right) blocked.push([lo, hi]);
+  }
+  blocked.sort((a, b) => a[0] - b[0]);
+  let start = left;
+  let best: [number, number] | null = null;
+  for (const [lo, hi] of blocked) {
+    const end = Math.min(right, lo - EPSILON);
+    if (end >= start && (!best || end - start > best[1] - best[0])) best = [start, end];
+    start = Math.max(start, hi + EPSILON);
+    if (start > right) break;
+  }
+  if (start <= right && (!best || right - start > best[1] - best[0])) best = [start, right];
+  data.spans.set(el, { key, span: best });
+  return best;
+}
+
+function remember(perch: Perch, body: Footprint, rect?: Box): Perch {
+  placements.set(perch, { key: body.key, width: rect?.width ?? innerWidth, height: rect?.height ?? innerHeight, vw: innerWidth, vh: innerHeight });
+  return perch;
+}
+
+function perchWith(el: Element, opts: PerchOptions, body: Footprint, data: Scan): Perch | null {
+  if (!data.complete) return null;
+  const live = metrics(el, opts, body);
+  if (!live || !spend(data.budget, MAX_ANCESTORS)) return null;
+  const [left, right] = anchorBounds(live.rect, body);
+  const span = freeSpan(left, right, live.rect.top, body, data, el);
+  // The edge must be on top in the middle of its span.
+  if (!span || !exposed(el, (span[0] + span[1]) / 2, live.rect.top, opts.host, data.budget) || data.budget.left < 0) return null;
+  return remember({
+    el, left: span[0], right: span[1], y: live.rect.top, input: live.input, preferred: live.preferred, clear: true,
+    offset: [span[0] - live.rect.left, span[1] - live.rect.left],
+  }, body, live.rect);
+}
+
+/** The perch on el's top edge, or null when it cannot carry her or has no clear room. */
+export function perchOf(el: Element, opts: PerchOptions): Perch | null {
+  const body = footprint(opts);
+  return body ? perchWith(el, opts, body, scan(opts)) : null;
+}
+
+function floorWith(body: Footprint, data: Scan): Perch | null {
+  const fit = limitsOf(body);
+  const span = fit && freeSpan(fit.left, fit.right, fit.bottom, body, data, null);
+  if (!fit || !span) return null;
+  return remember({ el: null, left: span[0], right: span[1], y: fit.bottom, input: false, preferred: false, clear: true, offset: [...span] }, body);
+}
+
+/** The whole viewport bottom: it holds her over page content, but is not a place to stay. */
+function catchAll(opts: PerchOptions): Perch | null {
+  const body = footprint(opts);
+  const fit = body && limitsOf(body);
+  if (!body || !fit) return null;
+  return remember({ el: null, left: fit.left, right: fit.right, y: fit.bottom, input: false, preferred: false, clear: false, offset: [fit.left, fit.right] }, body);
+}
+
+/**
+ * Anchor positions keeping the whole figure in the viewport; null when the
+ * viewport is smaller than the figure.
+ */
+export function limits(opts: PerchOptions): { left: number; right: number; top: number; bottom: number } | null {
+  const body = footprint(opts);
+  return body && limitsOf(body);
+}
+
+/** The viewport bottom where the whole footprint is clear, or null when none is. */
+export function floor(opts: PerchOptions): Perch | null {
+  const body = footprint(opts);
+  return body ? floorWith(body, scan(opts)) : null;
+}
+
+/**
+ * The viewport bottom under x: the clear floor when x lies on it, else the
+ * catch-all spanning limits() at its bottom. Null only when limits() is.
+ */
+export function bottom(opts: PerchOptions, x: number): Perch | null {
+  const ground = floor(opts);
+  return ground && under(ground, x) ? ground : catchAll(opts);
+}
+
+/** Discovery and clearance share fixed node, geometry, obstacle and candidate limits. */
+export function findPerches(opts: PerchOptions): Perch[] {
+  const body = footprint(opts);
+  if (!body) return [];
+  const data = scan(opts);
+  if (!data.complete) return [];
+  // Reserve a safe floor before candidate evaluation can consume the work budget.
+  const ground = floorWith(body, data);
+  const perches: Perch[] = [];
+  for (const el of data.candidates) {
+    if (data.budget.left <= MAX_ANCESTORS) break;
+    const perch = perchWith(el, opts, body, data);
+    if (perch) perches.push(perch);
+    if (perches.length >= MAX_PERCHES) break;
+  }
+  if (ground) perches.push(ground);
+  return perches;
+}
+
+/** Cheap live eligibility/geometry refresh; full clearance runs only on recheck. */
+export function refresh(perch: Perch, opts: PerchOptions, recheck = false): Perch | null {
+  const body = footprint(opts);
+  if (!body) return null;
+  if (recheck) return perch.el ? perchWith(perch.el, opts, body, scan(opts)) : floorWith(body, scan(opts));
+  const previous = placements.get(perch);
+  if (!previous || previous.key !== body.key || previous.vw !== innerWidth || previous.vh !== innerHeight) return null;
+  if (!perch.el) return remember({ ...perch }, body);
+  const live = metrics(perch.el, opts, body);
+  if (!live || live.input !== perch.input || live.rect.width !== previous.width || live.rect.height !== previous.height) return null;
+  const [lo, hi] = anchorBounds(live.rect, body);
+  const left = Math.max(live.rect.left + perch.offset[0], lo);
+  const right = Math.min(live.rect.left + perch.offset[1], hi);
+  if (left > right) return null;
+  return remember({ ...perch, left, right, y: live.rect.top, input: live.input, preferred: live.preferred }, body, live.rect);
+}
+
+/**
+ * The perch as it is now if it still holds her at x, else null. Between
+ * rechecks this is refresh(), x unused, with the catch-all re-fitted to the
+ * current limits. A recheck runs the full clearance and then the hit test
+ * under her feet in one pass. The catch-all always holds her and hands her
+ * over to clear floor once she stands on it, as bottom(opts, x) does; clear
+ * floor that is no longer under her lets her drop onto the catch-all.
+ */
+export function support(perch: Perch, x: number, opts: PerchOptions, recheck = false): Perch | null {
+  if (!perch.clear) return recheck ? bottom(opts, x) : catchAll(opts);
+  if (!recheck) return refresh(perch, opts);
+  const live = refresh(perch, opts, true);
+  return live && under(live, x) && (!perch.el || exposed(perch.el, x, live.y, opts.host)) ? live : null;
+}
+
+/** Whether the edge is under x, tested as physics.landing() tests it. */
+function under(edge: Edge, x: number): boolean {
+  return !(x < edge.left || x > edge.right);
+}
+
+/** Whether a body falling at x from fromY to toY crosses the edge, as in physics.landing(). */
+function crosses(edge: Edge, x: number, fromY: number, toY: number): boolean {
+  return under(edge, x) && !(edge.y <= fromY || edge.y > toY);
+}
+
+/**
+ * Where a body falling at x from fromY to toY lands this frame: the perch that
+ * physics.landing() picks among all refreshed perches (the highest crossed
+ * edge under x, ties in input order). One geometry read per element finds the
+ * crossed edges; only those are refreshed, highest first.
+ */
+export function crossing(perches: readonly Perch[], x: number, fromY: number, toY: number, opts: PerchOptions): Perch | null {
+  const crossed: { perch: Perch; y: number }[] = [];
+  for (const perch of perches) {
+    // A refresh keeps the edge's y and can only narrow this span.
+    const rect = perch.el?.getBoundingClientRect();
+    const edge: Edge = rect ? { left: rect.left + perch.offset[0], right: rect.left + perch.offset[1], y: rect.top } : perch;
+    if (crosses(edge, x, fromY, toY)) crossed.push({ perch, y: edge.y });
+  }
+  // The sort is stable, so equal edges keep their input order.
+  crossed.sort((a, b) => a.y - b.y);
+  for (const { perch } of crossed) {
+    const live = refresh(perch, opts);
+    if (live && crosses(live, x, fromY, toY)) return live;
+  }
+  return null;
 }

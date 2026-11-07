@@ -1,6 +1,6 @@
 import { geometryOf, Motion, type Emote, type Mood } from './motion.ts';
 import { RigRenderer, type RigOptions } from './rig.ts';
-import type { RigFigure, SlotName, StateName } from './types.ts';
+import type { StateName } from './types.ts';
 import { validateFigure } from './validate.ts';
 
 const EMOTES: Record<Emote, string> = { note: '♪', sweat: '💧', alert: '!', sleep: 'z', heart: '♡', dizzy: '✦', flash: '✧' };
@@ -18,13 +18,14 @@ export interface FigureViewOptions extends RigOptions {
 
 /**
  * A live, animated figure: renderer, animator and its frame loop.
- * Pauses while the document is hidden and honours reduced motion.
+ * Pauses offscreen or while the document is hidden and honours reduced motion.
  */
 export class FigureView {
   readonly element: HTMLDivElement;
   readonly renderer: RigRenderer;
   readonly motion: Motion;
   private readonly emote: HTMLSpanElement;
+  private shownEmote: Emote | null = null;
   private raf = 0;
   private last = 0;
   private facing: 1 | -1 = 1;
@@ -35,8 +36,11 @@ export class FigureView {
   private readonly onPointer = (e: PointerEvent) => {
     this.pointer = [e.clientX, e.clientY];
   };
-  private readonly onVisibility = () => (document.hidden ? this.stop() : this.start());
+  private readonly onVisibility = () => this.syncPlayback();
   private readonly manual: boolean;
+  private observer: IntersectionObserver | null = null;
+  private intersecting = true;
+  private destroyed = false;
   /** Rendered size in CSS pixels. */
   readonly width: number;
   readonly height: number;
@@ -48,11 +52,10 @@ export class FigureView {
   constructor(figure: unknown, options: FigureViewOptions = {}) {
     const valid = validateFigure(figure);
     if (valid.renderer !== 'rig') throw new Error('Sprite figures are not supported yet.');
-    this.renderer = new RigRenderer(valid as RigFigure, options);
-    const rig = valid as RigFigure;
-    this.motion = new Motion(valid.behavior, options.random, geometryOf(rig));
-    const [, vy, , vh] = rig.viewBox;
-    this.cutInset = `${(((vy + vh - rig.anchor[1]) / vh) * 100).toFixed(3)}%`;
+    this.renderer = new RigRenderer(valid, options);
+    this.motion = new Motion(valid.behavior, options.random, geometryOf(valid));
+    const [vx, vy, vw, vh] = valid.viewBox;
+    this.cutInset = `${(((vy + vh - valid.anchor[1]) / vh) * 100).toFixed(3)}%`;
 
     this.element = document.createElement('div');
     this.element.className = 'peetty-figure';
@@ -65,9 +68,10 @@ export class FigureView {
     svg.setAttribute('aria-label', name(valid.name));
     this.width = Number(svg.getAttribute('width'));
     this.height = Number(svg.getAttribute('height'));
-    const [vx, vy0, vw] = rig.viewBox;
     this.unitsPerPixel = vw / this.width;
-    this.anchor = [(rig.anchor[0] - vx) / this.unitsPerPixel, (rig.anchor[1] - vy0) / this.unitsPerPixel];
+    this.anchor = [(valid.anchor[0] - vx) / this.unitsPerPixel, (valid.anchor[1] - vy) / this.unitsPerPixel];
+    svg.style.transformBox = 'border-box';
+    svg.style.transformOrigin = `${this.anchor[0]}px ${this.anchor[1]}px`;
     this.element.append(svg);
 
     this.emote = document.createElement('span');
@@ -83,13 +87,28 @@ export class FigureView {
     this.manual = options.manual ?? false;
     if (!this.manual) {
       document.addEventListener('visibilitychange', this.onVisibility);
-      this.start();
+      if (typeof IntersectionObserver === 'function') {
+        this.observer = new IntersectionObserver((entries) => {
+          if (this.destroyed) return;
+          const entry = entries.find((item) => item.target === this.element);
+          if (!entry) return;
+          this.intersecting = entry.isIntersecting;
+          this.syncPlayback();
+        });
+        this.observer.observe(this.element);
+      }
+      this.syncPlayback();
     }
   }
 
   /** Display name in the page language. */
   get name(): string {
     return name(this.renderer.figure.name);
+  }
+
+  /** Whether the user prefers reduced motion; the view then slows its animation. */
+  get reducedMotion(): boolean {
+    return this.reduced?.matches ?? false;
   }
 
   play(state: StateName): void {
@@ -100,7 +119,13 @@ export class FigureView {
     this.motion.setMood(mood);
   }
 
+  /** Current facing direction, for hosts replacing the figure view. */
+  get direction(): 1 | -1 {
+    return this.facing;
+  }
+
   setFacing(direction: 1 | -1): void {
+    if (direction === this.facing) return;
     this.facing = direction;
     this.renderer.svg.style.transform = direction === -1 ? 'scaleX(-1)' : '';
   }
@@ -118,34 +143,52 @@ export class FigureView {
   /** Advances the animation by `dt` seconds. Called each frame; public for tests and previews. */
   step(dt: number): void {
     // Reduced motion: keep the pose readable but drop continuous movement.
-    const frame = this.motion.update(this.reduced?.matches ? dt * 0.25 : dt);
-    for (const [slot, state] of Object.entries(frame.slots)) this.renderer.setSlot(slot as SlotName, state);
+    const frame = this.motion.update(this.reducedMotion ? dt * 0.25 : dt);
+    // Measure the gaze before this step writes to the DOM, so reading the box does not force a layout.
     if (frame.look) this.renderer.setLook(frame.look[0], frame.look[1]);
     else if (this.pointer) this.lookAt(this.pointer[0], this.pointer[1]);
+    this.renderer.setSlots(frame.slots);
+    this.renderer.setSoul(frame.soul);
     this.renderer.frame(frame.pose, dt, frame.push);
     if (frame.cut !== this.cut) {
       this.cut = frame.cut;
       // Hide what lies below the perch edge, as if she were behind it.
       this.renderer.svg.style.clipPath = frame.cut ? `inset(-100% -100% ${this.cutInset} -100%)` : '';
     }
-    this.emote.textContent = frame.emote ? EMOTES[frame.emote] : '';
-    this.emote.style.opacity = frame.emote ? '1' : '0';
+    if (frame.emote !== this.shownEmote) {
+      this.shownEmote = frame.emote;
+      this.emote.textContent = frame.emote ? EMOTES[frame.emote] : '';
+      this.emote.style.opacity = frame.emote ? '1' : '0';
+    }
   }
 
   destroy(): void {
+    this.destroyed = true;
     this.stop();
+    this.observer?.disconnect();
     removeEventListener('pointermove', this.onPointer);
     document.removeEventListener('visibilitychange', this.onVisibility);
     this.element.remove();
   }
 
+  private canAnimate(): boolean {
+    return !this.manual && !this.destroyed && !document.hidden && this.intersecting;
+  }
+
+  private syncPlayback(): void {
+    if (this.canAnimate()) this.start();
+    else this.stop();
+  }
+
   private start() {
-    if (this.raf || this.manual) return;
+    if (this.raf || !this.canAnimate()) return;
     this.last = performance.now();
     const tick = (now: number) => {
+      this.raf = 0;
+      if (!this.canAnimate()) return;
       this.step(Math.min((now - this.last) / 1000, 0.1));
       this.last = now;
-      this.raf = requestAnimationFrame(tick);
+      if (this.canAnimate()) this.raf = requestAnimationFrame(tick);
     };
     this.raf = requestAnimationFrame(tick);
   }

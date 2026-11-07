@@ -2,14 +2,13 @@
 // she finds. Deep brown skin, two curly afro puffs tied with sunflower-yellow
 // bands, a soft curly fringe, amber eyes; a striped long-sleeve tee under a
 // coral pinafore with a print pocket, lilac high-tops and a little camera.
-import { arms, blush, brows, ellipse, eyes, mouths, pair, part, path } from './kit.mjs';
+import { arms, blush, brows, ellipse, eyes, mouths, pair, part, path, round, shift } from './kit.mjs';
 
-const r = (n) => +n.toFixed(2);
 const face = 'M58 86C57 110 72 127 90 131.5Q100 134.5 110 131.5C128 127 143 110 142 86C141 58 124 44 100 44C76 44 59 58 58 86Z';
 
 /** A puff of coily hair: a circle of soft, round bumps. */
 function puff(cx, cy, rad, bumps = 12, depth = 2.6, turn = 0.2) {
-  const at = (a, k) => `${r(cx + Math.cos(a) * k)} ${r(cy + Math.sin(a) * k)}`;
+  const at = (a, k) => `${round(cx + Math.cos(a) * k)} ${round(cy + Math.sin(a) * k)}`;
   let d = `M${at(turn, rad)}`;
   for (let i = 1; i <= bumps; i++) {
     const a = turn + (i / bumps) * Math.PI * 2;
@@ -24,24 +23,24 @@ function curls(cx, cy, rad) {
   for (const [a, k] of [[0.4, 0.55], [1.4, 0.4], [2.5, 0.6], [3.5, 0.35], [4.4, 0.62], [5.4, 0.45], [0, 0]]) {
     const x = cx + Math.cos(a) * rad * k;
     const y = cy + Math.sin(a) * rad * k;
-    d += `M${r(x - 2.4)} ${r(y)}C${r(x - 2.4)} ${r(y - 3)} ${r(x + 2.4)} ${r(y - 3)} ${r(x + 2.4)} ${r(y)}`;
+    d += `M${round(x - 2.4)} ${round(y)}C${round(x - 2.4)} ${round(y - 3)} ${round(x + 2.4)} ${round(y - 3)} ${round(x + 2.4)} ${round(y)}`;
   }
   return d;
 }
 
 // A curly fringe: round curls instead of pointed strands.
-const scallop = (dy) => {
+const fringeEdge = (() => {
   const pts = [[146, 96], [139, 83], [128, 86], [117, 83], [106, 87], [95, 83], [84, 86], [73, 83], [62, 86], [54, 96]];
   let d = '';
   for (let i = 1; i < pts.length; i++) {
     const [x0, y0] = pts[i - 1];
     const [x1, y1] = pts[i];
     const side = i === 1 || i === pts.length - 1;
-    d += `Q${r((x0 + x1) / 2)} ${r(Math.max(y0, y1) + (side ? 2 : 7.5) + dy)} ${x1} ${y1 + dy}`;
+    d += `Q${round((x0 + x1) / 2)} ${round(Math.max(y0, y1) + (side ? 2 : 7.5))} ${x1} ${y1}`;
   }
   return d;
-};
-const fringeEdge = scallop(0);
+})();
+const fringe = `M54 96C50 56 72 20 100 20C128 20 150 56 146 96${fringeEdge}Z`;
 
 const eye = eyes({ at: [78.6, 104], scale: 1.1, tilt: -4, height: 1.04, style: 'bright' });
 const hairPaint = { fill: 'hairGrad', stroke: 'hairLine', strokeWidth: 1.2 };
@@ -161,11 +160,11 @@ export default {
     ...blush({ at: [71, 118] }),
     ...eye.parts,
     ...mouths({ at: [100, 125.6] }),
-    part('bangShadow', 'head', 47, [path(`M54 100C50 60 72 24 100 24C128 24 150 60 146 100${scallop(4)}Z`, { fill: 'skinShade', opacity: 0.55, blend: 'multiply' })], { clip: 'face' }),
+    part('bangShadow', 'head', 47, [path(shift(fringe, 0, 4), { fill: 'skinShade', opacity: 0.55, blend: 'multiply' })], { clip: 'face' }),
 
     // Front hair: the curly fringe and the hairline at the temples.
     part('fringe', 'head', 50, [
-      path(`M54 96C50 56 72 20 100 20C128 20 150 56 146 96${fringeEdge}Z`, { fill: 'hairGrad' }),
+      path(fringe, { fill: 'hairGrad' }),
       path(`M146 96${fringeEdge}`, { stroke: 'hairLine', strokeWidth: 1.2 }),
       path('M54 96C50 56 72 20 100 20C128 20 150 56 146 96', { stroke: 'hairLine', strokeWidth: 1.2 }),
       path(curls(100, 50, 26), { stroke: 'hairShade', strokeWidth: 1, opacity: 0.7 }),

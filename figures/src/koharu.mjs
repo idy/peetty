@@ -1,7 +1,7 @@
 // Koharu (小春, the mild days of early winter): a sleepy, warm napper.
 // Peach-coral bob with curled tips, a cream beret with cat-ear points and a
 // star hairpin, honey eyes; sailor-collar dress, neckerchief, knee socks.
-import { arms, around, blush, brows, ellipse, eyes, mouths, pair, part, path, starPath, strands, transformer } from './kit.mjs';
+import { arms, around, blush, brows, ellipse, eyes, mouths, pair, part, path, shift, starPath, strands, transformer } from './kit.mjs';
 
 const face = 'M58 88C57 111 72 128 90 132Q100 135 110 132C128 128 143 111 142 88C141 60 124 46 100 46C76 46 59 60 58 88Z';
 
@@ -118,10 +118,7 @@ export default {
     ...blush({ at: [71, 119.4], scale: 1.08 }),
     ...eye.parts,
     ...mouths({ at: [100, 126.6], scale: 0.95, cat: true }),
-    part('bangShadow', 'head', 47, [path(`M53 104C49 64 70 34 100 34C130 34 151 64 147 104${strands([
-      [147, 104], [141, 102], [137, 82], [130, 94], [124, 80], [116, 93], [110, 80], [102, 96],
-      [97, 81], [89, 94], [83, 81], [75, 93], [69, 82], [60, 102], [53, 104],
-    ])}Z`, { fill: 'skinShade', opacity: 0.5, blend: 'multiply' })], { clip: 'face' }),
+    part('bangShadow', 'head', 47, [path(shift(bangs, 0, 4), { fill: 'skinShade', opacity: 0.5, blend: 'multiply' })], { clip: 'face' }),
 
     // Front hair: side pieces curl inward at the chin.
     ...pair('side', 'head', 48, [

@@ -124,7 +124,7 @@ npm run check
 | `.github/workflows/pages.yml` | Checks on every PR; builds and deploys `site/` to GitHub Pages from `main` |
 | `.github/workflows/package.yml` | Checks and publishes matching version tags to GitHub Packages |
 | `dev/figures.html` | Figure sheet for reviewing presets |
-| `test/` | Validator, preset and motion tests |
+| `test/` | Figure validation, presets, motion, companion lifecycle and perch tests |
 
 ## Contributing
 

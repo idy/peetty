@@ -103,7 +103,9 @@ Missing states fall back: `happy` and `sleepy` eyes use `closed`, then `open`; `
 
 ### Animation states
 
-The SDK animates `idle`, `walk`, `jump`, `fall`, `sit`, `lie`, `hang`, `sleep`, `drag`, `wave`, `talk` and `think` for every rig figure, with breathing and sway underneath, anticipation before jumps, squash on landing, natural blinking and pointer-following eyes. `behavior.weights` biases how often each is chosen; `walkSpeed` also sets the figure's tempo. `idleProp` adds a personal idle: `"book"`, `"cup"` and `"camera"` hold a prop in both hands (draw `hand:book`, `hand:cup` or `hand:camera`), `"gum"` blows a bubble until it pops (draw `mouth:gum` and `mouth:gumBig`; `gum()` in the kit draws both), and `"stretch"` adds an occasional stretch and yawn. `fallProp: "umbrella"` makes her float down slowly under an umbrella (draw `hand:umbrella`).
+The SDK animates `idle`, `walk`, `jump`, `fall`, `sit`, `lie`, `hang`, `sleep`, `drag`, `wave`, `talk` and `think` for every rig figure, with breathing and sway underneath, anticipation before jumps, squash on landing, natural blinking and pointer-following eyes. `behavior.weights` biases the autonomous choices `idle`, `walk`, `jump`, `sit`, `lie`, `sleep`, `think`, `wave` and `talk`; falling, hanging and dragging follow physical interactions instead of weights. `walkSpeed` also sets the figure's tempo. `idleProp` adds a personal idle: `"book"`, `"cup"` and `"camera"` hold a prop in both hands (draw `hand:book`, `hand:cup` or `hand:camera`), `"gum"` blows a bubble until it pops (draw `mouth:gum` and `mouth:gumBig`; `gum()` in the kit draws both), and `"stretch"` adds an occasional stretch and yawn. `fallProp: "umbrella"` makes her float down slowly under an umbrella (draw `hand:umbrella`).
+
+A fall frightens her: the SDK draws her soul drifting out of her mouth and hides the irises (the parts with `look`), so her eyes go blank, then lets the soul slip back in shortly after she lands. Dropping in, floating under an umbrella and the way up after a throw stay calm. Nothing needs to be drawn for this; the soul's tail ends just above the `head` pivot, where the presets draw the mouth.
 
 ### Sprite figures
 
@@ -111,7 +113,7 @@ The SDK animates `idle`, `walk`, `jump`, `fall`, `sit`, `lie`, `hang`, `sleep`, 
 
 ## Safety and limits
 
-Figures are data only. The SDK builds SVG elements itself and never parses markup, so path data may contain only path commands and numbers, and colors only color literals. Images must be `https:` or base64 data URLs. A pack may be up to 2 MB serialized, with at most 200 parts, 64 shapes per part, 64 palette entries and 64 gradients. Imports report every problem found, with its location.
+Figures are data only. The SDK builds SVG elements itself and never parses markup, so path data may contain only path commands and numbers, and colors only color literals. Images must be `https:` or base64 data URLs. A pack may be up to 2,000,000 UTF-8 bytes serialized, with at most 200 parts, 64 shapes per part, 64 palette entries and 64 gradients. Imports report every problem found, with its location.
 
 ## Previewing
 

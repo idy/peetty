@@ -1,7 +1,13 @@
 import {
+  AUTONOMOUS_ACTIONS,
+  BLENDS,
   BONES,
+  FALL_PROPS,
   FIGURE_FORMAT,
   FIGURE_VERSION,
+  IDLE_PROPS,
+  LINE_CAPS,
+  LINE_JOINS,
   SLOT_STATES,
   STATES,
   type Figure,
@@ -27,7 +33,8 @@ export class FigureError extends Error {
   }
 }
 
-const ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
+/** A figure id, which is also its catalog file name. */
+export const FIGURE_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const KEY = /^[A-Za-z][A-Za-z0-9_-]{0,39}$/;
 const PATH_DATA = /^[MmLlHhVvCcSsQqTtAaZz0-9eE.,\s+-]*$/;
 const HEX = /^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
@@ -55,7 +62,9 @@ export function validateFigure(input: unknown): Figure {
 
   let size = 0;
   try {
-    size = JSON.stringify(input)?.length ?? 0;
+    const json = JSON.stringify(input) ?? '';
+    // UTF-8 takes at most 3 bytes per UTF-16 unit, so most packs need no encoding to prove they fit.
+    size = json.length * 3 <= LIMITS.maxBytes ? json.length : new TextEncoder().encode(json).byteLength;
   } catch {
     throw new FigureError(['figure: must be plain JSON data']);
   }
@@ -65,9 +74,9 @@ export function validateFigure(input: unknown): Figure {
 
   if (f.format !== FIGURE_FORMAT) fail('format', `must be "${FIGURE_FORMAT}"`);
   if (f.version !== FIGURE_VERSION) fail('version', `must be ${FIGURE_VERSION}`);
-  if (typeof f.id !== 'string' || !ID.test(f.id)) fail('id', 'must be 1–40 lowercase letters, digits or hyphens');
-  checkText(f.name, 'name', fail, true);
-  if (f.description !== undefined) checkText(f.description, 'description', fail, false);
+  if (typeof f.id !== 'string' || !FIGURE_ID.test(f.id)) fail('id', 'must be 1–40 lowercase letters, digits or hyphens');
+  checkText(f.name, 'name', fail);
+  if (f.description !== undefined) checkText(f.description, 'description', fail);
   for (const key of ['author', 'license'] as const) {
     if (f[key] !== undefined && (typeof f[key] !== 'string' || (f[key] as string).length > 200)) {
       fail(key, 'must be a string of at most 200 characters');
@@ -103,9 +112,25 @@ export function validateFigure(input: unknown): Figure {
 
 type Fail = (path: string, message: string) => void;
 
-function checkText(v: unknown, path: string, fail: Fail, required: boolean) {
-  const ok = (s: unknown) => typeof s === 'string' && s.length > 0 && s.length <= 200;
+/** `"a", "b" or "c"`, the allowed values in a message. */
+function choices(values: readonly string[]): string {
+  const quoted = values.map((v) => `"${v}"`);
+  return quoted.length > 1 ? `${quoted.slice(0, -1).join(', ')} or ${quoted.at(-1)}` : quoted.join('');
+}
+
+/** An optional value must be one of `values`. */
+function checkChoice(fail: Fail, path: string, v: unknown, values: readonly string[]) {
+  if (v !== undefined && !values.includes(v as string)) fail(path, `must be ${choices(values)}`);
+}
+
+/** A number from `min` to `max`; an omitted value passes unless required. */
+function checkRange(fail: Fail, path: string, v: unknown, min: number, max: number, required = false) {
   if (v === undefined && !required) return;
+  if (!isNum(v) || v < min || v > max) fail(path, `must be ${min}–${max}`);
+}
+
+function checkText(v: unknown, path: string, fail: Fail) {
+  const ok = (s: unknown) => typeof s === 'string' && s.length > 0 && s.length <= 200;
   if (ok(v)) return;
   if (isObj(v) && Object.keys(v).length > 0 && Object.entries(v).every(([k, s]) => /^[a-z]{2}(-[A-Za-z]{2,4})?$/.test(k) && ok(s))) return;
   fail(path, 'must be a string or an object of language codes to strings');
@@ -116,19 +141,15 @@ function checkBehavior(b: unknown, fail: Fail) {
   if (b.weights !== undefined) {
     if (!isObj(b.weights)) fail('behavior.weights', 'must be an object');
     else for (const [k, w] of Object.entries(b.weights)) {
-      if (!KEY.test(k) || !isNum(w) || w < 0 || w > 100) fail(`behavior.weights.${k}`, 'must be a number from 0 to 100');
+      if (!(AUTONOMOUS_ACTIONS as readonly string[]).includes(k)) {
+        fail(`behavior.weights.${k}`, `must name an autonomous action (${AUTONOMOUS_ACTIONS.join(', ')})`);
+      }
+      if (!isNum(w) || w < 0 || w > 100) fail(`behavior.weights.${k}`, 'must be a number from 0 to 100');
     }
   }
-  for (const key of ['walkSpeed', 'jumpPower'] as const) {
-    const v = b[key];
-    if (v !== undefined && (!isNum(v) || v < 0.25 || v > 3)) fail(`behavior.${key}`, 'must be 0.25–3');
-  }
-  if (b.idleProp !== undefined && !['book', 'cup', 'camera', 'gum', 'stretch', 'none'].includes(b.idleProp as string)) {
-    fail('behavior.idleProp', 'must be "book", "cup", "camera", "gum", "stretch" or "none"');
-  }
-  if (b.fallProp !== undefined && !['umbrella', 'none'].includes(b.fallProp as string)) {
-    fail('behavior.fallProp', 'must be "umbrella" or "none"');
-  }
+  for (const key of ['walkSpeed', 'jumpPower'] as const) checkRange(fail, `behavior.${key}`, b[key], 0.25, 3);
+  checkChoice(fail, 'behavior.idleProp', b.idleProp, IDLE_PROPS);
+  checkChoice(fail, 'behavior.fallProp', b.fallProp, FALL_PROPS);
 }
 
 function checkRig(f: Obj, palette: Obj, fail: Fail) {
@@ -147,7 +168,7 @@ function checkRig(f: Obj, palette: Obj, fail: Fail) {
   const paint = (v: unknown, path: string) => {
     if (v === undefined) return;
     if (typeof v !== 'string') return fail(path, 'must be a string');
-    if (v in palette || gradientKeys.includes(v) || isColorLiteral(v)) return;
+    if (Object.hasOwn(palette, v) || gradientKeys.includes(v) || isColorLiteral(v)) return;
     fail(path, `"${v}" is not a palette key, gradient key or color`);
   };
 
@@ -155,7 +176,7 @@ function checkRig(f: Obj, palette: Obj, fail: Fail) {
     const g = gradients[key];
     const p = `gradients.${key}`;
     if (!KEY.test(key)) fail(p, 'key must be an identifier');
-    if (key in palette) fail(p, 'must not reuse a palette key');
+    if (Object.hasOwn(palette, key)) fail(p, 'must not reuse a palette key');
     if (!isObj(g)) { fail(p, 'must be an object'); continue; }
     if (g.type === 'linear') {
       if (!isPoint(g.from) || !isPoint(g.to)) fail(p, 'linear gradients need from and to points');
@@ -167,8 +188,8 @@ function checkRig(f: Obj, palette: Obj, fail: Fail) {
     else g.stops.forEach((s, i) => {
       const sp = `${p}.stops[${i}]`;
       if (!isObj(s) || !isNum(s.offset) || s.offset < 0 || s.offset > 1) return fail(sp, 'offset must be 0–1');
-      if (typeof s.color !== 'string' || !(s.color in palette || isColorLiteral(s.color))) fail(`${sp}.color`, 'must be a palette key or color');
-      if (s.opacity !== undefined && (!isNum(s.opacity) || s.opacity < 0 || s.opacity > 1)) fail(`${sp}.opacity`, 'must be 0–1');
+      if (typeof s.color !== 'string' || !(Object.hasOwn(palette, s.color) || isColorLiteral(s.color))) fail(`${sp}.color`, 'must be a palette key or color');
+      checkRange(fail, `${sp}.opacity`, s.opacity, 0, 1);
     });
   }
 
@@ -187,11 +208,11 @@ function checkRig(f: Obj, palette: Obj, fail: Fail) {
       } else return fail(`${sp}.type`, 'must be "path" or "ellipse"');
       paint(s.fill, `${sp}.fill`);
       paint(s.stroke, `${sp}.stroke`);
-      if (s.strokeWidth !== undefined && (!isNum(s.strokeWidth) || s.strokeWidth < 0 || s.strokeWidth > 50)) fail(`${sp}.strokeWidth`, 'must be 0–50');
-      if (s.opacity !== undefined && (!isNum(s.opacity) || s.opacity < 0 || s.opacity > 1)) fail(`${sp}.opacity`, 'must be 0–1');
-      if (s.lineCap !== undefined && !['butt', 'round', 'square'].includes(s.lineCap as string)) fail(`${sp}.lineCap`, 'invalid');
-      if (s.lineJoin !== undefined && !['miter', 'round', 'bevel'].includes(s.lineJoin as string)) fail(`${sp}.lineJoin`, 'invalid');
-      if (s.blend !== undefined && !['normal', 'multiply', 'screen', 'overlay'].includes(s.blend as string)) fail(`${sp}.blend`, 'invalid');
+      checkRange(fail, `${sp}.strokeWidth`, s.strokeWidth, 0, 50);
+      checkRange(fail, `${sp}.opacity`, s.opacity, 0, 1);
+      checkChoice(fail, `${sp}.lineCap`, s.lineCap, LINE_CAPS);
+      checkChoice(fail, `${sp}.lineJoin`, s.lineJoin, LINE_JOINS);
+      checkChoice(fail, `${sp}.blend`, s.blend, BLENDS);
     });
   };
 
@@ -218,7 +239,9 @@ function checkRig(f: Obj, palette: Obj, fail: Fail) {
     if (!isNum(part.z)) fail(`${p}.z`, 'must be a number');
     if (part.slot !== undefined) {
       const [slot, state, extra] = String(part.slot).split(':');
-      const states = SLOT_STATES[slot as keyof typeof SLOT_STATES] as readonly string[] | undefined;
+      const states = slot !== undefined && Object.hasOwn(SLOT_STATES, slot)
+        ? SLOT_STATES[slot as keyof typeof SLOT_STATES] as readonly string[]
+        : undefined;
       if (extra !== undefined || !states || !states.includes(state ?? '')) {
         fail(`${p}.slot`, `must be <slot>:<state>, e.g. eyes:open (slots: ${Object.keys(SLOT_STATES).join(', ')})`);
       }
@@ -230,11 +253,11 @@ function checkRig(f: Obj, palette: Obj, fail: Fail) {
       const s = part.spring;
       if (!isObj(s)) fail(`${p}.spring`, 'must be an object');
       else {
-        if (!isNum(s.stiffness) || s.stiffness < 0.01 || s.stiffness > 1) fail(`${p}.spring.stiffness`, 'must be 0.01–1');
-        if (!isNum(s.damping) || s.damping < 0 || s.damping > 0.99) fail(`${p}.spring.damping`, 'must be 0–0.99');
-        if (s.gain !== undefined && (!isNum(s.gain) || s.gain < 0 || s.gain > 10)) fail(`${p}.spring.gain`, 'must be 0–10');
-        if (s.limit !== undefined && (!isNum(s.limit) || s.limit < 0 || s.limit > 90)) fail(`${p}.spring.limit`, 'must be 0–90');
-        if (s.hang !== undefined && (!isNum(s.hang) || s.hang < 0 || s.hang > 1)) fail(`${p}.spring.hang`, 'must be 0–1');
+        checkRange(fail, `${p}.spring.stiffness`, s.stiffness, 0.01, 1, true);
+        checkRange(fail, `${p}.spring.damping`, s.damping, 0, 0.99, true);
+        checkRange(fail, `${p}.spring.gain`, s.gain, 0, 10);
+        checkRange(fail, `${p}.spring.limit`, s.limit, 0, 90);
+        checkRange(fail, `${p}.spring.hang`, s.hang, 0, 1);
         if (part.pivot === undefined) fail(`${p}.pivot`, 'is required with a spring');
       }
     }

@@ -1,5 +1,5 @@
 export { FigureView, type FigureViewOptions } from './figure/view.ts';
-export { Motion, type Mood, type Emote, type MotionFrame } from './figure/motion.ts';
+export { Motion, type Mood, type Emote, type MotionFrame, type MotionPhase } from './figure/motion.ts';
 export { RigRenderer, type RigOptions } from './figure/rig.ts';
 export { validateFigure, FigureError, LIMITS } from './figure/validate.ts';
 export * from './figure/types.ts';

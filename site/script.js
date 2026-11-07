@@ -2,19 +2,21 @@
 
 (() => {
   const STORAGE_KEY = "peetty-figure";
-  const presets = ["miru", "koharu", "xiaoxiao", "riley", "amara", "elsie"];
+  const pickerButtons = document.querySelectorAll("button[data-figure]");
+  const presets = Array.from(pickerButtons, (button) => button.dataset.figure);
   const read = () => {
     try { return localStorage.getItem(STORAGE_KEY); } catch { return null; }
   };
   const save = (value) => {
     try { localStorage.setItem(STORAGE_KEY, value); } catch { /* Works for this visit only. */ }
   };
-  let figure = presets.includes(read()) ? read() : "miru";
+  const savedFigure = read();
+  let figure = presets.includes(savedFigure) ? savedFigure : "miru";
   let pet = null;
   let language = IdySite.language;
 
   function syncPicker() {
-    for (const button of document.querySelectorAll("[data-figure]")) {
+    for (const button of pickerButtons) {
       button.setAttribute("aria-pressed", String(button.dataset.figure === figure));
     }
   }
@@ -32,7 +34,7 @@
     pet.mount().catch((error) => console.error("[peetty]", error));
   }
 
-  for (const button of document.querySelectorAll("[data-figure]")) {
+  for (const button of pickerButtons) {
     button.addEventListener("click", () => {
       figure = button.dataset.figure;
       save(figure);
