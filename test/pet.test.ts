@@ -642,6 +642,25 @@ describe('pointer and shadow event routing', () => {
     assert.ok(state.vy <= -1999, `thrown at ${state.vy} px/s`);
   });
 
+  it('gives the pointer back to the page when hidden mid-drag or mid-press', async (t) => {
+    const { dom, pet, state } = await mountPet(t);
+    const petEl = state.overlay.pet as unknown as ElementStub;
+    stand(state, 500);
+    petEl.dispatchEvent(pointer('pointerdown', 1, 500, 700));
+    dom.window.dispatchEvent(pointer('pointermove', 1, 520, 650));
+    assert.equal(state.mode, 'drag');
+    assert.ok(petEl.captures.has(1));
+    pet.hide();
+    assert.equal(petEl.captures.has(1), false, 'released when hidden mid-drag');
+    assert.equal(state.press, null);
+    pet.show();
+    stand(state, 500);
+    petEl.dispatchEvent(pointer('pointerdown', 2, 500, 700));
+    assert.ok(petEl.captures.has(2));
+    pet.hide();
+    assert.equal(petEl.captures.has(2), false, 'released when hidden mid-press');
+  });
+
   it('draws pointer movement only on animation frames', async (t) => {
     const { dom, state } = await mountPet(t);
     const step = mock.method(state.view, 'step');

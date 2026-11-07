@@ -197,7 +197,7 @@ export class Peetty {
   hide(): void {
     if (!this.overlay) return;
     this.hidden = true;
-    this.press = null;
+    this.releasePress();
     cancelAnimationFrame(this.raf);
     this.raf = 0;
     this.overlay.pet.classList.remove('dragging');
@@ -308,7 +308,7 @@ export class Peetty {
     this.mode = 'paused';
     this.perch = null;
     this.jump = null;
-    this.press = null;
+    this.releasePress();
     this.vx = this.vy = 0;
     const { pet, host, menu, bubble } = this.overlay!;
     pet.classList.remove('dragging');
@@ -728,11 +728,17 @@ export class Peetty {
     ];
   }
 
-  private onUp(e: PointerEvent, cancelled = false) {
+  /** Ends the current press, giving the pointer back to the page; hiding or parking her mid-press ends it too. */
+  private releasePress() {
     const press = this.press;
-    if (!press || e.pointerId !== press.id) return;
+    if (!press) return;
     this.press = null;
-    try { this.overlay!.pet.releasePointerCapture(e.pointerId); } catch { /* Capture may already have been released. */ }
+    try { this.overlay?.pet.releasePointerCapture(press.id); } catch { /* Capture may already have been released. */ }
+  }
+
+  private onUp(e: PointerEvent, cancelled = false) {
+    if (!this.press || e.pointerId !== this.press.id) return;
+    this.releasePress();
     if (this.mode === 'drag') {
       this.overlay!.pet.classList.remove('dragging');
       [this.vx, this.vy] = cancelled ? [0, 0] : this.throwVelocity(e);
