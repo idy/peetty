@@ -252,6 +252,20 @@ describe('whole-footprint perch clearance', () => {
     assert.ok(found, 'the hit test finds its shadow content, which belongs to the host');
     assert.ok(support(found, 200, fixture.opts, true));
   });
+
+  it('stands on a linked or responsive image whose wrapper shares its box', () => {
+    const link = element('a', rect(0, 400, 300, 120));
+    link.setAttribute('href', '#');
+    const linked = element('img', rect(0, 400, 300, 120), link);
+    const picture = element('picture', rect(400, 300, 300, 120));
+    const responsive = element('img', rect(400, 300, 300, 120), picture);
+    for (const el of [linked, picture, responsive]) assert.ok(perchOf(asElement(el), fixture.opts), el.tagName);
+    // A control beside the image, not part of it, still blocks the span next to it.
+    element('button', rect(0, 395, 60, 10));
+    fixture.now += 300;
+    const found = perchOf(asElement(linked), fixture.opts);
+    assert.ok(found && found.left > 60, `left ${found?.left}`);
+  });
 });
 
 describe('safe viewport floor', () => {
@@ -555,6 +569,32 @@ describe('bounded discovery and shared rechecks', () => {
     const fixed = element('button', rect(0, 650, 800, 50), offscreen);
     fixed.style.position = 'fixed';
     assert.equal(floor(fixture.opts), null);
+  });
+
+  it('ignores text and controls an ordinary overflow container clips away', () => {
+    // A scroller showing 100px of a long text; its hidden lines and controls sit over the floor.
+    const scroller = element('div', rect(0, 100, 800, 100));
+    scroller.style.overflowX = 'hidden';
+    scroller.style.overflowY = 'auto';
+    const content = element('p', rect(0, 100, 800, 700), scroller);
+    text(content, rect(0, 600, 800, 100));
+    element('button', rect(0, 640, 800, 40), scroller);
+    assert.ok(floor(fixture.opts), 'nothing visible covers the floor');
+    // A fixed control escapes the clip.
+    element('button', rect(0, 640, 800, 40), scroller).style.position = 'fixed';
+    fixture.now += 300;
+    assert.equal(floor(fixture.opts), null);
+  });
+
+  it('clips absolutely positioned content by overflow at or above its containing block', () => {
+    const scroller = element('div', rect(0, 100, 800, 100));
+    scroller.style.overflowX = 'hidden';
+    scroller.style.overflowY = 'hidden';
+    element('button', rect(0, 640, 800, 40), scroller).style.position = 'absolute';
+    assert.equal(floor(fixture.opts), null, 'positioned against the page, it escapes the scroller');
+    scroller.style.position = 'relative';
+    fixture.now += 300;
+    assert.ok(floor(fixture.opts), 'positioned against the scroller, it is clipped');
   });
 
   it('shares text measurement across candidates, floor and rechecks', () => {

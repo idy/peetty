@@ -77,7 +77,13 @@ interface Scan {
 }
 interface Metrics { rect: DOMRect; input: boolean; preferred: boolean }
 interface Placement { key: string; width: number; height: number; vw: number; vh: number }
-interface Context { opacity: number; avoid: boolean; clip: Box; visible: boolean }
+/**
+ * What is visible inside the current element: `clip` after paint containment,
+ * which clips everything, including fixed content; `flow` after overflow clips
+ * too, for text and in-flow content; `absolute` for absolutely positioned
+ * content, which escapes the overflow clips below its containing block.
+ */
+interface Context { opacity: number; avoid: boolean; clip: Box; flow: Box; absolute: Box; visible: boolean }
 const scans = new WeakMap<Element, Scan>();
 const placements = new WeakMap<Perch, Placement>();
 
@@ -228,6 +234,19 @@ function intersection(a: Box, b: Box): Box {
   return box(Math.max(a.left, b.left), Math.max(a.top, b.top), Math.min(a.right, b.right), Math.min(a.bottom, b.bottom));
 }
 
+/** The clip for in-flow content of an element that clips its overflow on either axis. */
+function overflowClip(el: Element, style: CSSStyleDeclaration, rect: Box, clip: Box): Box {
+  // The root's and body's overflow applies to the viewport; inline and contents boxes never clip.
+  if (el === document.documentElement || el === document.body || style.display === 'inline' || style.display === 'contents') return clip;
+  const x = style.overflowX !== 'visible';
+  const y = style.overflowY !== 'visible';
+  if (!x && !y) return clip;
+  return box(
+    x ? Math.max(clip.left, rect.left) : clip.left, y ? Math.max(clip.top, rect.top) : clip.top,
+    x ? Math.min(clip.right, rect.right) : clip.right, y ? Math.min(clip.bottom, rect.bottom) : clip.bottom,
+  );
+}
+
 function empty(rect: Box): boolean {
   return rect.width <= 0 || rect.height <= 0;
 }
@@ -249,8 +268,9 @@ function scan(opts: PerchOptions): Scan {
   };
   const preferred: Element[] = [];
   const ordinary: Element[] = [];
+  const viewport = box(0, 0, innerWidth, innerHeight);
   const pending: { node: Node; context: Context }[] = [
-    { node: document.documentElement, context: { opacity: 1, avoid: false, clip: box(0, 0, innerWidth, innerHeight), visible: true } },
+    { node: document.documentElement, context: { opacity: 1, avoid: false, clip: viewport, flow: viewport, absolute: viewport, visible: true } },
   ];
   let visited = 0;
   // Created on the first text node, one range measures all text of this scan.
@@ -274,10 +294,10 @@ function scan(opts: PerchOptions): Scan {
       if (!text.trim()) continue;
       range ??= document.createRange();
       range.selectNodeContents(node);
-      if (empty(intersection(range.getBoundingClientRect(), context.clip))) continue;
+      if (empty(intersection(range.getBoundingClientRect(), context.flow))) continue;
       const rects = range.getClientRects();
       if (rects.length > MAX_RECTS - result.obstacles.length) { result.complete = false; break; }
-      for (const rect of rects) addObstacle(rect, null, false, context.clip);
+      for (const rect of rects) addObstacle(rect, null, false, context.flow);
       continue;
     }
     if (node.nodeType !== Node.ELEMENT_NODE) continue;
@@ -290,16 +310,21 @@ function scan(opts: PerchOptions): Scan {
     const rect = el.getBoundingClientRect();
     const visible = style.visibility === 'visible';
     const avoid = context.avoid || el.getAttribute('data-peetty') === 'avoid';
-    // Fixed or absolute descendants can escape ordinary overflow clipping, but
-    // paint containment guarantees that offscreen descendants stay offscreen.
+    // Paint containment keeps every descendant inside, so offscreen bulk can be skipped.
     const clip = /\b(paint|strict|content)\b/.test(style.contain) ? intersection(context.clip, rect) : context.clip;
     if (empty(clip)) continue;
-    if (visible && (avoid || el.matches(INTERACTIVE) || MEDIA_TAGS.has(el.tagName.toUpperCase()))) addObstacle(rect, el, avoid, context.clip);
-    if (!avoid && opacity >= MIN_OPACITY && rect.width > 0 && rect.top >= 0 && rect.top < innerHeight && carries(el, style, rect)) {
+    // Overflow clips in-flow content; positioned content escapes the overflow clips
+    // below its containing block, and fixed content escapes them all.
+    const position = style.position;
+    const own = position === 'fixed' ? context.clip : position === 'absolute' ? context.absolute : context.flow;
+    if (visible && (avoid || el.matches(INTERACTIVE) || MEDIA_TAGS.has(el.tagName.toUpperCase()))) addObstacle(rect, el, avoid, own);
+    if (!avoid && opacity >= MIN_OPACITY && rect.width > 0 && rect.top >= own.top && rect.top < own.bottom && carries(el, style, rect)) {
       const list = el.getAttribute('data-peetty') === 'perch' ? preferred : ordinary;
       if (list.length < MAX_CANDIDATES) list.push(el);
     }
-    const childContext = { opacity, avoid, clip, visible };
+    const flow = overflowClip(el, style, rect, intersection(own, clip));
+    const positioned = !!position && position !== 'static';
+    const childContext = { opacity, avoid, clip, flow, absolute: positioned ? flow : intersection(context.absolute, clip), visible };
     if (el.firstChild) pending.push({ node: el.firstChild, context: childContext });
     if (el.shadowRoot?.firstChild) pending.push({ node: el.shadowRoot.firstChild, context: childContext });
   }
@@ -315,6 +340,15 @@ function anchorBounds(rect: Box, body: Footprint): [number, number] {
   return [Math.max(rect.left + 6, body.left), Math.min(rect.right - 6, innerWidth - body.right)];
 }
 
+/**
+ * Whether an obstacle is part of the surface el offers at y, which she stands on
+ * rather than covers: el itself, or an element around it or inside it whose box
+ * starts at that edge, such as a <picture> or link the size of its <img>.
+ */
+function surface(el: Element, owner: Element, top: number, y: number): boolean {
+  return owner === el || (top >= y - EPSILON && (encloses(owner, el) || encloses(el, owner)));
+}
+
 /** Subtract whole rectangles expanded by the asymmetric anchor-relative footprint. */
 function freeSpan(left: number, right: number, y: number, body: Footprint, data: Scan, el: Element | null): [number, number] | null {
   if (!data.complete || left > right || y - body.above < 0 || y + body.below > innerHeight) return null;
@@ -324,13 +358,14 @@ function freeSpan(left: number, right: number, y: number, body: Footprint, data:
   const blocked: [number, number][] = [];
   for (const obstacle of data.obstacles) {
     if (!spend(data.budget)) return null;
-    // Standing on this control or media edge is intended; avoid areas never qualify.
-    if (el && obstacle.owner === el && !obstacle.avoid) continue;
     const r = obstacle.box;
     if (r.bottom <= y - body.above || r.top >= y + body.below) continue;
     const lo = r.left - body.right;
     const hi = r.right + body.left;
-    if (hi >= left && lo <= right) blocked.push([lo, hi]);
+    if (hi < left || lo > right) continue;
+    // Standing on this control or media edge is intended; avoid areas never qualify.
+    if (el && obstacle.owner && !obstacle.avoid && surface(el, obstacle.owner, r.top + PAD, y)) continue;
+    blocked.push([lo, hi]);
   }
   blocked.sort((a, b) => a[0] - b[0]);
   let start = left;
