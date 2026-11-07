@@ -444,8 +444,11 @@ export class Peetty {
     const target = refresh(jump.target, opts, arrived);
     const progress = Math.min(1, jump.t / jump.plan.duration);
     const [x, y] = along(jump.from, jump.plan, Math.min(jump.t, jump.plan.duration));
-    // Follow a target that moves during the flight (scrolling).
-    this.x = x + (target ? (target.left - jump.targetOrigin[0]) * progress : 0);
+    // Follow a target that moves during the flight (scrolling), toward a spot still on it:
+    // one moving partly out of view narrows its span, which keeps her on screen.
+    const to = jump.from[0] + jump.plan.vx * jump.plan.duration;
+    const dest = target ? clamp(to + target.left - jump.targetOrigin[0], target.left, target.right) : to;
+    this.x = x + (dest - to) * progress;
     this.y = y + (target ? (target.y - jump.targetOrigin[1]) * progress : 0);
     if (!target || (arrived && !support(target, this.x, opts, true))) {
       this.vx = jump.plan.vx;

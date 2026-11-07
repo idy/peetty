@@ -384,6 +384,34 @@ describe('safe surfaces and autonomous walking', () => {
     }
   });
 
+  it('keeps a jump on screen when its target moves partly out of view', async (t) => {
+    const { dom, state } = await mountPet(t);
+    const shelf = dom.document.createElement('div');
+    shelf.setAttribute('data-peetty', 'perch');
+    shelf.rect = { left: 600, top: 400, width: 300, height: 40 };
+    dom.document.body.append(shelf);
+    dom.frame(300);
+    const target = state.scan(true).find((p) => p.el === shelf as unknown as Element);
+    assert.ok(target);
+    const from: [number, number] = [500, 450];
+    // Assigned together so the checks below are not narrowed to these values.
+    Object.assign(state, {
+      jump: { from, plan: planJump(from, [850, 400])!, t: 0, target, targetOrigin: [target.left, target.y], hang: false },
+      perch: null,
+      mode: 'jump',
+    });
+    const fit = limits(state.perchOptions)!;
+    for (let i = 0; i < 5; i++) dom.frame(20);
+    // Scrolled sideways mid-flight, the shelf now runs past the right edge of the viewport.
+    shelf.rect = { left: 800, top: 400, width: 300, height: 40 };
+    for (let i = 0; state.mode === 'jump' && i < 60; i++) {
+      dom.frame(20);
+      assert.ok(state.x <= fit.right + 1e-9, `on screen at ${state.x}`);
+    }
+    assert.equal(state.mode, 'ground');
+    assert.equal(state.perch?.el, shelf as unknown as Element);
+  });
+
   it('lands on a lower edge crossed in the same frame when the higher one is covered', async (t) => {
     const { dom, state } = await mountPet(t);
     const shelf = (top: number) => {
