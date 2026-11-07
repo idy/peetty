@@ -123,12 +123,17 @@ npm run check
 | `site/` | peetty.idy.dev, with the shared idy.dev shell in `site/shared/` |
 | `.github/workflows/pages.yml` | Checks on every PR; builds and deploys `site/` to GitHub Pages from `main` |
 | `.github/workflows/package.yml` | Checks and publishes matching version tags to GitHub Packages |
+| `.github/workflows/codex-review.yml` | Shared Codex review for PRs, review requests, and linked-Issue updates |
 | `dev/figures.html` | Figure sheet for reviewing presets |
 | `test/` | Validator, preset and motion tests |
 
 ## Contributing
 
 Ideas, interaction feedback, and technical discussion are welcome in [GitHub Issues](https://github.com/idy/peetty/issues). The first milestone is a small, usable browser companion with thoughtful movement, chat, editable memory, and data portability.
+
+Pull requests use the [shared GizClaw Codex reviewer](https://github.com/GizClaw/github-workflows) through `.github/workflows/codex-review.yml`, following its moving `latest` release. Maintainers must configure an `OPENAI_API_KEY` repository Actions secret; the caller forwards only that secret explicitly. Review runs on the trusted default branch and treats proposed changes as data.
+
+Once the caller is on `main`, opening or updating a ready PR starts a review automatically. A new PR comment with `@codex review` on its own line requests another review; **Actions → OpenAI PR review → Run workflow** accepts a PR number as a manual fallback. Linked-Issue updates also refresh the associated open PRs. Results appear on the reviewed commit as `OpenAI PR Review`, `OpenAI Issue Review`, and `OpenAI Code Review`. These checks complement the project's tests and human review; closing Issues are optional.
 
 ## License
 
