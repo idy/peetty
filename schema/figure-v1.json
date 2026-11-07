@@ -1,0 +1,200 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://peetty.idy.dev/schema/figure-v1.json",
+  "title": "Peetty figure pack, version 1",
+  "description": "Editor help for Peetty figures. The SDK's validator is authoritative and also enforces size limits and cross-references.",
+  "type": "object",
+  "required": ["format", "version", "id", "name", "renderer", "viewBox", "height", "anchor", "palette"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "format": { "const": "peetty.figure" },
+    "version": { "const": 1 },
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,39}$" },
+    "name": { "$ref": "#/$defs/text" },
+    "description": { "$ref": "#/$defs/text" },
+    "author": { "type": "string", "maxLength": 200 },
+    "license": { "type": "string", "maxLength": 200, "description": "SPDX identifier such as CC-BY-4.0." },
+    "renderer": { "enum": ["rig", "sprite"] },
+    "viewBox": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4, "description": "[minX, minY, width, height] drawing coordinates." },
+    "height": { "type": "number", "minimum": 24, "maximum": 480, "description": "Display height in CSS pixels." },
+    "anchor": { "$ref": "#/$defs/point", "description": "Point that rests on an edge (between the feet)." },
+    "palette": {
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": { "$ref": "#/$defs/key" },
+      "additionalProperties": { "$ref": "#/$defs/color" }
+    },
+    "behavior": {
+      "type": "object",
+      "properties": {
+        "weights": { "type": "object", "additionalProperties": { "type": "number", "minimum": 0, "maximum": 100 } },
+        "walkSpeed": { "type": "number", "minimum": 0.25, "maximum": 3 },
+        "jumpPower": { "type": "number", "minimum": 0.25, "maximum": 3 },
+        "idleProp": { "enum": ["book", "cup", "camera", "gum", "stretch", "none"] },
+        "fallProp": { "enum": ["umbrella", "none"] }
+      },
+      "additionalProperties": false
+    },
+    "skeleton": {
+      "type": "object",
+      "required": ["root", "hips", "body", "head", "armL", "armR", "legL", "legR"],
+      "properties": {
+        "root": { "$ref": "#/$defs/bone" }, "hips": { "$ref": "#/$defs/bone" },
+        "body": { "$ref": "#/$defs/bone" }, "head": { "$ref": "#/$defs/bone" },
+        "armL": { "$ref": "#/$defs/bone" }, "armR": { "$ref": "#/$defs/bone" },
+        "legL": { "$ref": "#/$defs/bone" }, "legR": { "$ref": "#/$defs/bone" }
+      },
+      "additionalProperties": false
+    },
+    "gradients": {
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": { "$ref": "#/$defs/key" },
+      "additionalProperties": { "$ref": "#/$defs/gradient" }
+    },
+    "clips": {
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/key" },
+      "additionalProperties": { "$ref": "#/$defs/shapes" }
+    },
+    "parts": { "type": "array", "minItems": 1, "maxItems": 200, "items": { "$ref": "#/$defs/part" } },
+    "sprite": {
+      "type": "object",
+      "required": ["image", "frameWidth", "frameHeight", "columns", "animations"],
+      "properties": {
+        "image": { "type": "string", "pattern": "^(https://|data:image/(png|webp|gif);base64,)" },
+        "frameWidth": { "type": "integer", "minimum": 1, "maximum": 4096 },
+        "frameHeight": { "type": "integer", "minimum": 1, "maximum": 4096 },
+        "columns": { "type": "integer", "minimum": 1, "maximum": 4096 },
+        "animations": {
+          "type": "object",
+          "required": ["idle"],
+          "propertyNames": { "enum": ["idle", "walk", "jump", "fall", "sit", "lie", "hang", "sleep", "drag", "wave", "talk", "think"] },
+          "additionalProperties": {
+            "type": "object",
+            "required": ["frames", "fps"],
+            "properties": {
+              "frames": { "type": "array", "items": { "type": "integer", "minimum": 0 }, "minItems": 1, "maxItems": 512 },
+              "fps": { "type": "number", "exclusiveMinimum": 0, "maximum": 60 },
+              "loop": { "type": "boolean" }
+            }
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    { "if": { "properties": { "renderer": { "const": "rig" } } }, "then": { "required": ["skeleton", "parts"] } },
+    { "if": { "properties": { "renderer": { "const": "sprite" } } }, "then": { "required": ["sprite"] } }
+  ],
+  "$defs": {
+    "key": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,39}$" },
+    "point": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+    "text": {
+      "oneOf": [
+        { "type": "string", "minLength": 1, "maxLength": 200 },
+        { "type": "object", "minProperties": 1, "additionalProperties": { "type": "string", "minLength": 1, "maxLength": 200 } }
+      ]
+    },
+    "color": {
+      "type": "string",
+      "pattern": "^(none|transparent|#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})|(rgba?|hsla?)\\([0-9.,%\\s/+-]+\\))$"
+    },
+    "paintRef": { "type": "string", "description": "Palette key, gradient key, or literal color." },
+    "bone": { "type": "object", "required": ["pivot"], "properties": { "pivot": { "$ref": "#/$defs/point" } }, "additionalProperties": false },
+    "stop": {
+      "type": "object",
+      "required": ["offset", "color"],
+      "properties": {
+        "offset": { "type": "number", "minimum": 0, "maximum": 1 },
+        "color": { "type": "string" },
+        "opacity": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "gradient": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["type", "from", "to", "stops"],
+          "properties": {
+            "type": { "const": "linear" }, "from": { "$ref": "#/$defs/point" }, "to": { "$ref": "#/$defs/point" },
+            "stops": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "$ref": "#/$defs/stop" } }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["type", "center", "radius", "stops"],
+          "properties": {
+            "type": { "const": "radial" }, "center": { "$ref": "#/$defs/point" }, "radius": { "type": "number", "exclusiveMinimum": 0 },
+            "focus": { "$ref": "#/$defs/point" },
+            "stops": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "$ref": "#/$defs/stop" } }
+          }
+        }
+      ]
+    },
+    "paint": {
+      "properties": {
+        "fill": { "$ref": "#/$defs/paintRef" },
+        "stroke": { "$ref": "#/$defs/paintRef" },
+        "strokeWidth": { "type": "number", "minimum": 0, "maximum": 50 },
+        "opacity": { "type": "number", "minimum": 0, "maximum": 1 },
+        "lineCap": { "enum": ["butt", "round", "square"] },
+        "lineJoin": { "enum": ["miter", "round", "bevel"] },
+        "blend": { "enum": ["normal", "multiply", "screen", "overlay"] }
+      }
+    },
+    "shape": {
+      "oneOf": [
+        {
+          "allOf": [{ "$ref": "#/$defs/paint" }],
+          "type": "object",
+          "required": ["type", "d"],
+          "properties": { "type": { "const": "path" }, "d": { "type": "string", "maxLength": 20000, "pattern": "^[MmLlHhVvCcSsQqTtAaZz0-9eE.,\\s+-]*$" } }
+        },
+        {
+          "allOf": [{ "$ref": "#/$defs/paint" }],
+          "type": "object",
+          "required": ["type", "cx", "cy", "rx", "ry"],
+          "properties": {
+            "type": { "const": "ellipse" }, "cx": { "type": "number" }, "cy": { "type": "number" },
+            "rx": { "type": "number", "minimum": 0 }, "ry": { "type": "number", "minimum": 0 }, "rotate": { "type": "number" }
+          }
+        }
+      ]
+    },
+    "shapes": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "$ref": "#/$defs/shape" } },
+    "part": {
+      "type": "object",
+      "required": ["id", "bone", "z", "shapes"],
+      "properties": {
+        "id": { "$ref": "#/$defs/key" },
+        "bone": { "enum": ["root", "hips", "body", "head", "armL", "armR", "legL", "legR"] },
+        "z": { "type": "number", "description": "Draw order across the whole figure; higher is in front." },
+        "slot": {
+          "enum": [
+            "eyes:open", "eyes:closed", "eyes:happy", "eyes:sleepy",
+            "mouth:smile", "mouth:open", "mouth:talk", "mouth:flat", "mouth:o", "mouth:gum", "mouth:gumBig",
+            "brows:calm", "brows:worried", "hand:rest", "hand:book", "hand:cup", "hand:camera", "hand:umbrella",
+            "armL:rest", "armL:bent", "armL:up", "armL:fold",
+            "armR:rest", "armR:bent", "armR:up", "armR:fold"
+          ]
+        },
+        "pivot": { "$ref": "#/$defs/point" },
+        "spring": {
+          "type": "object",
+          "required": ["stiffness", "damping"],
+          "properties": {
+            "stiffness": { "type": "number", "minimum": 0.01, "maximum": 1 },
+            "damping": { "type": "number", "minimum": 0, "maximum": 0.99 },
+            "gain": { "type": "number", "minimum": 0, "maximum": 10 },
+            "limit": { "type": "number", "minimum": 0, "maximum": 90 },
+            "hang": { "type": "number", "minimum": 0, "maximum": 1 }
+          }
+        },
+        "look": { "$ref": "#/$defs/point", "description": "Maximum offset when following the pointer." },
+        "clip": { "$ref": "#/$defs/key" },
+        "shapes": { "$ref": "#/$defs/shapes" }
+      }
+    }
+  }
+}

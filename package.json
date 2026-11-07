@@ -1,0 +1,51 @@
+{
+  "name": "@idy/peetty",
+  "version": "0.1.0",
+  "description": "A local-first web companion that perches on page elements and chats with your own AI key.",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/idy/peetty.git"
+  },
+  "homepage": "https://peetty.idy.dev/",
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "keywords": [
+    "browser-pet",
+    "desktop-pet",
+    "web-component",
+    "companion",
+    "svg"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./figures/*.json": "./figures/*.json",
+    "./schema/*.json": "./schema/*.json"
+  },
+  "files": [
+    "dist",
+    "figures/*.json",
+    "schema"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs && tsc -p tsconfig.build.json && node scripts/fix-declarations.mjs",
+    "dev": "node scripts/dev.mjs",
+    "figures": "node scripts/figures.mjs",
+    "test": "node --test \"test/**/*.test.ts\"",
+    "check": "tsc -p tsconfig.json && node scripts/figures.mjs --check"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2"
+  }
+}

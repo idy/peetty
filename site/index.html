@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f7f9fc">
+  <title>Peetty — cute anime characters for your web pages</title>
+  <meta name="description" content="Add a cute anime character to your web page. Watch her walk, jump and nap on page elements, or create a character of your own.">
+  <meta property="og:title" content="Peetty — cute anime characters for your web pages">
+  <meta property="og:description" content="Cute anime characters that walk, jump and nap on your web pages. Choose a character or create your own.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://peetty.idy.dev/">
+  <link rel="canonical" href="https://peetty.idy.dev/">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <script src="shared/idy.js"></script>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="shared/idy.css">
+  <link rel="stylesheet" href="shared/header.css">
+  <script src="shared/header.js" defer></script>
+  <script src="translations.js" defer></script>
+  <script src="sdk/peetty.global.js" defer></script>
+  <script src="script.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main" data-i18n="skipContent">Skip to content</a>
+  <header class="idy-header compact-header" data-peetty="avoid">
+    <div class="idy-header-inner">
+      <a class="idy-home" href="#main">Peetty</a>
+      <nav class="idy-nav" aria-label="Main navigation" data-i18n-aria-label="navigation">
+        <a href="#meet" data-i18n="navMeet">Characters</a>
+        <a href="#embed" data-i18n="navEmbed">Add to a page</a>
+        <a href="https://github.com/idy/peetty">GitHub</a>
+        <a href="https://idy.dev/">idy.dev</a>
+      </nav>
+      <details class="idy-mobile">
+        <summary aria-label="Main navigation" data-i18n-aria-label="navigation"><i class="ph ph-list" aria-hidden="true"></i></summary>
+        <nav class="idy-mobile-panel" aria-label="Main navigation" data-i18n-aria-label="navigation">
+          <a href="#meet" data-i18n="navMeet">Characters</a>
+          <a href="#embed" data-i18n="navEmbed">Add to a page</a>
+          <a href="https://github.com/idy/peetty">GitHub</a>
+          <a href="https://idy.dev/">idy.dev</a>
+        </nav>
+      </details>
+      <div class="header-actions">
+        <div class="idy-preferences">
+          <label><span data-i18n="language">Language</span><select data-idy-language><option value="auto" data-i18n="automatic">Auto</option><option value="en">English</option><option value="zh">中文</option></select></label>
+          <label><span data-i18n="theme">Theme</span><select data-idy-theme><option value="system" data-i18n="system">System</option><option value="light" data-i18n="light">Light</option><option value="dark" data-i18n="dark">Dark</option></select></label>
+        </div>
+        <a class="idy-action" href="https://github.com/idy/peetty" target="_blank" rel="noopener noreferrer" aria-label="Star Peetty on GitHub (opens in a new tab)" data-i18n-aria-label="starLabel"><span class="idy-action-pill"><i class="ph ph-star" aria-hidden="true"></i><span>star</span></span></a>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero wrap" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <h1 id="hero-title" data-i18n-html="heroTitle">A little anime character,<br>right on your page.</h1>
+        <p class="hero-description" data-i18n="heroDescription">Meet your new favorite little anime character. She walks along cards, hops between buttons, waves hello and curls up for a nap—all right on your web page.</p>
+        <div class="hero-actions">
+          <a class="button primary" href="#embed" data-i18n="addToPage">Add her to a page</a>
+          <a class="text-link" href="https://github.com/idy/peetty" data-i18n="viewSource">View the source</a>
+        </div>
+        <p class="hero-note" data-i18n="heroNote">She is on this page now. Drag her, click her, or hover for a few things to do.</p>
+      </div>
+
+      <div class="playground" aria-labelledby="playground-title">
+        <h2 id="playground-title" class="visually-hidden" data-i18n="playgroundTitle">Places to perch</h2>
+        <article class="tile tile-wide" data-peetty="perch">
+          <span class="tile-label" data-i18n="tileReadingLabel">Reading</span>
+          <p data-i18n="tileReading">A long article, a quiet afternoon.</p>
+        </article>
+        <div class="tile-row">
+          <article class="tile tile-lavender" data-peetty="perch">
+            <span class="tile-label" data-i18n="tileNotesLabel">Notes</span>
+            <p data-i18n="tileNotes">Three ideas worth keeping.</p>
+          </article>
+          <article class="tile tile-peach" data-peetty="perch">
+            <span class="tile-label" data-i18n="tileMusicLabel">Music</span>
+            <p data-i18n="tileMusic">Something soft in the background.</p>
+          </article>
+        </div>
+        <div class="try-field">
+          <input id="try-input" type="text" autocomplete="off" data-i18n-placeholder="tryPlaceholder" placeholder="Say something…" aria-describedby="try-hint" data-i18n-aria-label="tryAria" aria-label="Try typing">
+          <span id="try-hint" data-i18n="tryLabel">Try typing here — she will make room.</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="meet-section wrap" id="meet" aria-labelledby="meet-title">
+      <div class="section-heading">
+        <h2 id="meet-title" data-i18n="meetTitle">Six original characters.</h2>
+        <p data-i18n="meetIntro">Each has her own look and her own pace. Switch here; your choice is remembered on this site.</p>
+      </div>
+      <div class="figure-picker" role="group" aria-labelledby="meet-title">
+        <button type="button" class="pick" data-figure="miru" aria-pressed="false">
+          <span class="swatch swatch-miru" aria-hidden="true"></span>
+          <span class="pick-name">Miru</span>
+          <span class="pick-text" data-i18n="miruText">Lavender twin tails and a cursor hair clip. Quick and bouncy; waves when you come near.</span>
+        </button>
+        <button type="button" class="pick" data-figure="koharu" aria-pressed="false">
+          <span class="swatch swatch-koharu" aria-hidden="true"></span>
+          <span class="pick-name">Koharu</span>
+          <span class="pick-text" data-i18n="koharuText">A peach bob and a cat-ear beret, from Japan. Drowsy; naps often and stretches when she wakes.</span>
+        </button>
+        <button type="button" class="pick" data-figure="xiaoxiao" aria-pressed="false">
+          <span class="swatch swatch-xiaoxiao" aria-hidden="true"></span>
+          <span class="pick-name">Xiaoxiao</span>
+          <span class="pick-text" data-i18n="xiaoxiaoText">Black double buns with red cords, from China. Bright and quick, with a cup of milk tea.</span>
+        </button>
+        <button type="button" class="pick" data-figure="riley" aria-pressed="false">
+          <span class="swatch swatch-riley" aria-hidden="true"></span>
+          <span class="pick-name">Riley</span>
+          <span class="pick-text" data-i18n="rileyText">A chestnut ponytail and a varsity jacket, from the US. Sunny; jumps the highest and blows bubble gum.</span>
+        </button>
+        <button type="button" class="pick" data-figure="amara" aria-pressed="false">
+          <span class="swatch swatch-amara" aria-hidden="true"></span>
+          <span class="pick-name">Amara</span>
+          <span class="pick-text" data-i18n="amaraText">Two curly puffs and a camera, from the US. Curious; snaps photos of whatever she finds.</span>
+        </button>
+        <button type="button" class="pick" data-figure="elsie" aria-pressed="false">
+          <span class="swatch swatch-elsie" aria-hidden="true"></span>
+          <span class="pick-name">Elsie</span>
+          <span class="pick-text" data-i18n="elsieText">A honey-blonde bob and freckles, from the UK. Polite; sips tea and floats down under her umbrella.</span>
+        </button>
+      </div>
+    </section>
+
+    <section class="features-section wrap" aria-labelledby="features-title">
+      <div class="section-heading">
+        <h2 id="features-title" data-i18n-html="featuresTitle">A little more cute,<br>on every page.</h2>
+        <p data-i18n="featuresIntro">Movement runs locally in the page. Nothing is sent anywhere to make her walk, jump or blink.</p>
+      </div>
+      <dl class="features-list">
+        <div><dt data-i18n="edgesTitle">At home on the page.</dt><dd data-i18n="edgesDescription">She stands on the visible top edges of cards, images and buttons, follows them as you scroll, and falls to the next one when an edge disappears.</dd></div>
+        <div><dt data-i18n="clearTitle">Out of your way.</dt><dd data-i18n="clearDescription">Text and controls above an edge stay uncovered. She may sit on a field you are not using, but jumps off as soon as you focus it, and stays still while you type.</dd></div>
+        <div><dt data-i18n="figuresTitle">Make your own character.</dt><dd data-i18n="figuresDescription">A character is a JSON figure pack: layered vector parts on a standard skeleton, a palette, and expressions. The SDK animates any figure; recolour one by changing its palette.</dd></div>
+        <div class="unavailable-feature"><dt><span data-i18n="chatTitle">Chat and memories.</span> <span class="availability" data-i18n="unavailable">Unavailable</span></dt><dd data-i18n="chatDescription">Chat with your own API key, customize her personality and memories, and bring them with you using import and export.</dd></div>
+      </dl>
+    </section>
+
+    <section class="embed-section wrap" id="embed" aria-labelledby="embed-title">
+      <div class="section-heading">
+        <h2 id="embed-title" data-i18n="embedTitle">One script tag.</h2>
+        <p data-i18n="embedIntro">Add this to any page. Mark good spots with data-peetty="perch" and keep her away from an area with data-peetty="avoid".</p>
+      </div>
+      <pre class="code"><code>&lt;script src="https://peetty.idy.dev/sdk/peetty.global.js"
+        data-peetty-auto data-figure="shiori" defer&gt;&lt;/script&gt;</code></pre>
+      <p class="code-note" data-i18n="embedOptions">Options: data-figure (a character id such as miru or amara, or a figure JSON URL), data-size (height in pixels), data-activity (calm, normal, lively), data-language (en, zh), data-greet="false".</p>
+      <p class="code-note" data-i18n="npmNote">Install from GitHub Packages. Registry authentication is required.</p>
+      <pre class="code"><code>npm install @idy/peetty --registry=https://npm.pkg.github.com</code></pre>
+      <pre class="code"><code>import { createPeetty } from '@idy/peetty'
+
+const pet = createPeetty({ figure: 'koharu', activity: 'calm' })
+await pet.mount()
+pet.say('Hello!')</code></pre>
+    </section>
+
+    <section class="questions-section wrap" aria-labelledby="questions-title">
+      <h2 id="questions-title" data-i18n="questionsTitle">A few things to know.</h2>
+      <div class="questions">
+        <details><summary data-i18n="dataQuestion">Does she send anything from my page?</summary><p data-i18n="dataAnswer">Finding edges and animating happen locally in your browser. No page content is sent anywhere for movement or animation.</p></details>
+        <details><summary data-i18n="motionQuestion">What about reduced motion?</summary><p data-i18n="motionAnswer">When your system asks for reduced motion, she stops walking and jumping and mostly sits where she is. You can still move her by dragging.</p></details>
+        <details><summary data-i18n="hideQuestion">How do I make her go away?</summary><p data-i18n="hideAnswer">Hover over her and choose Hide. On your own pages, call pet.hide() or pet.destroy().</p></details>
+        <details><summary data-i18n="licenseQuestion">Can I use the characters?</summary><p data-i18n="licenseAnswer">The code is MIT licensed. All Peetty characters are original and licensed CC BY 4.0, so you can use and adapt them with attribution.</p></details>
+      </div>
+    </section>
+  </main>
+
+  <footer class="idy-footer"><div class="idy-footer-inner"><div><a class="idy-home" href="https://idy.dev/">idy.dev</a><p data-i18n="footerNote">Independent tools. Open source.</p></div><nav aria-label="Project links" data-i18n-aria-label="projectLinks"><a href="https://idy.dev/" data-i18n="allProjects">All projects</a><a href="https://github.com/idy/peetty">GitHub</a><a href="https://github.com/idy/peetty/blob/main/docs/figures.md" data-i18n="figureDocs">Figure packs</a></nav></div></footer>
+</body>
+</html>
