@@ -4,7 +4,8 @@
 // Paths here use absolute M, L, C, Q and Z commands only, so every number
 // comes in x,y pairs and can be mirrored or transformed safely.
 
-const round = (n) => +n.toFixed(2);
+/** Two decimals, the precision every preset coordinate is written with. */
+export const round = (n) => +n.toFixed(2);
 
 /** Maps every point of absolute M/L/C/Q/Z path data. */
 export function mapPath(d, fn) {
@@ -29,6 +30,9 @@ export function mapPath(d, fn) {
 }
 
 export const mirrorX = (d, axis = 100) => mapPath(d, (x, y) => [2 * axis - x, y]);
+
+/** Moves path data by (dx, dy), e.g. a shadow cast just below the shape. */
+export const shift = (d, dx, dy) => mapPath(d, (x, y) => [x + dx, y + dy]);
 
 export function mirrorShape(shape, axis = 100) {
   if (shape.type === 'path') return { ...shape, d: mirrorX(shape.d, axis) };

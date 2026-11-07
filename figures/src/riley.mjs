@@ -1,16 +1,16 @@
 // Riley: an outgoing girl from the United States.
 // A high, wavy chestnut ponytail with a red scrunchie and green eyes; a navy-and-cream varsity jacket over a white tee, a
 // denim skirt and sneakers. Her idle prop is bubble gum.
-import { arms, blush, brows, ellipse, eyes, gum, mouths, pair, part, path, starPath, strands, transformer } from './kit.mjs';
+import { arms, blush, brows, ellipse, eyes, gum, mouths, pair, part, path, shift, starPath, strands, transformer } from './kit.mjs';
 
 const face = 'M58 86C57 110 72 127 90 131.5Q100 134.5 110 131.5C128 127 143 110 142 86C141 58 124 44 100 44C76 44 59 58 58 86Z';
 
 // Side-parted bangs sweeping to her left.
-const edge = (dy) => strands([
-  [146, 96 + dy], [140, 100 + dy], [134, 72 + dy], [126, 88 + dy], [119, 70 + dy], [110, 90 + dy], [104, 72 + dy], [95, 94 + dy],
-  [90, 74 + dy], [82, 90 + dy], [77, 74 + dy], [69, 90 + dy], [65, 76 + dy], [60, 100 + dy], [54, 97 + dy],
+const bangsEdge = strands([
+  [146, 96], [140, 100], [134, 72], [126, 88], [119, 70], [110, 90], [104, 72], [95, 94],
+  [90, 74], [82, 90], [77, 74], [69, 90], [65, 76], [60, 100], [54, 97],
 ]);
-const bangsEdge = edge(0);
+const bangs = `M54 97C50 56 72 20 100 20C128 20 150 56 146 96${bangsEdge}Z`;
 
 const eye = eyes({ at: [78.6, 104], scale: 1.1, tilt: -4, height: 1.04, style: 'bright' });
 const hairPaint = { fill: 'hairGrad', stroke: 'hairLine', strokeWidth: 1.2 };
@@ -131,7 +131,7 @@ export default {
     ...eye.parts,
     ...mouths({ at: [100, 125.6] }),
     ...gum({ at: [100, 125.8] }),
-    part('bangShadow', 'head', 47, [path(`M54 101C50 60 72 24 100 24C128 24 150 60 146 100${edge(4)}Z`, { fill: 'skinShade', opacity: 0.5, blend: 'multiply' })], { clip: 'face' }),
+    part('bangShadow', 'head', 47, [path(shift(bangs, 0, 4), { fill: 'skinShade', opacity: 0.5, blend: 'multiply' })], { clip: 'face' }),
 
     // Front hair: wavy side locks and the bangs.
     ...pair('lock', 'head', 48, [
@@ -139,7 +139,7 @@ export default {
       path('M60 86C57 98 57 108 59 116', { stroke: 'hairShade', strokeWidth: 1, opacity: 0.7 }),
     ], { pivot: [64, 66], spring: { stiffness: 0.13, damping: 0.84, gain: 0.9, limit: 10, hang: 0.5 } }),
     part('bangs', 'head', 50, [
-      path(`M54 97C50 56 72 20 100 20C128 20 150 56 146 96${bangsEdge}Z`, { fill: 'hairGrad' }),
+      path(bangs, { fill: 'hairGrad' }),
       path(`M146 96${bangsEdge}`, { stroke: 'hairLine', strokeWidth: 1.2 }),
       path('M119 70C116 80 113 86 110 90M90 74C88 82 85 87 82 90', { stroke: 'hairShade', strokeWidth: 1, opacity: 0.6 }),
     ]),

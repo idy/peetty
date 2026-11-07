@@ -2,7 +2,7 @@
 // Long moonlight-silver hair with one side braid tied by a bookmark ribbon,
 // a crescent hairpin, rose eyes; cream cardigan over a blouse, long plaid
 // skirt, Mary Janes. She often sits on an edge with a tiny book.
-import { arms, blush, bow, brows, ellipse, eyes, mouths, pair, part, path, strands, transformer } from './kit.mjs';
+import { arms, blush, bow, brows, ellipse, eyes, mouths, pair, part, path, round, shift, strands, transformer } from './kit.mjs';
 
 const face = 'M60 86C59 110 73 127 90 131.5Q100 134.5 110 131.5C127 127 141 110 140 86C139 58 123 44 100 44C77 44 61 58 60 86Z';
 
@@ -24,9 +24,8 @@ for (let i = 0; i < 14; i++) {
   const x = 145 - i * 0.12;
   const side = i % 2 ? 1 : -1;
   const w = 7.6 - i * 0.18;
-  const r = (n) => +n.toFixed(2);
-  braid.push(path(`M${r(x)} ${r(y - 5)}C${r(x + side * w * 1.3)} ${r(y - 5)} ${r(x + side * w * 1.2)} ${r(y + 6)} ${r(x + side * 0.6)} ${r(y + 8)}C${r(x - side * 2.4)} ${r(y + 4.4)} ${r(x - side * 1.8)} ${r(y - 1)} ${r(x)} ${r(y - 5)}Z`, { fill: 'hairGrad', stroke: 'hairLine', strokeWidth: 0.9 }));
-  braid.push(path(`M${r(x + side * 1.6)} ${r(y - 2.6)}C${r(x + side * 4.6)} ${r(y - 2)} ${r(x + side * 5)} ${r(y + 1.6)} ${r(x + side * 3.6)} ${r(y + 4)}`, { stroke: 'hairShine', strokeWidth: 1.1, opacity: 0.75 }));
+  braid.push(path(`M${round(x)} ${round(y - 5)}C${round(x + side * w * 1.3)} ${round(y - 5)} ${round(x + side * w * 1.2)} ${round(y + 6)} ${round(x + side * 0.6)} ${round(y + 8)}C${round(x - side * 2.4)} ${round(y + 4.4)} ${round(x - side * 1.8)} ${round(y - 1)} ${round(x)} ${round(y - 5)}Z`, { fill: 'hairGrad', stroke: 'hairLine', strokeWidth: 0.9 }));
+  braid.push(path(`M${round(x + side * 1.6)} ${round(y - 2.6)}C${round(x + side * 4.6)} ${round(y - 2)} ${round(x + side * 5)} ${round(y + 1.6)} ${round(x + side * 3.6)} ${round(y + 4)}`, { stroke: 'hairShine', strokeWidth: 1.1, opacity: 0.75 }));
 }
 
 export default {
@@ -144,10 +143,7 @@ export default {
     ...blush({ at: [72, 117.6], scale: 0.95 }),
     ...eye.parts,
     ...mouths({ at: [100, 125.4], scale: 0.9 }),
-    part('bangShadow', 'head', 47, [path(`M55 103C50 60 72 24 100 24C128 24 150 60 146 104${strands([
-      [146, 104], [142, 108], [138, 78], [128, 97], [124, 74], [113, 95], [110, 72], [98, 99],
-      [96, 74], [86, 94], [84, 72], [74, 91], [72, 72], [62, 102], [55, 103],
-    ])}Z`, { fill: 'skinShade', opacity: 0.5, blend: 'multiply' })], { clip: 'face' }),
+    part('bangShadow', 'head', 47, [path(shift(bangs, 0, 4), { fill: 'skinShade', opacity: 0.5, blend: 'multiply' })], { clip: 'face' }),
 
     // Front hair: a long lock on the left, the braid on the right.
     part('lockL', 'head', 48, [

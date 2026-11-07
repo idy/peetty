@@ -1,7 +1,7 @@
 // Miru (見る, "to look"): an energetic browser companion.
 // Lavender-to-mist-blue twin tails, a cursor hair clip and bows with
 // tab-shaped loops; oversized white hoodie, navy pleated skirt, short boots.
-import { arms, blush, brows, ellipse, eyes, mouths, pair, part, path, strands, tabBow, transformer } from './kit.mjs';
+import { arms, blush, brows, ellipse, eyes, mouths, pair, part, path, shift, strands, tabBow, transformer } from './kit.mjs';
 
 const face = 'M58 86C57 110 72 127 90 131.5Q100 134.5 110 131.5C128 127 143 110 142 86C141 58 124 44 100 44C76 44 59 58 58 86Z';
 
@@ -120,10 +120,7 @@ export default {
     ...blush({ at: [71, 118] }),
     ...eye.parts,
     ...mouths({ at: [100, 125.6] }),
-    part('bangShadow', 'head', 47, [path(`M54 102C50 60 72 24 100 24C128 24 150 60 146 102${strands([
-      [146, 102], [139, 105], [133, 77], [126, 92], [120, 75], [113, 93], [108, 78], [103, 100],
-      [100, 81], [95, 97], [90, 76], [83, 92], [78, 75], [70, 92], [66, 78], [61, 105], [54, 102],
-    ])}Z`, { fill: 'skinShade', opacity: 0.55, blend: 'multiply' })], { clip: 'face' }),
+    part('bangShadow', 'head', 47, [path(shift(bangs, 0, 4), { fill: 'skinShade', opacity: 0.55, blend: 'multiply' })], { clip: 'face' }),
 
     // Front hair.
     ...pair('lock', 'head', 48, [

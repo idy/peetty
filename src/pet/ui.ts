@@ -9,7 +9,9 @@ import type { Strings } from './i18n.ts';
 const STYLE = `
 :host { all: initial; }
 .stage { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
-.pet { position: absolute; left: 0; top: 0; pointer-events: none; will-change: transform; }
+.pet { position: absolute; left: 0; top: 0; pointer-events: none; will-change: transform; transition: opacity .35s ease; }
+.pet.gone { opacity: 0; }
+.pet.gone svg * { pointer-events: none; }
 .pet svg { display: block; touch-action: none; user-select: none; -webkit-user-select: none; }
 .pet svg * { pointer-events: visiblePainted; cursor: grab; }
 .pet.dragging svg * { cursor: grabbing; }
@@ -47,11 +49,16 @@ const STYLE = `
   .bubble, .menu { --peetty-ink: #eeeaf8; --peetty-surface: #2a2738; --peetty-line: #3d3952; --peetty-hover: #38344b; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .bubble, .menu { transition: none; }
+  .bubble, .menu, .pet { transition: none; }
 }
 `;
 
 export type MenuAction = 'greet' | 'move' | 'nap' | 'hide';
+
+export interface BoxSize {
+  width: number;
+  height: number;
+}
 
 export interface Overlay {
   host: HTMLElement;
@@ -60,6 +67,9 @@ export interface Overlay {
   bubbleBox: HTMLDivElement;
   menu: HTMLDivElement;
   menuBox: HTMLDivElement;
+  measure: (inner: HTMLElement) => BoxSize;
+  invalidate: (inner?: HTMLElement) => void;
+  destroy: () => void;
 }
 
 export function createOverlay(text: Strings, zIndex: number, onAction: (action: MenuAction) => void): Overlay {
@@ -105,13 +115,31 @@ export function createOverlay(text: Strings, zIndex: number, onAction: (action: 
 
   stage.append(pet, menuBox, bubbleBox);
   root.append(style, stage);
-  return { host, pet, bubble, bubbleBox, menu, menuBox };
+  const sizes = new Map<HTMLElement, BoxSize>();
+  const invalidate = (inner?: HTMLElement) => { if (inner) sizes.delete(inner); else sizes.clear(); };
+  const observer = typeof ResizeObserver === 'function' ? new ResizeObserver((entries) => {
+    for (const entry of entries) invalidate(entry.target as HTMLElement);
+  }) : null;
+  observer?.observe(menu);
+  observer?.observe(bubble);
+  const measure = (inner: HTMLElement): BoxSize => {
+    let size = sizes.get(inner);
+    if (!size) {
+      size = { width: inner.offsetWidth, height: inner.offsetHeight };
+      sizes.set(inner, size);
+    }
+    return size;
+  };
+  const destroy = () => {
+    observer?.disconnect();
+    sizes.clear();
+    host.remove();
+  };
+  return { host, pet, bubble, bubbleBox, menu, menuBox, measure, invalidate, destroy };
 }
 
 /** Places a floating box centred above a point, kept inside the viewport. */
-export function placeAbove(box: HTMLElement, x: number, y: number, inner: HTMLElement) {
-  const width = inner.offsetWidth;
-  const height = inner.offsetHeight;
+export function placeAbove(box: HTMLElement, x: number, y: number, inner: HTMLElement, { width, height }: BoxSize) {
   const left = Math.max(6, Math.min(innerWidth - width - 6, x - width / 2));
   const top = Math.max(6, y - height);
   box.style.transform = `translate3d(${left.toFixed(1)}px, ${top.toFixed(1)}px, 0)`;

@@ -27,7 +27,11 @@
     "behavior": {
       "type": "object",
       "properties": {
-        "weights": { "type": "object", "additionalProperties": { "type": "number", "minimum": 0, "maximum": 100 } },
+        "weights": {
+          "type": "object",
+          "propertyNames": { "enum": ["idle", "walk", "jump", "sit", "lie", "sleep", "think", "wave", "talk"] },
+          "additionalProperties": { "type": "number", "minimum": 0, "maximum": 100 }
+        },
         "walkSpeed": { "type": "number", "minimum": 0.25, "maximum": 3 },
         "jumpPower": { "type": "number", "minimum": 0.25, "maximum": 3 },
         "idleProp": { "enum": ["book", "cup", "camera", "gum", "stretch", "none"] },

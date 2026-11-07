@@ -1,4 +1,5 @@
-import { BONES, type Behavior, type BoneName, type BonePose, type Pose, type SlotName, type StateName } from './types.ts';
+import { clamp } from '../math.ts';
+import { BONES, HELD_PROPS, unitOf, type Behavior, type BonePose, type Pose, type RigFigure, type SlotName, type Soul, type StateName } from './types.ts';
 
 /**
  * Procedural animation for the standard skeleton.
@@ -23,26 +24,48 @@ export interface MotionFrame {
   look: [number, number] | null;
   /** Hide everything below the anchor line, as if behind the perch edge. */
   cut: boolean;
+  /** Her soul knocked out by a fright, if any; while it is out her eyes go blank. */
+  soul: Soul | null;
 }
 
 export type Emote = 'note' | 'sweat' | 'alert' | 'sleep' | 'heart' | 'dizzy' | 'flash';
 export type Mood = 'neutral' | 'happy' | 'worried';
 
-/** Figure measurements the edge poses need, in viewBox units. */
+/** Animation clocks that can be transferred to a replacement figure. */
+export interface MotionPhase {
+  state: StateName;
+  /** Seconds since the current state began. */
+  elapsed: number;
+  /** Seconds on the continuous animation clock. */
+  time: number;
+  /** Walking cycles completed, with two steps per cycle. */
+  walkPhase: number;
+  /** How far a fright has knocked her soul out, 0..1; 0 when omitted. */
+  soul?: number;
+}
+
+/** Figure measurements the edge poses need, in animation units. */
 export interface Geometry {
+  /** Drawing units per animation unit; see {@link unitOf}. */
+  unit: number;
   /** The anchor line (feet). */
   anchor: number;
   /** Where the seat meets an edge when sitting. */
   seat: number;
   /** Chest line that rests on an edge when lying on it. */
   chest: number;
-  /** Fingertips with arms raised, for hanging from an edge. */
-  reach: number;
 }
 
-const DEFAULT_GEOMETRY: Geometry = { anchor: 256, seat: 212, chest: 162, reach: 104 };
+const DEFAULT_GEOMETRY: Geometry = { unit: 1, anchor: 256, seat: 212, chest: 162 };
 const BLEND = 0.26;
-const STRIDE = 30; // viewBox units travelled per step
+const STRIDE = 30; // canonical animation units travelled per step
+/** Seconds of falling before the fright shows, so short drops stay calm. */
+const SOUL_DELAY = 0.12;
+/** Seconds for her soul to drift out, and to slip back in. */
+const SOUL_OUT = 0.35;
+const SOUL_IN = 0.18;
+/** Seconds her soul stays out after she lands. */
+const SOUL_LINGER = 0.5;
 const TAU = Math.PI * 2;
 const wave = (t: number, period: number, phase = 0) => Math.sin((t / period) * TAU + phase);
 const ease = (x: number) => (x <= 0 ? 0 : x >= 1 ? 1 : x * x * (3 - 2 * x));
@@ -61,8 +84,7 @@ export function noise(t: number, seed = 0): number {
     return (x - Math.floor(x)) * 2 - 1;
   };
   const i = Math.floor(t);
-  const f = t - i;
-  const u = f * f * (3 - 2 * f);
+  const u = ease(t - i);
   return hash(i) * (1 - u) + hash(i + 1) * u;
 }
 const drift = (t: number, seed: number) => noise(t, seed) * 0.65 + noise(t * 2.3, seed + 9) * 0.35;
@@ -99,6 +121,11 @@ export class Motion {
   private mood: Mood = 'neutral';
   private impact = 0;
   private landed = false;
+  /** How far her soul is out of her mouth, 0..1. */
+  private soul = 0;
+  private soulLinger = 0;
+  /** A fall frightens her while this is on; `play('fall')` turns it back on. */
+  private fright = true;
   private alertUntil = -1;
   private walkPhase = 0;
   private walkSpeed: number | null = null;
@@ -112,18 +139,23 @@ export class Motion {
   private readonly calm: number;
   private readonly speed: number;
   private readonly prop: Behavior['idleProp'];
+  /** The idle prop she holds in both hands, if any. */
+  private readonly held: (typeof HELD_PROPS)[number] | null;
   private readonly fallProp: Behavior['fallProp'];
   private readonly random: () => number;
   private readonly geometry: Geometry;
+  private readonly unit: number;
   private readonly seed: number;
 
   constructor(behavior?: Behavior, random: () => number = Math.random, geometry: Geometry = DEFAULT_GEOMETRY) {
     this.random = random;
     this.speed = behavior?.walkSpeed ?? 1;
-    this.calm = 1 / Math.max(0.6, Math.min(1.4, this.speed));
+    this.calm = 1 / clamp(this.speed, 0.6, 1.4);
     this.prop = behavior?.idleProp ?? 'none';
+    this.held = HELD_PROPS.find((prop) => prop === this.prop) ?? null;
     this.fallProp = behavior?.fallProp ?? 'none';
     this.geometry = geometry;
+    this.unit = geometry.unit;
     this.seed = Math.floor(random() * 1000);
   }
 
@@ -131,11 +163,37 @@ export class Motion {
     return this.state;
   }
 
+  get phase(): MotionPhase {
+    return { state: this.state, elapsed: this.since, time: this.time, walkPhase: this.walkPhase, soul: this.soul };
+  }
+
+  /** Plays a state; a fall frightens her unless {@link setFright} turns that off. */
   play(state: StateName): void {
+    if (state === 'fall') this.fright = true;
     if (state === this.state) return;
     // A jump's crouch must read immediately; other changes ease in.
     this.begin(state, state === 'jump' ? 0.08 : BLEND);
     this.landed = false;
+  }
+
+  /** Continues another figure's animation without replaying its transition. */
+  resume(phase: MotionPhase): void {
+    this.begin(phase.state, 0);
+    this.since = phase.elapsed;
+    this.time = phase.time;
+    this.walkPhase = phase.walkPhase;
+    this.soul = phase.soul ?? 0;
+    if (phase.state === 'fall') this.fright = true;
+    this.landed = false;
+  }
+
+  /**
+   * Whether the current fall frightens her: once it has lasted a moment, her soul
+   * slips out, unless she floats under an umbrella. `play('fall')` turns it on;
+   * hosts may switch it at any time, such as off for a calm drop.
+   */
+  setFright(on: boolean): void {
+    this.fright = on;
   }
 
   setMood(mood: Mood): void {
@@ -149,7 +207,7 @@ export class Motion {
 
   /** Horizontal walking speed in viewBox units/s; null uses the figure's own pace. */
   setWalkSpeed(unitsPerSecond: number | null): void {
-    this.walkSpeed = unitsPerSecond;
+    this.walkSpeed = unitsPerSecond === null ? null : unitsPerSecond / this.unit;
   }
 
   /**
@@ -160,7 +218,9 @@ export class Motion {
     // Impacts are instant: no crossfade, or the squash would be swallowed.
     this.begin('idle', 0);
     this.landed = true;
-    this.impact = Math.max(0, Math.min(1, impact));
+    this.impact = clamp(impact, 0, 1);
+    // A soul that got out stays out a moment longer, then slips back in.
+    this.soulLinger = this.soul > 0.2 ? SOUL_LINGER : 0;
   }
 
   /** A short startled "!" over her head. */
@@ -183,7 +243,7 @@ export class Motion {
     let cut = false;
 
     // Eyes move instantly (renderer); the head turns toward them a beat later.
-    const turnTarget = Math.max(-1, Math.min(1, this.gaze[0])) * 5;
+    const turnTarget = clamp(this.gaze[0], -1, 1) * 5;
     this.headTurn += (turnTarget - this.headTurn) * (1 - Math.exp(-dt * 2.6));
 
     // Breathing plus noise-driven sway runs under every state.
@@ -206,16 +266,25 @@ export class Motion {
       slots.mouth = 'o';
     }
 
-    const reading = this.prop === 'book' && this.mood === 'neutral';
+    const heldProp = this.mood === 'neutral' ? this.held : null;
+    const reading = heldProp === 'book';
+
+    // A fall frightens her soul out of her mouth; it lingers after landing, then slips back in.
+    const frightened = this.state === 'fall'
+      ? this.fright && this.fallProp !== 'umbrella' && s > SOUL_DELAY
+      : this.landed && this.state === 'idle' && s < this.soulLinger;
+    this.soul = frightened ? Math.min(1, this.soul + dt / SOUL_OUT) : Math.max(0, this.soul - dt / SOUL_IN);
 
     switch (this.state) {
       case 'idle':
-        if (reading) {
-          // Reading: hands meet at the book, head bows, eyes scan the lines.
-          slots.hand = 'book';
+        if (heldProp) {
+          slots.hand = heldProp;
           slots.armL = slots.armR = 'bent';
           pose.armL = { rotate: breath * 0.6 };
           pose.armR = { rotate: -breath * 0.6 };
+        }
+        if (reading) {
+          // Reading: hands meet at the book, head bows, eyes scan the lines.
           pose.head.rotate = (pose.head.rotate ?? 0) * 0.3 + 3;
           pose.head.y = (pose.head.y ?? 0) + 1.6;
           look = [((t * 0.45) % 1) * 1.6 - 0.8, 0.9];
@@ -239,12 +308,8 @@ export class Motion {
             slots.eyes = k > 0.25 ? 'closed' : 'open';
             slots.mouth = k > 0.35 ? 'open' : 'smile';
           }
-        } else if (this.prop === 'cup' && this.mood === 'neutral') {
+        } else if (heldProp === 'cup') {
           // Both hands around a warm drink; a sip now and then, then a happy sigh.
-          slots.hand = 'cup';
-          slots.armL = slots.armR = 'bent';
-          pose.armL = { rotate: breath * 0.6 };
-          pose.armR = { rotate: -breath * 0.6 };
           const period = 7 * c;
           const phase = t % period;
           if (phase > period - 1.6) {
@@ -257,12 +322,8 @@ export class Motion {
             slots.eyes = 'happy';
             emote = 'heart';
           }
-        } else if (this.prop === 'camera' && this.mood === 'neutral') {
+        } else if (heldProp === 'camera') {
           // Holds her camera; now and then leans in, snaps a photo, and is pleased.
-          slots.hand = 'camera';
-          slots.armL = slots.armR = 'bent';
-          pose.armL = { rotate: breath * 0.6 };
-          pose.armR = { rotate: -breath * 0.6 };
           const period = 8 * c;
           const phase = t % period;
           if (phase > period - 1.4) {
@@ -301,7 +362,6 @@ export class Motion {
         break;
 
       case 'wave': {
-        // Anticipation dip, then the arm pops up with overshoot and waves.
         // Anticipation dip, then the raised arm pops up past its pose and waves.
         const up = backOut(ease((s - 0.06) / 0.3));
         const flap = wave(s, 0.44) * 9 * ease((s - 0.3) / 0.2);
@@ -398,7 +458,7 @@ export class Motion {
         break;
       }
 
-      case 'fall':
+      case 'fall': {
         if (this.fallProp === 'umbrella') {
           // Floats down under her umbrella: calm, feet swinging gently.
           slots.hand = 'umbrella';
@@ -410,15 +470,18 @@ export class Motion {
           if (s > 0.4) emote = 'note';
           break;
         }
+        // Flailing, until her soul is out and she goes limp.
+        const flail = 1 - this.soul * 0.75;
         slots.armL = slots.armR = 'up';
-        pose.armL = { rotate: -8 + wave(t, 0.3) * 9 };
-        pose.armR = { rotate: 8 - wave(t, 0.3, 1.4) * 9 };
-        pose.legL = { rotate: wave(t, 0.4) * 12 };
-        pose.legR = { rotate: -wave(t, 0.4) * 12 };
+        pose.armL = { rotate: -8 + wave(t, 0.3) * 9 * flail };
+        pose.armR = { rotate: 8 - wave(t, 0.3, 1.4) * 9 * flail };
+        pose.legL = { rotate: wave(t, 0.4) * 12 * flail };
+        pose.legR = { rotate: -wave(t, 0.4) * 12 * flail };
         slots.mouth = 'o';
         slots.brows = 'worried';
         emote = 'sweat';
         break;
+      }
 
       case 'drag': {
         // Dangling: legs kick and raised arms flail beside the head.
@@ -443,9 +506,8 @@ export class Motion {
         pose.legR = { sy: 0.8, rotate: drift(t / 1.4, this.seed + 17) * 10 + wave(t, 1.7 * c, 2.2) * 8 };
         pose.armL = { rotate: 5 };
         pose.armR = { rotate: -5 };
-        const held = this.mood === 'neutral' && (this.prop === 'cup' || this.prop === 'camera');
-        if (reading || held) {
-          slots.hand = reading ? 'book' : this.prop === 'camera' ? 'camera' : 'cup';
+        if (heldProp) {
+          slots.hand = heldProp;
           slots.armL = slots.armR = 'bent';
           pose.armL = { rotate: 0 };
           pose.armR = { rotate: 0 };
@@ -516,8 +578,15 @@ export class Motion {
       slots.mouth = 'o';
     }
 
-    // Natural blinking, sometimes twice; never over closed or happy eyes.
-    if (slots.eyes === 'open') {
+    // With her soul out the eyes go blank (the renderer hides the irises) and her mouth hangs open.
+    if (this.soul > 0) {
+      slots.eyes = 'open';
+      slots.mouth = 'o';
+      emote = null;
+    }
+
+    // Natural blinking, sometimes twice; never over closed, happy or blank eyes.
+    if (slots.eyes === 'open' && !this.soul) {
       if (t >= this.nextBlink) {
         this.blinkUntil = t + 0.11;
         if (this.doubleBlink) {
@@ -542,7 +611,22 @@ export class Motion {
     // Crossfade from the pose on screen when the state changed.
     const output = s < this.blend ? mix(this.from, pose, ease(s / this.blend)) : pose;
     this.last = output;
-    return { pose: output, slots, push, emote, look, cut };
+    // Retain canonical poses for future blends; only the renderer receives drawing units.
+    let rendered = output;
+    if (this.unit !== 1) {
+      rendered = {};
+      for (const bone of BONES) {
+        const p = output[bone];
+        if (!p) continue;
+        const scaled = { ...p };
+        if (scaled.x !== undefined) scaled.x *= this.unit;
+        if (scaled.y !== undefined) scaled.y *= this.unit;
+        rendered[bone] = scaled;
+      }
+    }
+    // The soul's drift stays in animation units; the renderer scales it with the figure.
+    const soul: Soul | null = this.soul > 0 ? { out: ease(this.soul), drift: [wave(t, 1.7) * 4, wave(t, 1.1, 1) * 3] } : null;
+    return { pose: rendered, slots, push: [push[0] * this.unit, push[1] * this.unit], emote, look, cut, soul };
   }
 
   private begin(state: StateName, blend: number) {
@@ -554,12 +638,10 @@ export class Motion {
   }
 }
 
-/** Measures a rig figure for the edge poses. */
-export function geometryOf(figure: { anchor: [number, number]; skeleton: Record<BoneName, { pivot: [number, number] }> }): Geometry {
-  const shoulder = figure.skeleton.armL.pivot[1];
-  const hip = figure.skeleton.legL.pivot[1];
-  const anchor = figure.anchor[1];
-  // Raised arms put the hands about this far above the shoulders.
-  const arm = Math.max(20, (hip - shoulder) * 0.72);
-  return { anchor, seat: hip + 4, chest: shoulder + 16, reach: shoulder - arm };
+/** Measures a rig figure for the edge poses, in animation units. */
+export function geometryOf(figure: Pick<RigFigure, 'anchor' | 'skeleton' | 'viewBox'>): Geometry {
+  const unit = unitOf(figure.viewBox);
+  const shoulder = figure.skeleton.armL.pivot[1] / unit;
+  const hip = figure.skeleton.legL.pivot[1] / unit;
+  return { unit, anchor: figure.anchor[1] / unit, seat: hip + 4, chest: shoulder + 16 };
 }

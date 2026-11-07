@@ -21,14 +21,19 @@ export interface Jump {
   apex: number;
 }
 
+/** The flattest arc worth jumping; anything lower would scrape the ceiling. */
+const MIN_APEX = 12;
+
 /**
  * Plans a ballistic jump that lands exactly on `to`. Returns null when the
- * target is out of reach for this jump power.
+ * target is out of reach for this jump power, or when even a low arc would
+ * rise above `ceiling`, the smallest y the jumper may reach.
  */
-export function planJump(from: [number, number], to: [number, number], power = 1): Jump | null {
+export function planJump(from: [number, number], to: [number, number], power = 1, ceiling = -Infinity): Jump | null {
   const dx = to[0] - from[0];
   const top = Math.min(from[1], to[1]);
-  const apex = 36 + Math.min(80, Math.abs(dx) * 0.14);
+  const apex = Math.min(36 + Math.min(80, Math.abs(dx) * 0.14), top - ceiling);
+  if (apex < MIN_APEX) return null;
   const peak = top - apex;
   const rise = from[1] - peak;
   if (rise > 360 * power || Math.abs(dx) > 440 * power) return null;
@@ -65,15 +70,18 @@ export function impact(vy: number): number {
   return Math.max(0, Math.min(1, vy / HARD_LANDING));
 }
 
-/** Picks a key by relative weight. */
-export function weighted<K extends string>(weights: Partial<Record<K, number>>, random: () => number = Math.random): K | null {
-  const entries = Object.entries(weights).filter(([, w]) => typeof w === 'number' && (w as number) > 0) as [K, number][];
-  const total = entries.reduce((sum, [, w]) => sum + w, 0);
+/** Picks a value or a record key by relative weight. */
+export function weighted<T>(weights: readonly (readonly [T, number])[], random?: () => number): T | null;
+export function weighted<K extends string>(weights: Partial<Record<K, number>>, random?: () => number): K | null;
+export function weighted<T>(weights: readonly (readonly [T, number])[] | Partial<Record<string, number>>, random: () => number = Math.random): T | string | null {
+  const pairs = (Array.isArray(weights) ? weights : Object.entries(weights)) as readonly (readonly [T | string, number])[];
+  const entries = pairs.filter(([, weight]) => typeof weight === 'number' && Number.isFinite(weight) && weight > 0);
+  const total = entries.reduce((sum, [, weight]) => sum + weight, 0);
   if (!total) return null;
-  let r = random() * total;
-  for (const [key, w] of entries) {
-    r -= w;
-    if (r <= 0) return key;
+  let remaining = random() * total;
+  for (const [value, weight] of entries) {
+    remaining -= weight;
+    if (remaining <= 0) return value;
   }
   return entries[entries.length - 1]![0];
 }

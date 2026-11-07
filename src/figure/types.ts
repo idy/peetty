@@ -43,6 +43,29 @@ export type SlotState<S extends SlotName = SlotName> = (typeof SLOT_STATES)[S][n
 export const STATES = ['idle', 'walk', 'jump', 'fall', 'sit', 'lie', 'hang', 'sleep', 'drag', 'wave', 'talk', 'think'] as const;
 export type StateName = (typeof STATES)[number];
 
+/** Actions that may be selected autonomously; other states follow physics. */
+export const AUTONOMOUS_ACTIONS = ['idle', 'walk', 'jump', 'sit', 'lie', 'sleep', 'think', 'wave', 'talk'] as const;
+export type AutonomousAction = (typeof AUTONOMOUS_ACTIONS)[number];
+
+/** Personal idles; `book`, `cup` and `camera` are held in both hands. */
+export const IDLE_PROPS = ['book', 'cup', 'camera', 'gum', 'stretch', 'none'] as const;
+export const HELD_PROPS = ['book', 'cup', 'camera'] as const;
+export const FALL_PROPS = ['umbrella', 'none'] as const;
+export const LINE_CAPS = ['butt', 'round', 'square'] as const;
+export const LINE_JOINS = ['miter', 'round', 'bevel'] as const;
+export const BLENDS = ['normal', 'multiply', 'screen', 'overlay'] as const;
+
+/**
+ * The SDK animates in the units of a figure 260 units tall, the presets' size;
+ * other figures convert lengths by their viewBox height.
+ */
+export const ANIMATION_HEIGHT = 260;
+
+/** Drawing units per animation unit for a figure's viewBox. */
+export function unitOf(viewBox: readonly [number, number, number, number]): number {
+  return viewBox[3] / ANIMATION_HEIGHT;
+}
+
 export type Point = [x: number, y: number];
 export type LocalizedText = string | Record<string, string>;
 
@@ -52,10 +75,10 @@ export interface Paint {
   stroke?: string;
   strokeWidth?: number;
   opacity?: number;
-  lineCap?: 'butt' | 'round' | 'square';
-  lineJoin?: 'miter' | 'round' | 'bevel';
+  lineCap?: (typeof LINE_CAPS)[number];
+  lineJoin?: (typeof LINE_JOINS)[number];
   /** `multiply` and `screen` give soft shading and glow. */
-  blend?: 'normal' | 'multiply' | 'screen' | 'overlay';
+  blend?: (typeof BLENDS)[number];
 }
 
 export interface PathShape extends Paint {
@@ -131,7 +154,7 @@ export interface Part {
 
 export interface Behavior {
   /** Relative weights for idle choices, e.g. `{ "sit": 3 }`. */
-  weights?: Partial<Record<StateName | string, number>>;
+  weights?: Partial<Record<AutonomousAction, number>>;
   /** Walking speed multiplier, 0.25–3. */
   walkSpeed?: number;
   /** Jump strength multiplier, 0.25–3. */
@@ -141,9 +164,9 @@ export interface Behavior {
    * (`hand:book`, `hand:cup`, `hand:camera`), `gum` blows bubbles (`mouth:gum`, `mouth:gumBig`), `stretch`
    * is an occasional stretch and yawn.
    */
-  idleProp?: 'book' | 'cup' | 'camera' | 'gum' | 'stretch' | 'none';
+  idleProp?: (typeof IDLE_PROPS)[number];
   /** `umbrella`: floats down slowly under an umbrella (`hand:umbrella`) when falling. */
-  fallProp?: 'umbrella' | 'none';
+  fallProp?: (typeof FALL_PROPS)[number];
 }
 
 interface FigureBase {
@@ -201,3 +224,11 @@ export interface BonePose {
   sy?: number;
 }
 export type Pose = Partial<Record<BoneName, BonePose>>;
+
+/** Her soul floating out of her mouth after a fright, produced by the animator. */
+export interface Soul {
+  /** 0 at her lips, 1 fully out. */
+  out: number;
+  /** Floating offset in animation units; the renderer scales it to the figure. */
+  drift: [number, number];
+}

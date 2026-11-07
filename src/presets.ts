@@ -4,18 +4,14 @@ import koharu from '../figures/koharu.json' with { type: 'json' };
 import miru from '../figures/miru.json' with { type: 'json' };
 import riley from '../figures/riley.json' with { type: 'json' };
 import xiaoxiao from '../figures/xiaoxiao.json' with { type: 'json' };
+import { CATALOG_FORMAT, FIGURE_CATALOG, type PresetId } from './catalog.ts';
 import type { Figure, LocalizedText } from './figure/types.ts';
-import { validateFigure } from './figure/validate.ts';
+import { FIGURE_ID, validateFigure } from './figure/validate.ts';
 
-/** The figures bundled into the SDK, by id. */
-export const PRESETS = { miru, koharu, xiaoxiao, riley, amara, elsie } as unknown as Record<'miru' | 'koharu' | 'xiaoxiao' | 'riley' | 'amara' | 'elsie', Figure>;
-export type PresetId = keyof typeof PRESETS;
-export const PRESET_IDS = Object.keys(PRESETS) as PresetId[];
+export { FIGURE_CATALOG, PRESET_IDS, type PresetId } from './catalog.ts';
 
-/** Where the public figure catalog lives; `<id>.json` and `index.json`. */
-export const FIGURE_CATALOG = 'https://peetty.idy.dev/figures/';
-
-const ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
+/** The figures bundled into the SDK, by id; the type check keeps them in step with PRESET_IDS. */
+export const PRESETS = { miru, koharu, xiaoxiao, riley, amara, elsie } satisfies Record<PresetId, object> as unknown as Record<PresetId, Figure>;
 
 export interface CatalogEntry {
   id: string;
@@ -48,16 +44,16 @@ async function fetchJson(input: string, base: string): Promise<unknown> {
  */
 export async function resolveFigure(input: string | object = 'miru', catalog = FIGURE_CATALOG): Promise<Figure> {
   if (typeof input === 'object') return validateFigure(input);
-  if (input in PRESETS) return PRESETS[input as PresetId];
-  if (ID.test(input)) return validateFigure(await fetchJson(`${input}.json`, catalog));
+  if (Object.hasOwn(PRESETS, input)) return PRESETS[input as PresetId];
+  if (FIGURE_ID.test(input)) return validateFigure(await fetchJson(`${input}.json`, catalog));
   return validateFigure(await fetchJson(input, document.baseURI));
 }
 
 /** Lists the figures in a catalog, e.g. for a character picker. */
 export async function listFigures(catalog = FIGURE_CATALOG): Promise<CatalogEntry[]> {
   const data = await fetchJson('index.json', catalog) as { format?: unknown; figures?: unknown };
-  if (data?.format !== 'peetty.catalog' || !Array.isArray(data.figures)) throw new Error('Not a Peetty figure catalog.');
+  if (data?.format !== CATALOG_FORMAT || !Array.isArray(data.figures)) throw new Error('Not a Peetty figure catalog.');
   return data.figures.filter((e): e is CatalogEntry =>
-    !!e && typeof e === 'object' && typeof e.id === 'string' && ID.test(e.id) && typeof e.url === 'string'
+    !!e && typeof e === 'object' && typeof e.id === 'string' && FIGURE_ID.test(e.id) && typeof e.url === 'string'
     && /^https?:\/\//.test(e.url));
 }

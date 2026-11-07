@@ -20,7 +20,7 @@
     .controls { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
     button { font: inherit; border: 1px solid var(--line); background: var(--bg); color: var(--ink); border-radius: 999px; padding: 4px 11px; cursor: pointer; }
     button[aria-pressed="true"] { background: var(--ink); color: var(--card); }
-    .actual { display: flex; padding-top: 70px !important; align-items: flex-end; gap: 16px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); color: var(--muted); }
+    .actual { display: flex; padding-top: 70px; align-items: flex-end; gap: 16px; margin-top: 14px; border-top: 1px solid var(--line); color: var(--muted); }
     .mini-card { flex: 1; position: relative; height: 40px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); }
     .mini-card .perch { position: absolute; left: 18px; bottom: calc(100% - 1px); }
     .error { color: #c0392b; white-space: pre-wrap; font: 12px ui-monospace, monospace; }
@@ -30,11 +30,10 @@
   <header><h1>Peetty figure sheet</h1><span id="status"></span><button id="theme" type="button">Toggle dark</button></header>
   <main id="sheet"></main>
   <script type="module">
-    import { FigureView } from '/dist/index.js';
+    import { FigureView, STATES } from '/dist/index.js';
     const query = new URLSearchParams(location.search);
     const ids = query.get('figures')?.split(',') ?? ['miru', 'koharu', 'xiaoxiao', 'riley', 'amara', 'elsie', 'shiori'];
     const scale = Number(query.get('scale') ?? 2.5);
-    const states = ['idle', 'walk', 'jump', 'fall', 'sit', 'lie', 'hang', 'sleep', 'drag', 'wave', 'talk', 'think'];
     const moods = ['neutral', 'happy', 'worried'];
     const sheet = document.getElementById('sheet');
     document.getElementById('theme').onclick = () => {
@@ -56,9 +55,12 @@
         const big = new FigureView(figure, { scale });
         const small = new FigureView(figure, { scale: 1 });
         window.views[id] = big;
-        card.innerHTML = `<h2>${figure.name.en} · ${figure.name.zh ?? ''}</h2><p>${figure.description?.en ?? ''}</p><div class="stage"></div>
+        card.innerHTML = `<h2></h2><p></p><div class="stage"></div>
           <div class="controls" data-kind="state"></div><div class="controls" data-kind="mood"></div>
           <div class="actual"><span>Actual size</span><div class="mini-card"></div></div>`;
+        const names = typeof figure.name === 'string' ? [figure.name] : [figure.name.en, figure.name.zh].filter(Boolean);
+        card.querySelector('h2').textContent = names.join(' · ') || big.name;
+        card.querySelector('p').textContent = typeof figure.description === 'string' ? figure.description : figure.description?.en ?? '';
         card.querySelector('.stage').append(big.element);
         const perch = document.createElement('div');
         perch.className = 'perch';
@@ -79,10 +81,15 @@
             box.append(b);
           }
         };
-        group('state', states, (s) => { big.play(s); small.play(s); });
+        group('state', STATES, (s) => { big.play(s); small.play(s); });
         group('mood', moods, (m) => { big.setMood(m); small.setMood(m); });
       } catch (error) {
-        card.innerHTML = `<h2>${id}</h2><p class="error">${String(error.message ?? error)}</p>`;
+        const heading = document.createElement('h2');
+        heading.textContent = id;
+        const message = document.createElement('p');
+        message.className = 'error';
+        message.textContent = String(error?.message ?? error);
+        card.replaceChildren(heading, message);
       }
     }
     document.getElementById('status').textContent = `${Object.keys(window.views).length} figure(s)`;

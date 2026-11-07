@@ -75,6 +75,20 @@ describe('validateFigure', () => {
     assert.match(found, /not a palette key/);
   });
 
+  it('rejects inherited slot names with a FigureError', async () => {
+    const figure = await base();
+    figure.parts[0]!.slot = 'constructor:open';
+    assert.match(issues(figure).join('\n'), /parts\[0\]\.slot/);
+  });
+
+  it('rejects inherited paint references but accepts owned palette entries', async () => {
+    const figure = await base();
+    figure.parts[0]!.shapes[0]!.fill = 'constructor';
+    assert.match(issues(figure).join('\n'), /not a palette key/);
+    figure.palette = { ...figure.palette, constructor: '#fff' };
+    assert.deepEqual(issues(figure), []);
+  });
+
   it('checks bones, slots, clips and springs', async () => {
     const figure = await base();
     const part = figure.parts[0]!;
@@ -92,6 +106,24 @@ describe('validateFigure', () => {
     const found = issues(figure).join('\n');
     assert.match(found, /is used twice/);
     assert.match(found, /the limit is/);
+  });
+
+  it('rejects physics states and unknown names as autonomous weights', async () => {
+    for (const action of ['fall', 'hang', 'drag', 'unknown']) {
+      const figure = await base();
+      figure.behavior = { weights: { [action]: 100 } };
+      assert.match(issues(figure).join('\n'), new RegExp(`behavior\\.weights\\.${action}`));
+    }
+  });
+
+  it('enforces the serialized size limit in UTF-8 bytes', async () => {
+    const figure = await base();
+    const input = figure as unknown as Record<string, unknown>;
+    input.extra = '界'.repeat(Math.ceil(LIMITS.maxBytes / 3));
+    const serialized = JSON.stringify(input);
+    assert.ok(serialized.length < LIMITS.maxBytes);
+    assert.ok(new TextEncoder().encode(serialized).byteLength > LIMITS.maxBytes);
+    assert.match(issues(input).join('\n'), /the limit is/);
   });
 
   it('accepts a minimal sprite figure and rejects unsafe images', () => {

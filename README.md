@@ -6,7 +6,7 @@ Peetty is an open-source, local-first browser pet. The idea is simple: a small c
 
 Bring your own AI API key, shape its personality, and take its memories with you.
 
-> **Status: early development.** The companion works on real pages: six animated preset characters, a JSON format for your own, and one-script embedding. Chat, memory and the management page are not built yet, and publishing to GitHub Packages is configured but no package has been published yet. The capabilities below describe the intended product.
+> **Status: early development.** The companion works on real pages: six animated preset characters, a JSON format for your own, and one-script embedding. Chat, memory and the management page are not built yet. Released versions are published to GitHub Packages. The capabilities below describe the intended product.
 
 ## The experience
 
@@ -125,7 +125,7 @@ npm run check
 | `.github/workflows/package.yml` | Checks and publishes matching version tags to GitHub Packages |
 | `.github/workflows/codex-review.yml` | Shared Codex review for PRs, review requests, and linked-Issue updates |
 | `dev/figures.html` | Figure sheet for reviewing presets |
-| `test/` | Validator, preset and motion tests |
+| `test/` | Figure validation, presets, motion, companion lifecycle and perch tests |
 
 ## Contributing
 

@@ -1,8 +1,10 @@
+import { clamp } from '../math.ts';
 import { isColorLiteral } from './validate.ts';
 import {
   BONES,
   BONE_PARENTS,
   SLOT_STATES,
+  unitOf,
   type BoneName,
   type Gradient,
   type Part,
@@ -10,9 +12,17 @@ import {
   type RigFigure,
   type Shape,
   type SlotName,
+  type Soul,
 } from './types.ts';
 
 const SVG = 'http://www.w3.org/2000/svg';
+const SPRING_STEP = 1 / 120;
+/** The soul a fright knocks out, in the units of a 260-unit-tall figure. */
+const SOUL_RADIUS = 22;
+/** Where it floats, from her mouth: up and off to the side, clear of her eyes. */
+const SOUL_RISE: [number, number] = [58, -96];
+/** A chibi mouth sits about this far above the head pivot (the neck). */
+const SOUL_MOUTH = 9;
 
 /** Fallback order when a figure does not draw a requested slot state. */
 const SLOT_FALLBACKS: Record<string, string[]> = {
@@ -56,11 +66,14 @@ interface PartView {
   part: Part;
   outer: SVGGElement;
   inner: SVGGElement;
-  slot: string | null;
+  /** The part follows the pointer or swings on a spring, so its inner group carries a transform. */
+  innerTransform: boolean;
+  visible: boolean;
   angle: number;
   velocity: number;
   last: [number, number] | null;
   lastVelocity: [number, number];
+  pendingAcceleration: [number, number];
 }
 
 export interface RigOptions {
@@ -83,13 +96,24 @@ export class RigRenderer {
   private readonly available = new Set<string>();
   private readonly slots = new Map<SlotName, string>();
   private look: [number, number] = [0, 0];
-  private time = 0;
+  private world: Record<BoneName, Matrix>;
+  /** Bone transforms of the current `world`, each formatted on first use; reset whenever it changes. */
+  private transforms: Partial<Record<BoneName, string>> = {};
+  private springRemainder = 0;
+  private readonly unit: number;
+  private soul: Soul | null = null;
+  private readonly mouth: [number, number];
+  private readonly soulLayer: SVGGElement;
+  private readonly soulShape: SVGPathElement;
+  private readonly soulFace: SVGGElement;
 
   constructor(figure: RigFigure, options: RigOptions = {}) {
     this.figure = figure;
+    this.world = this.worldMatrices({});
+    this.unit = unitOf(figure.viewBox);
     this.palette = { ...figure.palette };
     for (const [key, value] of Object.entries(options.palette ?? {})) {
-      if (key in this.palette && isColorLiteral(value)) this.palette[key] = value;
+      if (Object.hasOwn(this.palette, key) && isColorLiteral(value)) this.palette[key] = value;
     }
 
     const [x, y, w, h] = figure.viewBox;
@@ -104,15 +128,14 @@ export class RigRenderer {
     const defs = el('defs');
     for (const [key, gradient] of Object.entries(figure.gradients ?? {})) defs.append(this.gradient(key, gradient));
     for (const [key, shapes] of Object.entries(figure.clips ?? {})) {
-      const clip = el('clipPath', { id: this.ref(key), clipPathUnits: 'userSpaceOnUse' });
+      const clip = el('clipPath', { id: this.ref('clip', key), clipPathUnits: 'userSpaceOnUse' });
       for (const shape of shapes) clip.append(this.shape(shape));
       defs.append(clip);
     }
     this.svg.append(defs);
 
-    const ordered = figure.parts.map((part, index) => ({ part, index }))
-      .sort((a, b) => a.part.z - b.part.z || a.index - b.index);
-    for (const { part } of ordered) {
+    const ordered = [...figure.parts].sort((a, b) => a.z - b.z);
+    for (const part of ordered) {
       if (part.slot) this.available.add(part.slot);
       const outer = el('g');
       outer.dataset.part = part.id;
@@ -121,13 +144,35 @@ export class RigRenderer {
       const inner = el('g');
       for (const shape of part.shapes) inner.append(this.shape(shape));
       if (part.clip) {
-        const clipped = el('g', { 'clip-path': `url(#${this.ref(part.clip)})` });
+        const clipped = el('g', { 'clip-path': `url(#${this.ref('clip', part.clip)})` });
         clipped.append(inner);
         outer.append(clipped);
       } else outer.append(inner);
       this.svg.append(outer);
-      this.views.push({ part, outer, inner, slot: part.slot ?? null, angle: 0, velocity: 0, last: null, lastVelocity: [0, 0] });
+      this.views.push({
+        part, outer, inner, innerTransform: !!part.look || !!(part.spring && part.pivot), visible: true,
+        angle: 0, velocity: 0, last: null, lastVelocity: [0, 0], pendingAcceleration: [0, 0],
+      });
     }
+
+    // Drawn by the SDK above every part: her soul, when a fright knocks it out.
+    const [headX, headY] = figure.skeleton.head.pivot;
+    this.mouth = [headX, headY - SOUL_MOUTH * this.unit];
+    this.soulShape = el('path', { fill: '#ffffff', stroke: '#bdb6e0', 'stroke-width': +(2 * this.unit).toFixed(3), 'stroke-linejoin': 'round' });
+    this.soulFace = el('g', { fill: '#5f5a80' });
+    const features = [
+      el('ellipse', { cx: -0.34, cy: -0.12, rx: 0.12, ry: 0.15 }),
+      el('ellipse', { cx: 0.34, cy: -0.12, rx: 0.12, ry: 0.15 }),
+      el('ellipse', { cx: 0, cy: 0.3, rx: 0.12, ry: 0.16 }),
+    ];
+    this.soulFace.append(...features);
+    this.soulLayer = el('g');
+    this.soulLayer.dataset.effect = 'soul';
+    this.soulLayer.style.display = 'none';
+    this.soulLayer.append(this.soulShape, this.soulFace);
+    // Inline, so a host stylesheet that makes her parts grabbable cannot make the soul catch the pointer.
+    for (const node of [this.soulLayer, this.soulShape, this.soulFace, ...features]) node.style.pointerEvents = 'none';
+    this.svg.append(this.soulLayer);
 
     for (const slot of Object.keys(SLOT_STATES) as SlotName[]) this.slots.set(slot, SLOT_STATES[slot][0]);
     this.refreshSlots();
@@ -136,9 +181,18 @@ export class RigRenderer {
 
   /** Switches a slot, falling back to a drawn state when needed. */
   setSlot(slot: SlotName, state: string): void {
-    if (this.slots.get(slot) === state) return;
-    this.slots.set(slot, state);
-    this.refreshSlots();
+    this.setSlots({ [slot]: state });
+  }
+
+  /** Switches several slots at once, updating which parts are shown only once. */
+  setSlots(slots: Partial<Record<SlotName, string>>): void {
+    let changed = false;
+    for (const [slot, state] of Object.entries(slots) as [SlotName, string][]) {
+      if (this.slots.get(slot) === state) continue;
+      this.slots.set(slot, state);
+      changed = true;
+    }
+    if (changed) this.refreshSlots();
   }
 
   /** Pointer direction for the eyes, each axis -1..1. */
@@ -147,42 +201,90 @@ export class RigRenderer {
   }
 
   /**
+   * Her soul after a fright, with its drift in animation units, or null.
+   * While it is out, the irises (parts with `look`) go blank.
+   */
+  setSoul(soul: Soul | null): void {
+    const changed = !soul !== !this.soul;
+    this.soul = soul;
+    if (!changed) return;
+    this.soulLayer.style.display = soul ? '' : 'none';
+    this.refreshSlots();
+  }
+
+  /**
    * Applies a pose and advances springs.
    * @param dt seconds since the last frame
    * @param push whole-figure acceleration in viewBox units/s², e.g. from walking
    */
   frame(pose: Pose, dt: number, push: [number, number] = [0, 0]): void {
-    const world = this.worldMatrices(pose);
-    const rotation: Partial<Record<BoneName, number>> = {};
-    for (const bone of BONES) {
-      const m = world[bone];
-      rotation[bone] = (Math.atan2(m[1], m[0]) * 180) / Math.PI;
-    }
+    this.world = this.worldMatrices(pose);
+    this.transforms = {};
     const step = Math.min(Math.max(dt, 0), 0.1);
-    this.time += step;
+    const elapsed = this.springRemainder + step;
+    const steps = Math.floor((elapsed + 1e-10) / SPRING_STEP);
 
     for (const view of this.views) {
       const { part } = view;
-      const matrix = world[part.bone];
-      view.outer.setAttribute('transform', fmt(matrix));
-      let transform = '';
-      if (part.look) {
-        transform += `translate(${(this.look[0] * part.look[0]).toFixed(3)} ${(this.look[1] * part.look[1]).toFixed(3)}) `;
-      }
-      if (part.spring && part.pivot) {
-        this.spring(view, matrix, rotation[part.bone] ?? 0, step, push);
-        transform += `rotate(${view.angle.toFixed(3)} ${part.pivot[0]} ${part.pivot[1]})`;
-      }
-      if (transform) view.inner.setAttribute('transform', transform.trim());
-      else view.inner.removeAttribute('transform');
+      // Hidden alternatives still track their bone and spring, so revealing one
+      // does not restart its motion or turn old displacement into acceleration.
+      if (part.spring && part.pivot) this.spring(view, this.world[part.bone], step, push, steps);
+      if (view.visible) this.render(view);
     }
+    this.springRemainder = Math.max(0, elapsed - steps * SPRING_STEP);
+    if (this.soul) this.drawSoul(this.soul);
+  }
+
+  /** One outline: a round wisp floating up beside her head, its tail curling back down into her mouth. */
+  private drawSoul({ out, drift }: Soul): void {
+    const u = this.unit;
+    const [mx, my] = apply(this.world.head, this.mouth[0], this.mouth[1]);
+    const r = SOUL_RADIUS * u * (0.35 + 0.65 * out);
+    const [dx, dy] = [drift[0] * u, drift[1] * u];
+    const cx = mx + (SOUL_RISE[0] * u + dx) * out;
+    const cy = my + (SOUL_RISE[1] * u + dy) * out;
+    // The tail leaves the wisp heading down, then turns into her mouth from the side,
+    // below her eyes; the bend sways with the drift.
+    const kx = cx + dx * 0.8;
+    const ky = my;
+    const toward = Math.atan2(ky - cy, kx - cx);
+    const [nx, ny] = [-Math.sin(toward), Math.cos(toward)];
+    const edge = (side: number) => [cx + r * Math.cos(toward + side), cy + r * Math.sin(toward + side)] as const;
+    const [ax, ay] = edge(0.85);
+    const [bx, by] = edge(-0.85);
+    const wide = r * 0.4;
+    const n = (v: number) => +v.toFixed(2);
+    this.soulShape.setAttribute('d', `M${n(bx)} ${n(by)}A${n(r)} ${n(r)} 0 1 0 ${n(ax)} ${n(ay)}`
+      + `Q${n(kx + nx * wide)} ${n(ky + ny * wide)} ${n(mx)} ${n(my)}`
+      + `Q${n(kx - nx * wide)} ${n(ky - ny * wide)} ${n(bx)} ${n(by)}Z`);
+    this.soulFace.setAttribute('transform', `translate(${n(cx)} ${n(cy)}) scale(${n(r)})`);
+    this.soulLayer.setAttribute('opacity', String(n(Math.min(1, out * 3))));
+  }
+
+  private render(view: PartView): void {
+    const { part } = view;
+    view.outer.setAttribute('transform', this.transform(part.bone));
+    if (!view.innerTransform) return;
+    let transform = '';
+    if (part.look) {
+      transform += `translate(${(this.look[0] * part.look[0]).toFixed(3)} ${(this.look[1] * part.look[1]).toFixed(3)}) `;
+    }
+    if (part.spring && part.pivot) {
+      transform += `rotate(${view.angle.toFixed(3)} ${part.pivot[0]} ${part.pivot[1]})`;
+    }
+    view.inner.setAttribute('transform', transform.trim());
+  }
+
+  /** A bone's transform for the current pose, formatted once and shared by its parts. */
+  private transform(bone: BoneName): string {
+    return (this.transforms[bone] ??= fmt(this.world[bone]));
   }
 
   destroy(): void {
     this.svg.remove();
   }
 
-  private spring(view: PartView, matrix: Matrix, boneAngle: number, dt: number, push: [number, number]) {
+  private spring(view: PartView, matrix: Matrix, dt: number, push: [number, number], steps: number) {
     const spring = view.part.spring!;
     const [px, py] = view.part.pivot!;
     const position = apply(matrix, px, py);
@@ -192,24 +294,34 @@ export class RigRenderer {
     }
     const vx = (position[0] - view.last[0]) / dt;
     const vy = (position[1] - view.last[1]) / dt;
-    const ax = (vx - view.lastVelocity[0]) / dt + push[0];
-    const ay = (vy - view.lastVelocity[1]) / dt + push[1];
+    // Motion uses the drawing's units; spring tuning uses a 260-unit figure.
+    const ax = ((vx - view.lastVelocity[0]) / dt + push[0]) / this.unit;
+    const ay = ((vy - view.lastVelocity[1]) / dt + push[1]) / this.unit;
     view.last = position;
     view.lastVelocity = [vx, vy];
 
+    if (steps === 0) {
+      view.pendingAcceleration[0] += ax * dt;
+      view.pendingAcceleration[1] += ay * dt;
+      return;
+    }
     const gain = spring.gain ?? 1;
     const limit = spring.limit ?? 25;
+    const boneAngle = (Math.atan2(matrix[1], matrix[0]) * 180) / Math.PI;
     const target = -boneAngle * (spring.hang ?? 0.6);
-    // Fixed 120 Hz substeps keep the feel independent of the display rate.
-    const steps = Math.max(1, Math.round(dt * 120));
-    // Sideways acceleration swings the part opposite to the motion; a light
-    // vertical term adds bounce on landing without flipping the direction.
-    const force = clamp((-ax * 0.0009 - Math.abs(ay) * 0.00015 * Math.sign(view.angle || 1)) * gain, -4, 4) / steps;
+    // Carry partial ticks and their acceleration across display frames.
+    const firstDuration = SPRING_STEP - this.springRemainder;
     for (let i = 0; i < steps; i++) {
+      const tickAx = i === 0 ? (view.pendingAcceleration[0] + ax * firstDuration) / SPRING_STEP : ax;
+      const tickAy = i === 0 ? (view.pendingAcceleration[1] + ay * firstDuration) / SPRING_STEP : ay;
+      // Half the acceleration per tick preserves the original 60 Hz tuning.
+      const force = clamp((-tickAx * 0.0009 - Math.abs(tickAy) * 0.00015 * Math.sign(view.angle || 1)) * gain, -4, 4) * 0.5;
       view.velocity += (target - view.angle) * spring.stiffness * 0.5 + force;
       view.velocity *= spring.damping;
       view.angle = clamp(view.angle + view.velocity, -limit, limit);
     }
+    const remainder = Math.max(0, this.springRemainder + dt - steps * SPRING_STEP);
+    view.pendingAcceleration = [ax * remainder, ay * remainder];
   }
 
   private worldMatrices(pose: Pose): Record<BoneName, Matrix> {
@@ -241,21 +353,28 @@ export class RigRenderer {
       if (resolved) shown.add(resolved);
     }
     for (const view of this.views) {
-      if (view.slot) view.outer.style.display = shown.has(view.slot) ? '' : 'none';
+      const { slot, look } = view.part;
+      if (!slot && !look) continue;
+      // Irises are the parts that follow the pointer; with her soul out, her eyes go blank.
+      const visible = (!slot || shown.has(slot)) && !(this.soul && look);
+      if (visible === view.visible) continue;
+      view.visible = visible;
+      view.outer.style.display = visible ? '' : 'none';
+      if (visible) this.render(view);
     }
   }
 
-  private ref(key: string) {
-    return `${this.prefix}-${key}`;
+  private ref(kind: 'gradient' | 'clip', key: string) {
+    return `${this.prefix}-${kind}-${key}`;
   }
 
   private color(value: string): string {
-    return this.palette[value] ?? value;
+    return Object.hasOwn(this.palette, value) ? this.palette[value]! : value;
   }
 
   private paint(value: string | undefined): string | null {
     if (value === undefined) return null;
-    if (this.figure.gradients && value in this.figure.gradients) return `url(#${this.ref(value)})`;
+    if (this.figure.gradients && Object.hasOwn(this.figure.gradients, value)) return `url(#${this.ref('gradient', value)})`;
     return this.color(value);
   }
 
@@ -266,7 +385,7 @@ export class RigRenderer {
           cx: g.center[0], cy: g.center[1], r: g.radius,
           ...(g.focus ? { fx: g.focus[0], fy: g.focus[1] } : {}),
         });
-    node.setAttribute('id', this.ref(key));
+    node.setAttribute('id', this.ref('gradient', key));
     node.setAttribute('gradientUnits', 'userSpaceOnUse');
     for (const stop of g.stops) {
       node.append(el('stop', {
@@ -303,8 +422,4 @@ function el<K extends keyof SVGElementTagNameMap>(tag: K, attrs: Record<string, 
   const node = document.createElementNS(SVG, tag);
   for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, String(value));
   return node;
-}
-
-function clamp(v: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, v));
 }

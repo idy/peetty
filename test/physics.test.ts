@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { along, impact, landing, planJump, weighted } from '../src/pet/physics.ts';
+import { along, GRAVITY, impact, landing, planJump, weighted } from '../src/pet/physics.ts';
 
 describe('planJump', () => {
   it('lands exactly on the target, up or down', () => {
@@ -24,6 +24,18 @@ describe('planJump', () => {
     assert.equal(planJump([0, 800], [100, 300]), null);
     assert.equal(planJump([0, 400], [700, 400]), null);
     assert.ok(planJump([0, 800], [100, 500], 1.2));
+  });
+
+  it('flattens the arc under a ceiling and refuses one that would scrape it', () => {
+    const from: [number, number] = [0, 400];
+    const free = planJump(from, [200, 400])!;
+    const capped = planJump(from, [200, 400], 1, 380)!;
+    assert.ok(capped.apex < free.apex);
+    const [, top] = along(from, capped, -capped.vy / GRAVITY);
+    assert.ok(Math.abs(top - 380) < 1e-6, `highest point ${top}`);
+    const [x, y] = along(from, capped, capped.duration);
+    assert.ok(Math.abs(x - 200) < 0.01 && Math.abs(y - 400) < 0.01, 'still lands on the target');
+    assert.equal(planJump(from, [200, 400], 1, 395), null);
   });
 });
 
