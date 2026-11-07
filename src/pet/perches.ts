@@ -52,8 +52,12 @@ const HIT_BUDGET = 128;
 const SHADOW_DEPTH = 16;
 /** Node.DOCUMENT_FRAGMENT_NODE: the node type of a shadow root, and never of a document. */
 const FRAGMENT = 11;
-/** How far above an edge a hit test looks for a click area she would cover. */
-const ABOVE = 6;
+/** How far inside her outline hit tests look for a click area she would cover: above her feet, below her head, in from her sides. */
+const INSET = 6;
+/** Hit-test columns over ground she would cover are at most this far apart, so a click area at least this wide is found. */
+const COLUMN = 48;
+/** The most steps a walk is checked in; a longer walk is checked more coarsely. */
+const MAX_STEPS = 24;
 /** Below this effective opacity, or this height, an element cannot carry her. */
 const MIN_OPACITY = 0.2;
 const MIN_HEIGHT = 14;
@@ -150,20 +154,35 @@ function hitAt(x: number, y: number, host: Element, budget: Budget): Element | n
 
 /**
  * Whether el's top edge at y is on top at x, not covered by a menu or dialog,
- * with nothing clickable where she stands above it. Rect clearance cannot see a
- * click area that reaches past its control's box, such as a stretched link's
- * ::after across a card, so a few hit tests up her height at x look for one.
+ * with nothing clickable where she would stand on it: in her column at x, or,
+ * when `wide`, in columns across her whole footprint. Rect clearance cannot see
+ * a click area that reaches past its control's box, such as a stretched link's
+ * ::after across a card, so hit tests look for one.
  */
-function exposed(el: Element, x: number, y: number, body: Footprint, host: Element, budget: Budget = { left: HIT_BUDGET }): boolean {
+function exposed(el: Element, x: number, y: number, body: Footprint, host: Element, budget: Budget = { left: HIT_BUDGET }, wide = false): boolean {
   const hit = hitAt(x, y + 2, host, budget);
   if (!hit || !encloses(el, hit)) return false;
-  // Just above her feet, at her middle, and just below the top of her head.
-  for (const h of [ABOVE, body.above / 2, body.above - ABOVE]) {
-    if (h < ABOVE || y - h < 0) continue;
-    const above = hitAt(x, y - h, host, budget);
-    if (above && clickable(above)) return false;
+  const across = wide ? columns(x - body.left + INSET, x + body.right - INSET) : [x];
+  return !across.some((column) => clickableAbove(column, y, body, host, budget));
+}
+
+/** Evenly spaced columns from `from` to `to`, at most COLUMN apart. */
+function columns(from: number, to: number): number[] {
+  const steps = Math.max(1, Math.ceil(Math.abs(to - from) / COLUMN));
+  return Array.from({ length: steps + 1 }, (_, i) => from + ((to - from) * i) / steps);
+}
+
+/**
+ * Whether something clickable stands in her height at x when she stands on an
+ * edge at y: just above her feet, at her middle, or just below the top of her head.
+ */
+function clickableAbove(x: number, y: number, body: Footprint, host: Element, budget?: Budget): boolean {
+  for (const h of [INSET, body.above / 2, body.above - INSET]) {
+    if (h < INSET || y - h < 0) continue;
+    const hit = hitAt(x, y - h, host, budget ?? { left: HIT_BUDGET });
+    if (hit && clickable(hit)) return true;
   }
-  return true;
+  return false;
 }
 
 /** Whether a click on node reaches a control, including from inside open shadow roots. */
@@ -552,7 +571,41 @@ export function support(perch: Perch, x: number, opts: PerchOptions, recheck = f
   if (!recheck) return refresh(perch, opts);
   const live = refresh(perch, opts, true);
   // A live recheck means her footprint is valid.
-  return live && under(live, x) && (!perch.el || exposed(perch.el, x, live.y, footprint(opts)!, opts.host)) ? live : null;
+  return live && under(live, x) && (!perch.el || exposed(perch.el, x, live.y, footprint(opts)!, opts.host, undefined, true)) ? live : null;
+}
+
+/**
+ * Whether she can stand on the perch at x as it is: its edge is on top under
+ * her feet, and nothing clickable that rect clearance cannot see stands anywhere
+ * in her footprint. The perch's own clearance is not rechecked. Always true on
+ * the viewport bottom.
+ */
+export function clearAt(perch: Perch, x: number, opts: PerchOptions): boolean {
+  const body = footprint(opts);
+  if (!perch.el) return true;
+  return !!body && exposed(perch.el, x, perch.y, body, opts.host, undefined, true);
+}
+
+/**
+ * How far she can walk along the perch from x toward `to` without covering
+ * anything clickable that rect clearance cannot see. Her leading side sweeps
+ * the ground she would newly cover in steps at most COLUMN long, at most
+ * MAX_STEPS of them, and she stops at the last step that is clear; x when even
+ * her first step is not. The viewport bottom has nothing to check.
+ */
+export function reach(perch: Perch, x: number, to: number, opts: PerchOptions): number {
+  const body = footprint(opts);
+  if (!perch.el) return to;
+  if (!body) return x;
+  const lead = to > x ? body.right - INSET : INSET - body.left;
+  const steps = Math.min(MAX_STEPS, Math.ceil(Math.abs(to - x) / COLUMN));
+  let end = x;
+  for (let i = 1; i <= steps; i++) {
+    const next = x + ((to - x) * i) / steps;
+    if (clickableAbove(next + lead, perch.y, body, opts.host)) break;
+    end = next;
+  }
+  return end;
 }
 
 /** Whether the edge is under x, tested as physics.landing() tests it. */

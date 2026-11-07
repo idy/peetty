@@ -412,6 +412,61 @@ describe('safe surfaces and autonomous walking', () => {
     assert.equal(state.perch?.el, shelf as unknown as Element);
   });
 
+  it('walks only as far as she can without covering a click area beyond a control', async (t) => {
+    const { dom, pet, state } = await mountPet(t);
+    const shelf = dom.document.createElement('div');
+    shelf.setAttribute('data-peetty', 'perch');
+    shelf.rect = { left: 100, top: 500, width: 800, height: 40 };
+    // A button whose ::after reaches over the right end of the shelf, far beyond its own box.
+    const button = dom.document.createElement('button');
+    button.rect = { left: 800, top: 300, width: 40, height: 14 };
+    button.hitArea = { left: 650, top: 380, width: 300, height: 120 };
+    dom.document.body.append(shelf, button);
+    dom.frame(300);
+    const on = state.scan(true).find((p) => p.el === shelf as unknown as Element);
+    assert.ok(on, 'the middle of the shelf is clear');
+    state.x = 200;
+    state.land(on, 0.2);
+    mock.method(Math, 'random', () => 0.999); // toward the far right end
+    pet.play('walk');
+    assert.equal(state.action, 'walk');
+    const half = Math.max(state.view.anchor[0], state.view.width - state.view.anchor[0]);
+    for (let i = 0; state.action === 'walk' && i < 600; i++) {
+      dom.frame(20);
+      assert.ok(state.x + half <= 650, `clear of the click area at ${state.x}`);
+    }
+    assert.equal(state.mode, 'ground', 'she stops instead of dropping');
+    assert.ok(state.x > 300, `she still walked toward it, to ${state.x}`);
+  });
+
+  it('does not leap to a spot where she would cover a click area beyond a control', async (t) => {
+    const { dom, state } = await mountPet(t);
+    const shelf = (left: number, top: number) => {
+      const el = dom.document.createElement('div');
+      el.setAttribute('data-peetty', 'perch');
+      el.rect = { left, top, width: 300, height: 40 };
+      dom.document.body.append(el);
+      return el as unknown as Element;
+    };
+    const start = shelf(100, 500);
+    const target = shelf(450, 450);
+    // A button whose ::after reaches over the left part of the target shelf, but not its middle.
+    const button = dom.document.createElement('button');
+    button.rect = { left: 450, top: 250, width: 30, height: 14 };
+    button.hitArea = { left: 450, top: 340, width: 110, height: 110 };
+    dom.document.body.append(button);
+    dom.frame(300);
+    const perches = state.scan(true);
+    const on = perches.find((p) => p.el === start);
+    assert.ok(on);
+    assert.ok(perches.some((p) => p.el === target), 'the middle of the target shelf is clear');
+    state.x = 250;
+    state.land(on, 0.2);
+    mock.method(Math, 'random', () => 0); // the target shelf first, at its left part
+    assert.ok(state.leap());
+    assert.notEqual((state.jump as { target: Perch }).target.el, target);
+  });
+
   it('lands on a lower edge crossed in the same frame when the higher one is covered', async (t) => {
     const { dom, state } = await mountPet(t);
     const shelf = (top: number) => {

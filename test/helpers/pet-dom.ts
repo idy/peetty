@@ -21,6 +21,8 @@ export class ElementStub extends ListenerTarget {
   host?: ElementStub;
   activeElement: ElementStub | null = null;
   rect: Rect | null = null;
+  /** Where hit tests find the element when it differs from its box, like a stretched link's ::after. */
+  hitArea: Rect | null = null;
   className = '';
   textContent = '';
   disabled = false;
@@ -100,7 +102,8 @@ export class ElementStub extends ListenerTarget {
     const elements: ElementStub[] = [];
     const visit = (node: ElementStub) => {
       if (node.tagName === 'PEETTY-COMPANION') return;
-      const rect = node.getBoundingClientRect();
+      const area = node.hitArea;
+      const rect = area ? { left: area.left, top: area.top, right: area.left + area.width, bottom: area.top + area.height } : node.getBoundingClientRect();
       if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) elements.unshift(node);
       for (const child of node.children) visit(child);
     };

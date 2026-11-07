@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import { bottom, crossing, findPerches, floor, inUse, limits, perchOf, refresh, support, type Perch, type PerchOptions } from '../src/pet/perches.ts';
+import { bottom, clearAt, crossing, findPerches, floor, inUse, limits, perchOf, reach, refresh, support, type Perch, type PerchOptions } from '../src/pet/perches.ts';
 import { landing } from '../src/pet/physics.ts';
 import { stubGlobals } from './helpers/stubs.ts';
 
@@ -300,6 +300,24 @@ describe('whole-footprint perch clearance', () => {
     assert.ok(perchOf(asElement(footer), fixture.opts), 'above her head it is out of her way');
   });
 
+  it('finds click areas across her footprint and along a walk, not only in her middle column', () => {
+    const edge = perch(rect(0, 400, 800, 40));
+    // A button whose ::after reaches over the right end of the edge, far beyond its own box.
+    const button = element('button', rect(700, 200, 40, 14));
+    button.hitArea = rect(560, 300, 240, 100);
+    const found = perchOf(asElement(edge), fixture.opts)!;
+    assert.ok(found, 'the middle of the edge is clear');
+    assert.ok(clearAt(found, 200, fixture.opts));
+    assert.equal(clearAt(found, 650, fixture.opts), false, 'under it');
+    assert.equal(clearAt(found, 530, fixture.opts), false, 'under her right side only');
+    fixture.now += 300;
+    assert.equal(support(found, 530, fixture.opts, true), null, 'a recheck looks across her too');
+    const end = reach(found, 200, 750, fixture.opts);
+    assert.ok(end > 400 && end + 50 <= 560, `walking right she stops at ${end}, short of it`);
+    assert.equal(reach(found, 450, 100, fixture.opts), 100, 'walking away she goes all the way');
+    assert.equal(reach(found, 500, 750, fixture.opts), 500, 'right beside it she does not step closer');
+  });
+
   it('keeps the box of an element whose contents are hidden, but not its contents', () => {
     const area = element('section', rect(0, 600, 800, 100));
     area.setAttribute('data-peetty', 'avoid');
@@ -421,7 +439,7 @@ describe('support', () => {
     fixture.now += 300;
     const before = fixture.hitTests;
     assert.deepEqual(where(support(found, 300, fixture.opts, true)), where(found));
-    assert.equal(fixture.hitTests - before, 8, 'at the edge and three heights above it, for the span and under her feet');
+    assert.equal(fixture.hitTests - before, 14, 'the edge and three heights in one column for the span, and in three columns across her');
     assert.equal(support(found, 150, fixture.opts, true), null, 'covered under her feet');
     assert.equal(support(found, 60, fixture.opts, true), null, 'off the span');
   });

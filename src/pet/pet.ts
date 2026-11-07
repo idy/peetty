@@ -3,7 +3,7 @@ import { AUTONOMOUS_ACTIONS, type AutonomousAction, type Figure } from '../figur
 import { clamp } from '../math.ts';
 import { resolveFigure } from '../presets.ts';
 import { languageOf, strings, type Language, type Strings } from './i18n.ts';
-import { bottom, crossing, findPerches, floor, inUse, isEditable, limits, refresh, support, type Perch, type PerchOptions } from './perches.ts';
+import { bottom, clearAt, crossing, findPerches, floor, inUse, isEditable, limits, reach, refresh, support, type Perch, type PerchOptions } from './perches.ts';
 import { along, GRAVITY, impact, planJump, weighted, type Jump } from './physics.ts';
 import { createOverlay, placeAbove, type MenuAction, type Overlay } from './ui.ts';
 
@@ -592,10 +592,12 @@ export class Peetty {
     return 52 * (this.figure!.behavior?.walkSpeed ?? 1);
   }
 
-  /** Walks along her current perch to `target`. */
+  /** Walks along her current perch toward `target`, stopping short of anything clickable on the way. */
   private walkOver(target: number) {
-    this.walkTo = target;
-    this.setAction('walk', Math.abs(target - this.x) / this.pace + 0.5);
+    const end = this.perch ? reach(this.perch, this.x, target, this.perchOptions) : target;
+    if (Math.abs(end - this.x) < 2) return this.setAction('idle', rand(1.5, 3));
+    this.walkTo = end;
+    this.setAction('walk', Math.abs(end - this.x) / this.pace + 0.5);
   }
 
   private setAction(action: Action, seconds: number) {
@@ -625,7 +627,15 @@ export class Peetty {
       const weight = (perch.preferred ? 3 : 1) * (perch.el ? 1 : 0.35) * (1 / (1 + distance / 260));
       options.push({ perch, to, plan, weight });
     }
-    const pick = weighted(options.map((option) => [option, option.weight] as const));
+    // Land only where she covers nothing clickable that rect clearance cannot see; a few draws find one.
+    const opts = this.perchOptions;
+    let pick: (typeof options)[number] | null = null;
+    for (let draws = 0; !pick && draws < 3; draws++) {
+      const option = weighted(options.map((candidate) => [candidate, candidate.weight] as const));
+      if (!option) break;
+      if (clearAt(option.perch, option.to[0], opts)) pick = option;
+      else options.splice(options.indexOf(option), 1);
+    }
     if (!pick) return false;
     // Upward jumps that are a little too far end hanging from the edge.
     const rise = from[1] - pick.to[1];
