@@ -7,6 +7,7 @@ import { bottom, clearAt, crossing, findPerches, floor, inUse, isEditable, limit
 import { along, GRAVITY, impact, planJump, weighted, type Jump } from './physics.ts';
 import { createOverlay, placeAbove, type MenuAction, type Overlay } from './ui.ts';
 import type { ChatPanel } from '../chat/panel.ts';
+import { loadChatPanel } from '../chat/load.ts';
 import type { CompanionAction, PeettyChatOptions, PeettyModelOptions } from '../chat/types.ts';
 
 export type Activity = 'calm' | 'normal' | 'lively';
@@ -245,7 +246,7 @@ export class Peetty {
     this.show();
     if (!this.chatLoading) {
       const root = this.overlay.host.shadowRoot!;
-      const pending = import('../chat/panel.ts').then(({ createChatPanel }) => {
+      const pending = loadChatPanel().then(({ createChatPanel }) => {
         if (generation !== this.generation) return null;
         return createChatPanel({
           root, language: languageOf(this.options.language),

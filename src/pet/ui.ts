@@ -44,6 +44,7 @@ const STYLE = `
   font: 600 12px/1.2 system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
   color: var(--peetty-ink, #2b2840);
 }
+.menu button[hidden] { display: none !important; }
 .menu button:hover { background: var(--peetty-hover, #f1eefa); }
 .menu button:focus-visible { outline: 2px solid var(--peetty-accent, #7a6ee0); outline-offset: 1px; }
 @media (prefers-color-scheme: dark) {

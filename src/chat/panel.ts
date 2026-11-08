@@ -211,6 +211,7 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
   let settingsOpen = false;
   let disposed = false;
   let wasBusy = false;
+  let repliesBeforeTurn = new Set<string>();
   let discovery: AbortController | null = null;
   let returnFocus: HTMLElement | null = null;
   let shownError = '';
@@ -291,11 +292,11 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     submit.title = runtime.busy ? t.stop : t.send;
     submit.disabled = !runtime.busy && (!input.value.trim() || !runtime.model);
     clear.hidden = !runtime.entries.length || !confirmation.hidden;
-    const last = [...runtime.entries].reverse().find((entry) => entry.role === 'assistant');
+    const last = [...runtime.entries].reverse().find((entry) => entry.role === 'assistant' && !repliesBeforeTurn.has(entry.id));
     const speaking = runtime.busy && !!last?.text && runtime.entries[runtime.entries.length - 1]?.role === 'assistant';
     options.onState(runtime.busy, speaking);
     if (wasBusy && !runtime.busy) {
-      find('.pc-announcement').textContent = last?.text ?? t.reply;
+      find('.pc-announcement').textContent = last?.text ?? '';
       if (runtime.error) showError(`${runtime.error}\n${t.network}`);
       else { showError(''); if (last?.text) options.onReply(last.text); }
     }
@@ -365,6 +366,7 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     if (runtime.busy) { runtime.stop(); return; }
     const text = input.value.trim();
     if (!text || !runtime.model) return;
+    repliesBeforeTurn = new Set(runtime.entries.filter((entry) => entry.role === 'assistant').map((entry) => entry.id));
     input.value = ''; input.style.height = '';
     showError('');
     void runtime.send(text);

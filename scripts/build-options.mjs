@@ -10,8 +10,8 @@ export const global = {
   plugins: [{
     name: 'lazy-chat',
     setup(build) {
-      // Native import() resolves relative to the external SDK script, including CDN embeds.
-      build.onResolve({ filter: /chat\/panel\.ts$/ }, () => ({ path: './chat/panel.js', external: true }));
+      // Keep the ESM chat entry out of the IIFE; load.ts captures the absolute script URL.
+      build.onResolve({ filter: /(?:^|\/)panel\.ts$/ }, () => ({ path: './chat/panel.js', external: true }));
     },
   }],
 };
