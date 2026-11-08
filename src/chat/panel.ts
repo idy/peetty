@@ -1,4 +1,4 @@
-import { ChatRuntime, fetchModelList, normalizeBaseUrl } from './runtime.ts';
+import { abortable, ChatRuntime, fetchModelList, normalizeBaseUrl } from './runtime.ts';
 import { LOCAL_MAGPIE, localMagpieConnection } from './connections.ts';
 import type { ChatEntry, CompanionAction, PeettyChatOptions, PeettyModelOptions } from './types.ts';
 import type { Language } from '../pet/i18n.ts';
@@ -155,7 +155,7 @@ interface PanelOptions {
   language: Language;
   model?: PeettyModelOptions;
   chat?: PeettyChatOptions;
-  onAction: (action: CompanionAction) => string | void;
+  onAction: (action: CompanionAction, signal?: AbortSignal) => string | void | Promise<string | void>;
   onReply: (text: string) => void;
   onState: (busy: boolean, speaking: boolean) => void;
   onClose: () => void;
@@ -168,6 +168,7 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
   style.textContent = STYLE;
   const panel = document.createElement('section');
   panel.className = 'peetty-chat';
+  panel.setAttribute('data-peetty', 'avoid');
   panel.setAttribute('role', 'dialog');
   panel.setAttribute('aria-label', t.chat);
   panel.setAttribute('lang', options.language);
@@ -339,8 +340,15 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     showError('');
     const timeout = setTimeout(() => controller.abort(), 20000);
     try {
-      const apiKey = key.value.trim() || (sameEndpoint() ? await runtime.model?.getApiKey?.() : undefined);
-      const list = await fetchModelList(url.value, apiKey, controller.signal);
+      const baseUrl = normalizeBaseUrl(url.value);
+      const current = runtime.model;
+      const matching = baseUrl === current?.baseUrl ? current : undefined;
+      const typedKey = key.value.trim();
+      const apiKey = typedKey || (matching?.getApiKey
+        ? await abortable(Promise.resolve().then(() => matching.getApiKey!()), controller.signal)
+        : undefined);
+      if (disposed || controller !== discovery || controller.signal.aborted) return;
+      const list = await fetchModelList(baseUrl, apiKey, controller.signal, matching?.headers);
       if (disposed || controller !== discovery || controller.signal.aborted) return;
       models.replaceChildren();
       const first = document.createElement('option');
@@ -394,6 +402,7 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
         const current = runtime.model;
         const getApiKey = !key.value.trim() && sameEndpoint() ? current?.getApiKey : undefined;
         const headers = sameEndpoint() ? current?.headers : undefined;
+        cancelDiscovery();
         await runtime.configure({ baseUrl, id, ...(key.value.trim() ? { apiKey: key.value.trim() } : {}), ...(getApiKey ? { getApiKey } : {}), ...(headers ? { headers } : {}) }, remember.checked);
         if (disposed) return;
         showError(''); setSettings(false);
@@ -440,7 +449,7 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
       setSettings(showSettings || !runtime.model);
     },
     close,
-    async setModel(next) { await runtime.configure(next, false); if (!disposed) { showError(''); setSettings(false); } },
+    async setModel(next) { cancelDiscovery(); await runtime.configure(next, false); if (!disposed) { showError(''); setSettings(false); } },
     destroy() { disposed = true; cancelDiscovery(); runtime.destroy(); panel.remove(); style.remove(); },
   };
 }

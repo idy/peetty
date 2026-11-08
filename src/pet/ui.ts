@@ -76,7 +76,6 @@ export interface Overlay {
 
 export function createOverlay(text: Strings, zIndex: number, onAction: (action: MenuAction) => void): Overlay {
   const host = document.createElement('peetty-companion');
-  host.setAttribute('data-peetty', 'avoid');
   Object.assign(host.style, {
     position: 'fixed', inset: '0', display: 'block', pointerEvents: 'none', zIndex: String(zIndex),
     margin: '0', padding: '0', border: '0', background: 'none', contain: 'layout style',
@@ -89,6 +88,7 @@ export function createOverlay(text: Strings, zIndex: number, onAction: (action: 
 
   const pet = document.createElement('div');
   pet.className = 'pet';
+  pet.setAttribute('data-peetty', 'avoid');
   pet.setAttribute('role', 'button');
   pet.setAttribute('tabindex', '0');
   pet.setAttribute('aria-label', text.pet);

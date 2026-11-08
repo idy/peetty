@@ -288,6 +288,54 @@ describe('Pi chat streaming and actions', () => {
     runtime.destroy(); second.destroy();
   });
 
+  it('awaits each physical action before starting the next tool or recording success', async () => {
+    const gates = [deferred<string>(), deferred<string>(), deferred<string>()];
+    const started: CompanionAction[] = [];
+    let turns = 0;
+    const runtime = new ChatRuntime({
+      model: MODEL,
+      onAction: (action) => { started.push(action); return gates[started.length - 1]!.promise; },
+      _testing: { storage: new MemoryChatStorage(), streamFn: () => finished(++turns === 1 ? toolCall(['wave', 'sit', 'lie']) : assistant('All done.')) },
+    });
+    const sending = runtime.send('Wave, then sit, then lie down.');
+    await until(() => started.length === 1);
+    assert.deepEqual(started, ['wave']);
+    assert.equal(runtime.entries.some((entry) => entry.role === 'action'), false);
+    gates[0]!.resolve('Wave finished.');
+    await until(() => started.length === 2);
+    assert.deepEqual(started, ['wave', 'sit']);
+    assert.deepEqual(runtime.entries.filter((entry) => entry.role === 'action').map((entry) => entry.text), ['wave']);
+    gates[1]!.resolve('Sitting finished.');
+    await until(() => started.length === 3);
+    assert.deepEqual(started, ['wave', 'sit', 'lie']);
+    gates[2]!.resolve('Lying finished.');
+    await sending;
+    assert.deepEqual(runtime.entries.filter((entry) => entry.role === 'action').map((entry) => entry.text), ['wave', 'sit', 'lie']);
+    runtime.destroy();
+  });
+
+  it('aborts an unfinished action without running queued actions or reporting success', async () => {
+    const gate = deferred<string>();
+    const started: CompanionAction[] = [];
+    let signal: AbortSignal | undefined;
+    const runtime = new ChatRuntime({
+      model: MODEL,
+      onAction: (action, currentSignal) => { started.push(action); signal = currentSignal; return gate.promise; },
+      _testing: { storage: new MemoryChatStorage(), streamFn: () => finished(toolCall(['wave', 'sit'])) },
+    });
+    const sending = runtime.send('Wave then sit.');
+    await until(() => started.length === 1);
+    assert.deepEqual(started, ['wave']);
+    runtime.stop();
+    await sending;
+    assert.equal(signal?.aborted, true);
+    gate.resolve('Too late.');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(started, ['wave']);
+    assert.equal(runtime.entries.some((entry) => entry.role === 'action'), false);
+    runtime.destroy();
+  });
+
   it('sends bounded recent user/assistant context and personality, without page or action entries', async () => {
     const history = Array.from({ length: 100 }, (_, i) => entry(i % 2 ? 'assistant' : 'user', `message ${i} ${'x'.repeat(2_000)}`, i));
     history.push(entry('action', 'wave', 101));

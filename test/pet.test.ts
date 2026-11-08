@@ -7,6 +7,7 @@ import { PRESETS } from '../src/presets.ts';
 import { floor, limits, type Perch, type PerchOptions } from '../src/pet/perches.ts';
 import { planJump, weighted } from '../src/pet/physics.ts';
 import type { Overlay } from '../src/pet/ui.ts';
+import type { CompanionAction } from '../src/chat/types.ts';
 import { deferred, ElementStub, installPetDOM, pointer } from './helpers/pet-dom.ts';
 
 /** Inspect controller state while driving its public methods, events and frame loop. */
@@ -38,6 +39,8 @@ interface Controller {
   place: () => void;
   makeRoom: (field: Element) => void;
   walkOver: (target: number) => void;
+  chatVisible: boolean;
+  performChatAction: (action: CompanionAction, signal?: AbortSignal) => Promise<string>;
 }
 const controller = (pet: Peetty) => pet as unknown as Controller;
 const response = (figure: Figure) => ({ ok: true, json: async () => figure }) as Response;
@@ -812,6 +815,101 @@ describe('pointer and shadow event routing', () => {
     assert.equal(state.lastKey, state.clock);
     assert.equal(state.action, 'idle');
   });
+});
+
+describe('multiple companions and physical chat actions', () => {
+  it('leaves usable page space for another companion instead of avoiding an entire overlay host', async (t) => {
+    const { dom, state: first } = await mountPet(t);
+    (first.overlay.host as unknown as ElementStub).rect = { left: 0, top: 0, width: 1024, height: 768 };
+    (first.overlay.pet as unknown as ElementStub).rect = { left: 450, top: 490, width: 110, height: 180 };
+    const second = new Peetty({ greet: false });
+    dom.cleanup(() => second.destroy());
+    await second.mount();
+    assert.notEqual(controller(second).mode, 'paused');
+    assert.ok(floor(controller(second).perchOptions));
+    // Another companion's actual open panel still excludes the area it occupies.
+    const panel = dom.document.createElement('section');
+    panel.setAttribute('data-peetty', 'avoid');
+    panel.rect = { left: 600, top: 0, width: 424, height: 768 };
+    (first.overlay.host as unknown as ElementStub).shadowRoot!.append(panel);
+    dom.frame(300);
+    const free = floor(controller(second).perchOptions);
+    assert.ok(free);
+    assert.ok(free.right < 600, 'only the real panel footprint should be excluded');
+  });
+
+  it('plays each queued pose on the real animation clock before the next one starts', async (t) => {
+    const { dom, state } = await mountPet(t);
+    stand(state);
+    state.chatVisible = true;
+    const completed: string[] = [];
+    const sequence = (async () => {
+      for (const action of ['wave', 'sit', 'lie'] as const) {
+        await state.performChatAction(action);
+        completed.push(action);
+      }
+    })();
+    const advance = async (milliseconds: number) => {
+      for (let elapsed = 0; elapsed < milliseconds; elapsed += 50) { dom.frame(50); await Promise.resolve(); }
+    };
+    assert.equal(state.view.motion.current, 'wave');
+    await advance(1000);
+    assert.equal(state.view.motion.current, 'wave');
+    assert.deepEqual(completed, []);
+    await advance(2600);
+    assert.equal(state.view.motion.current, 'sit');
+    assert.deepEqual(completed, ['wave']);
+    await advance(1000);
+    assert.equal(state.view.motion.current, 'sit');
+    await advance(2600);
+    assert.equal(state.view.motion.current, 'lie');
+    assert.deepEqual(completed, ['wave', 'sit']);
+    await advance(3600);
+    await sequence;
+    assert.deepEqual(completed, ['wave', 'sit', 'lie']);
+  });
+
+  it('keeps a move pending through a real jump until landing', async (t) => {
+    const { dom, state } = await mountPet(t);
+    const target = stand(state);
+    state.chatVisible = true;
+    const from: [number, number] = [state.x, state.y];
+    const plan = planJump(from, [500, target.y]);
+    assert.ok(plan);
+    // Fix target selection for reproducibility; flying(), refresh() and land() remain real.
+    t.mock.method(state, 'leap', () => {
+      state.mode = 'jump';
+      state.perch = null;
+      state.jump = { from, plan, t: -0.18, target, targetOrigin: [target.left, target.y], hang: false };
+      state.view.motion.play('jump');
+      return true;
+    });
+    let completed = false;
+    const moving = state.performChatAction('move').then(() => { completed = true; });
+    assert.equal(state.mode, 'jump');
+    for (let i = 0; i < 3; i++) { dom.frame(50); await Promise.resolve(); }
+    assert.equal(completed, false);
+    assert.equal(state.mode, 'jump');
+    for (let i = 0; i < 100 && !completed; i++) { dom.frame(50); await Promise.resolve(); }
+    await moving;
+    assert.equal(state.mode, 'ground');
+    assert.ok(Math.abs(state.x - 500) < 1);
+    assert.equal(completed, true);
+  });
+
+  for (const interruption of ['abort', 'hide', 'destroy'] as const) {
+    it(`releases a pending physical action on ${interruption}`, async (t) => {
+      const { pet, state } = await mountPet(t);
+      stand(state);
+      state.chatVisible = true;
+      const controller = new AbortController();
+      const pending = state.performChatAction('sit', controller.signal);
+      const rejected = assert.rejects(pending, interruption === 'abort' ? { name: 'AbortError' } : /interrupted/);
+      if (interruption === 'abort') controller.abort();
+      else pet[interruption]();
+      await rejected;
+    });
+  }
 });
 
 describe('chat entry points and SDK model injection', () => {

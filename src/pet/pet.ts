@@ -42,6 +42,13 @@ interface FigureRequest {
   supersede: () => void;
   failed: boolean;
 }
+interface ActionCompletion {
+  action: CompanionAction;
+  until: number;
+  resolve: (result: string) => void;
+  reject: (error: Error) => void;
+  dispose: () => void;
+}
 
 const BASE: Partial<Record<AutonomousAction, number>> = { idle: 3, walk: 3, jump: 2, sit: 2, lie: 1, sleep: 0.6, think: 0.4 };
 const ACTIVITY: Record<Activity, Partial<Record<AutonomousAction, number>>> = {
@@ -110,6 +117,7 @@ export class Peetty {
   private chatWorking = false;
   private chatSpeaking = false;
   private chatGestureUntil = 0;
+  private actionCompletion: ActionCompletion | null = null;
   private menuPinned = false;
   private lastTap: { at: number; x: number; y: number } | null = null;
   private tapTimer = 0;
@@ -138,6 +146,7 @@ export class Peetty {
 
   /** Removes her and every listener, and invalidates unfinished loads. */
   destroy(): void {
+    this.finishChatAction(new Error('Companion action interrupted by removal.'));
     this.chatOperation++;
     this.chatPanel?.destroy();
     this.chatPanel = null;
@@ -252,7 +261,10 @@ export class Peetty {
           root, language: languageOf(this.options.language),
           ...(this.options.model ? { model: this.options.model } : {}),
           ...(this.options.chat ? { chat: this.options.chat } : {}),
-          onAction: (action) => generation === this.generation ? this.performChatAction(action) : 'Companion no longer available.',
+          onAction: (action, signal) => {
+            if (generation !== this.generation) throw new Error('Companion no longer available.');
+            return this.performChatAction(action, signal);
+          },
           onReply: (text) => { if (generation === this.generation && text.length <= 180) this.say(text, 6); },
           onState: (busy, speaking) => {
             if (generation !== this.generation) return;
@@ -297,22 +309,61 @@ export class Peetty {
     if (this.mode === 'ground' && (this.action === 'think' || this.action === 'talk' || this.action === 'sit')) this.setAction('idle', 2);
   }
 
-  private performChatAction(action: CompanionAction): string {
+  private async performChatAction(action: CompanionAction, signal?: AbortSignal): Promise<string> {
+    if (signal?.aborted) throw new DOMException('Action stopped.', 'AbortError');
     if (this.hidden || this.mode === 'paused') throw new Error('The companion is not currently visible.');
-    if (this.mode !== 'ground') throw new Error('The companion is moving; try again once she lands.');
-    this.chatGestureUntil = this.clock + (action === 'sleep' ? 20000 : 3500);
+    if (this.mode !== 'ground' || this.actionCompletion) throw new Error('The companion is moving; try again once she lands.');
+    const duration = action === 'sleep' ? 20000 : 3500;
     if (action === 'move') {
       if (!this.leap()) throw new Error('No other safe spot is available.');
-      return 'Moved to another safe spot.';
+      this.chatGestureUntil = Infinity;
+    } else {
+      this.chatGestureUntil = this.clock + duration;
+      this.setAction(action, duration / 1000);
     }
-    this.setAction(action, action === 'sleep' ? 20 : 3.5);
-    return `Played ${action}.`;
+    return new Promise<string>((resolve, reject) => {
+      const stop = () => this.finishChatAction(new DOMException('Action stopped.', 'AbortError'));
+      this.actionCompletion = {
+        action, until: this.clock + duration, resolve, reject,
+        dispose: () => signal?.removeEventListener('abort', stop),
+      };
+      signal?.addEventListener('abort', stop, { once: true });
+      if (signal?.aborted) stop();
+    });
+  }
+
+  private finishChatAction(error?: Error): void {
+    const pending = this.actionCompletion;
+    if (!pending) return;
+    this.actionCompletion = null;
+    pending.dispose();
+    this.chatGestureUntil = this.clock;
+    if (error) pending.reject(error);
+    else pending.resolve(pending.action === 'move' ? 'Arrived at another safe spot.' : `Finished ${pending.action}.`);
+  }
+
+  /** A tool completes on the animation clock, or on landing, rather than when the pose is selected. */
+  private updateChatAction(): void {
+    const pending = this.actionCompletion;
+    if (!pending) return;
+    if (this.hidden || this.mode === 'paused' || this.mode === 'drag') {
+      this.finishChatAction(new Error('Companion action interrupted.'));
+    } else if (pending.action === 'move') {
+      if (this.mode === 'ground') this.finishChatAction();
+    } else if (this.mode !== 'ground') {
+      this.finishChatAction(new Error('Companion action interrupted.'));
+    } else if (this.clock >= pending.until) {
+      this.finishChatAction();
+    } else if (this.action !== pending.action) {
+      this.finishChatAction(new Error('Companion action interrupted.'));
+    }
   }
 
   /** Takes her off the page until `show()`; her frame loop stops meanwhile. */
   hide(): void {
     if (!this.overlay) return;
     this.hidden = true;
+    this.finishChatAction(new Error('Companion action interrupted by hiding.'));
     this.closeChat();
     clearTimeout(this.tapTimer);
     this.lastTap = null;
@@ -424,6 +475,7 @@ export class Peetty {
 
   /** No usable anchor: step out of view (fading when she is on screen) and rescan at a bounded interval. */
   private park(fade = false) {
+    this.finishChatAction(new Error('Companion action interrupted because no safe surface is available.'));
     this.mode = 'paused';
     this.perch = null;
     this.jump = null;
@@ -539,6 +591,7 @@ export class Peetty {
     if (this.mode === 'paused') return;
     this.view.step(dt);
     this.place();
+    this.updateChatAction();
   };
 
   private ground(now: number, dt: number) {

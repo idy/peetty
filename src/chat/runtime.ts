@@ -23,7 +23,7 @@ let sequence = 0;
 export interface ChatRuntimeOptions {
   model?: PeettyModelOptions;
   chat?: PeettyChatOptions;
-  onAction?: (action: CompanionAction) => string | void;
+  onAction?: (action: CompanionAction, signal?: AbortSignal) => string | void | Promise<string | void>;
   onChange?: () => void;
   /** Internal seams: tests still run the real Pi agent and its tool loop. */
   _testing?: {
@@ -45,7 +45,7 @@ interface Run {
 function aborted(): DOMException { return new DOMException('Request stopped.', 'AbortError'); }
 
 /** Settle promptly even when a host credential callback or a faulty provider ignores abort. */
-function abortable<T>(promise: PromiseLike<T>, signal: AbortSignal): Promise<T> {
+export function abortable<T>(promise: PromiseLike<T>, signal: AbortSignal): Promise<T> {
   return new Promise((resolve, reject) => {
     const cancel = () => { signal.removeEventListener('abort', cancel); reject(aborted()); };
     if (signal.aborted) { void Promise.resolve(promise).catch(() => {}); reject(aborted()); return; }
@@ -88,7 +88,7 @@ function statusError(status: number): string {
 }
 
 /** An explicit setup action; constructing or initializing a runtime never calls this. */
-export async function fetchModelList(baseUrl: string, apiKey?: string, signal?: AbortSignal): Promise<ModelChoice[]> {
+export async function fetchModelList(baseUrl: string, apiKey?: string, signal?: AbortSignal, extraHeaders: Record<string, string> = {}): Promise<ModelChoice[]> {
   const base = normalizeBaseUrl(baseUrl);
   const controller = new AbortController();
   const cancel = () => controller.abort();
@@ -97,8 +97,11 @@ export async function fetchModelList(baseUrl: string, apiKey?: string, signal?: 
   const timer = setTimeout(cancel, 15_000);
   try {
     const key = apiKey?.trim();
+    const headers = new Headers(extraHeaders);
+    headers.set('Accept', 'application/json');
+    if (key && !headers.has('Authorization')) headers.set('Authorization', `Bearer ${key}`);
     const response = await abortable(fetch(`${base}/models`, {
-      headers: { Accept: 'application/json', ...(key ? { Authorization: `Bearer ${key}` } : {}) },
+      headers,
       signal: controller.signal,
       credentials: 'omit',
       cache: 'no-store',
@@ -295,7 +298,7 @@ export class ChatRuntime {
         run.actions++;
         try {
           if (!this.options.onAction) return { content: [{ type: 'text', text: 'This action is unavailable.' }], details: {}, isError: true };
-          const feedback = this.options.onAction(action);
+          const feedback = await abortable(Promise.resolve(this.options.onAction(action, run.controller.signal)), run.controller.signal);
           if (!this.live(run)) return { content: [{ type: 'text', text: 'Action stopped.' }], details: {}, isError: true, terminate: true };
           this.append('action', action);
           this.changed();
