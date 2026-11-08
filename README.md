@@ -22,6 +22,10 @@ Double-click the companion to open chat. Right-click for actions and connection 
 
 On the first visit, enter an OpenAI-compatible API base URL and your API key, load the model list, choose a model, and save. If model discovery is unavailable, enter the model ID manually. Keyless local endpoints are supported. The endpoint must permit browser requests through CORS; an SDK or browser setting cannot bypass a provider's restrictions. An HTTPS website may also block HTTP endpoints.
 
+The **Use local Magpie** shortcut fills `http://127.0.0.1:3425/v1`. Start Magpie on the device running the browser, allow the current website origin in **Settings → Network and sharing → Web pages**, enter a Magpie gateway key, then load and select a model. The shortcut never copies credentials from a different endpoint. HTTPS pages accessing HTTP loopback depend on browser support, local-network permissions and Magpie's CORS policy; this is not a universal browser bypass. An HTTPS public server cannot proxy a visitor's `127.0.0.1` gateway.
+
+SDK callers can use `model: { ...LOCAL_MAGPIE, id: 'your-model-id', apiKey: yourGatewayKey }`, importing `LOCAL_MAGPIE` from `@idy/peetty`. The preset contains only the loopback base URL, with no embedded key or default model.
+
 The SDK can inject the connection directly, including an asynchronous credential callback:
 
 ```js

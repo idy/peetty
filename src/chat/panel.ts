@@ -1,4 +1,5 @@
 import { ChatRuntime, fetchModelList, normalizeBaseUrl } from './runtime.ts';
+import { LOCAL_MAGPIE, localMagpieConnection } from './connections.ts';
 import type { ChatEntry, CompanionAction, PeettyChatOptions, PeettyModelOptions } from './types.ts';
 import type { Language } from '../pet/i18n.ts';
 
@@ -6,6 +7,9 @@ const COPY = {
   en: {
     chat: 'Chat with Peetty', settings: 'Connection settings', close: 'Close chat', back: 'Back to chat',
     title: 'A little company.', intro: 'Connect your own model, then make yourself at home.',
+    magpie: 'Use local Magpie', magpieKey: 'Magpie gateway key',
+    magpieHint: 'Start Magpie on this device. In Settings → Network and sharing → Web pages, allow this website:',
+    magpieAuth: 'Enter your Magpie gateway key and load models. HTTPS-to-loopback access depends on browser support and may require local-network permission.',
     url: 'API URL', key: 'API key', show: 'Show key', hide: 'Hide key', optional: 'Optional for local models',
     load: 'Load models', loading: 'Loading models…', manual: 'Enter a model ID', model: 'Model', choose: 'Choose a model',
     remember: 'Remember my key on this device', keyNote: 'Saved on this website. Other scripts on this site can access a saved key.',
@@ -24,6 +28,9 @@ const COPY = {
   zh: {
     chat: '和 Peetty 聊天', settings: '连接配置', close: '收起聊天', back: '返回聊天',
     title: '在这里，陪你聊聊。', intro: '连接你自己的模型，就可以开始聊天了。',
+    magpie: '使用本机 Magpie', magpieKey: 'Magpie 网关 key',
+    magpieHint: '先启动这台设备上的 Magpie，在「设置 → 网络与共享 → 网页」中允许此网站：',
+    magpieAuth: '再填入 Magpie 网关 key，获取模型。HTTPS 页面连接本机 HTTP 还取决于浏览器支持，可能需要本地网络权限。',
     url: 'API 地址', key: 'API key', show: '显示 key', hide: '隐藏 key', optional: '本地模型可以留空',
     load: '获取模型', loading: '正在获取模型…', manual: '手动填写模型 ID', model: '模型', choose: '选择一个模型',
     remember: '在这台设备上记住 key', keyNote: '保存在本网站。同一网站的其他脚本可以读取已保存的 key。',
@@ -82,6 +89,10 @@ const STYLE = `
 .pc-setup { padding: 24px 22px; }
 .pc-setup h3 { margin: 0 0 7px; font-size: 22px; line-height: 1.35; letter-spacing: -.025em; font-weight: 650; }
 .pc-intro { margin: 0 0 22px; color: var(--pc-muted); font-size: 13px; }
+.pc-local { margin-bottom: 18px; }
+.pc-local > button { width: 100%; }
+.pc-local .pc-note { margin: 10px 0 0; }
+.pc-local code { font: inherit; color: var(--pc-ink); overflow-wrap: anywhere; }
 .pc-field { display: block; margin: 0 0 15px; font-size: 12px; font-weight: 600; }
 .pc-field > span { display: block; margin-bottom: 6px; }
 .pc-input { width: 100%; min-height: 42px; padding: 10px 11px; background: var(--pc-input); color: var(--pc-ink); border: 1px solid var(--pc-line); border-radius: 8px; caret-color: var(--pc-accent); font-size: 13px !important; }
@@ -173,8 +184,9 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     <div class="pc-content">
       <form class="pc-setup" hidden>
         <h3>${t.title}</h3><p class="pc-intro">${t.intro}</p>
+        <div class="pc-local"><button class="pc-small pc-magpie" type="button">${t.magpie}</button><p class="pc-note pc-magpie-note" hidden>${t.magpieHint} <code class="pc-magpie-origin"></code><br>${t.magpieAuth}</p></div>
         <label class="pc-field"><span>${t.url}</span><input class="pc-input" name="url" type="url" placeholder="https://api.example.com/v1" required autocomplete="off" spellcheck="false"></label>
-        <label class="pc-field"><span>${t.key}</span><div class="pc-key"><input class="pc-input" name="key" type="password" placeholder="${t.optional}" autocomplete="off" spellcheck="false" autocapitalize="off"><button type="button" class="pc-show-key">${t.show}</button></div></label>
+        <label class="pc-field"><span class="pc-key-label">${t.key}</span><div class="pc-key"><input class="pc-input" name="key" type="password" placeholder="${t.optional}" autocomplete="off" spellcheck="false" autocapitalize="off"><button type="button" class="pc-show-key">${t.show}</button></div></label>
         <div class="pc-discover"><button type="button" class="pc-small pc-load">${t.load}</button><button type="button" class="pc-link pc-manual">${t.manual}</button></div>
         <label class="pc-field pc-model-field"><span>${t.model}</span><input class="pc-input" name="model" placeholder="model-id" required autocomplete="off" spellcheck="false"><select class="pc-input pc-models" aria-label="${t.model}" hidden></select></label>
         <label class="pc-check"><input name="remember" type="checkbox" checked><span>${t.remember}</span></label>
@@ -217,6 +229,7 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
   let shownError = '';
   let scheduled = false;
   find('.pc-name').textContent = name;
+  find('.pc-magpie-origin').textContent = location.origin;
 
   const runtime = new ChatRuntime({
     ...(options.model ? { model: options.model } : {}),
@@ -231,6 +244,13 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
   });
 
   function showError(text: string) { shownError = text; error.textContent = text; error.hidden = !text; }
+  function updateLocalHint() {
+    let local = false;
+    try { local = normalizeBaseUrl(url.value) === LOCAL_MAGPIE.baseUrl; } catch { /* Not a valid address yet. */ }
+    find('.pc-magpie-note').hidden = !local;
+    find('.pc-key-label').textContent = local ? t.magpieKey : t.key;
+    key.placeholder = sameEndpoint() && runtime.model?.getApiKey ? t.keyProvided : local ? t.magpieKey : t.optional;
+  }
   function fillSettings() {
     const current = runtime.model;
     url.value = current?.baseUrl ?? '';
@@ -242,6 +262,7 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     model.hidden = false;
     model.required = true;
     models.hidden = true;
+    updateLocalHint();
   }
   function setSettings(show: boolean) {
     settingsOpen = show;
@@ -340,7 +361,24 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
       if (discovery === controller) cancelDiscovery();
     }
   }
-  url.addEventListener('input', () => { cancelDiscovery(); if (!sameEndpoint()) key.value = ''; model.hidden = false; model.required = true; models.hidden = true; model.value = ''; });
+  url.addEventListener('input', () => { cancelDiscovery(); if (!sameEndpoint()) key.value = ''; model.hidden = false; model.required = true; models.hidden = true; model.value = ''; updateLocalHint(); });
+  find('.pc-magpie').addEventListener('click', () => {
+    cancelDiscovery();
+    const local = localMagpieConnection(runtime.model);
+    url.value = local.baseUrl;
+    key.value = local.apiKey ?? '';
+    key.type = 'password';
+    find('.pc-show-key').textContent = t.show;
+    model.value = local.id;
+    model.hidden = false;
+    model.required = true;
+    models.hidden = true;
+    showError('');
+    updateLocalHint();
+    // Magpie requires page authorization and a gateway key for browser clients.
+    if (local.apiKey || local.getApiKey) void discover();
+    else key.focus({ preventScroll: true });
+  });
   key.addEventListener('input', cancelDiscovery);
   find('.pc-show-key').addEventListener('click', () => { key.type = key.type === 'password' ? 'text' : 'password'; find('.pc-show-key').textContent = key.type === 'password' ? t.show : t.hide; });
   load.addEventListener('click', () => { void discover(); });
