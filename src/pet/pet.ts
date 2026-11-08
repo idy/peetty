@@ -6,6 +6,8 @@ import { languageOf, strings, type Language, type Strings } from './i18n.ts';
 import { bottom, clearAt, crossing, findPerches, floor, inUse, isEditable, limits, reach, refresh, support, type Perch, type PerchOptions } from './perches.ts';
 import { along, GRAVITY, impact, planJump, weighted, type Jump } from './physics.ts';
 import { createOverlay, placeAbove, type MenuAction, type Overlay } from './ui.ts';
+import type { ChatPanel } from '../chat/panel.ts';
+import type { CompanionAction, PeettyChatOptions, PeettyModelOptions } from '../chat/types.ts';
 
 export type Activity = 'calm' | 'normal' | 'lively';
 
@@ -24,6 +26,10 @@ export interface PeettyOptions {
   greet?: boolean;
   /** Overlay stacking order. */
   zIndex?: number;
+  /** An OpenAI-compatible connection. Injected credentials are not saved automatically. */
+  model?: PeettyModelOptions;
+  /** Chat storage and personality; false disables all chat entry points. */
+  chat?: PeettyChatOptions | false;
 }
 
 type Mode = 'ground' | 'jump' | 'fall' | 'drag' | 'hang' | 'paused';
@@ -96,6 +102,16 @@ export class Peetty {
   private bubbleTimer = 0;
   private greetTimer = 0;
   private hidden = false;
+  private chatPanel: ChatPanel | null = null;
+  private chatLoading: Promise<ChatPanel | null> | null = null;
+  private chatOperation = 0;
+  private chatVisible = false;
+  private chatWorking = false;
+  private chatSpeaking = false;
+  private chatGestureUntil = 0;
+  private menuPinned = false;
+  private lastTap: { at: number; x: number; y: number } | null = null;
+  private tapTimer = 0;
 
   constructor(options: PeettyOptions = {}) {
     this.options = { ...options };
@@ -121,6 +137,14 @@ export class Peetty {
 
   /** Removes her and every listener, and invalidates unfinished loads. */
   destroy(): void {
+    this.chatOperation++;
+    this.chatPanel?.destroy();
+    this.chatPanel = null;
+    this.chatLoading = null;
+    this.chatVisible = this.chatWorking = this.chatSpeaking = false;
+    this.chatGestureUntil = 0;
+    this.menuPinned = false;
+    this.lastTap = null;
     this.generation++;
     this.figureRequest?.supersede();
     this.figureRequest = null;
@@ -181,7 +205,7 @@ export class Peetty {
     bubble.classList.add('show');
     clearTimeout(this.bubbleTimer);
     this.bubbleTimer = window.setTimeout(() => bubble.classList.remove('show'), seconds * 1000);
-    if (this.mode === 'ground' && this.action !== 'lie' && this.action !== 'sit') {
+    if (this.mode === 'ground' && this.action !== 'lie' && this.action !== 'sit' && this.action !== 'sleep') {
       this.setAction('talk', Math.min(seconds, 2.6));
     }
   }
@@ -193,10 +217,104 @@ export class Peetty {
     else this.setAction(state, DURATION[state]?.[0] ?? 3);
   }
 
+  /** Opens chat, or connection setup on the first visit. Chat code loads only here. */
+  openChat(): Promise<void> { return this.openPanel(false); }
+
+  /** Opens the connection settings without discarding conversation history. */
+  configure(): Promise<void> { return this.openPanel(true); }
+
+  closeChat(): void {
+    this.chatOperation++;
+    this.chatPanel?.close();
+    this.chatClosed();
+  }
+
+  /** Replaces the injected model and aborts an unfinished reply. Credentials stay in memory. */
+  async setModel(model: PeettyModelOptions): Promise<void> {
+    this.options = { ...this.options, model: { ...model } };
+    const panel = this.chatPanel ?? (this.chatLoading ? await this.chatLoading : null);
+    await panel?.setModel(model);
+  }
+
+  private async openPanel(settings: boolean): Promise<void> {
+    if (this.options.chat === false) return;
+    const generation = this.generation;
+    const operation = ++this.chatOperation;
+    await this.mount();
+    if (generation !== this.generation || operation !== this.chatOperation || !this.overlay) return;
+    this.show();
+    if (!this.chatLoading) {
+      const root = this.overlay.host.shadowRoot!;
+      const pending = import('../chat/panel.ts').then(({ createChatPanel }) => {
+        if (generation !== this.generation) return null;
+        return createChatPanel({
+          root, language: languageOf(this.options.language),
+          ...(this.options.model ? { model: this.options.model } : {}),
+          ...(this.options.chat ? { chat: this.options.chat } : {}),
+          onAction: (action) => generation === this.generation ? this.performChatAction(action) : 'Companion no longer available.',
+          onReply: (text) => { if (generation === this.generation && text.length <= 180) this.say(text, 6); },
+          onState: (busy, speaking) => {
+            if (generation !== this.generation) return;
+            this.chatWorking = busy;
+            this.chatSpeaking = speaking;
+            if (this.chatVisible && busy && this.mode === 'ground' && this.clock >= this.chatGestureUntil) {
+              const action = speaking ? 'talk' : 'think';
+              if (this.action !== action) this.setAction(action, 15);
+            }
+          },
+          onClose: () => this.chatClosed(),
+        });
+      }).then((panel) => {
+        if (generation !== this.generation) { panel?.destroy(); return null; }
+        this.chatPanel = panel;
+        return panel;
+      }).catch(() => {
+        if (generation === this.generation) { this.chatLoading = null; this.say(this.text.chatFailed); }
+        return null;
+      });
+      this.chatLoading = pending;
+    }
+    const panel = await this.chatLoading;
+    if (!panel || generation !== this.generation || operation !== this.chatOperation) return;
+    this.chatVisible = true;
+    this.menuPinned = false;
+    clearTimeout(this.greetTimer);
+    this.overlay?.menu.classList.remove('show');
+    this.overlay?.bubble.classList.remove('show');
+    this.overlay?.pet.setAttribute('aria-expanded', 'true');
+    if (this.overlay) {
+      this.overlay.host.style.visibility = 'visible';
+      if (this.mode === 'paused') this.overlay.pet.classList.add('gone');
+    }
+    if (this.mode === 'ground') this.setAction('sit', 30);
+    panel.open(settings);
+  }
+
+  private chatClosed(): void {
+    this.chatVisible = this.chatWorking = this.chatSpeaking = false;
+    this.overlay?.pet.setAttribute('aria-expanded', 'false');
+    if (this.mode === 'ground' && (this.action === 'think' || this.action === 'talk' || this.action === 'sit')) this.setAction('idle', 2);
+  }
+
+  private performChatAction(action: CompanionAction): string {
+    if (this.hidden || this.mode === 'paused') throw new Error('The companion is not currently visible.');
+    if (this.mode !== 'ground') throw new Error('The companion is moving; try again once she lands.');
+    this.chatGestureUntil = this.clock + (action === 'sleep' ? 20000 : 3500);
+    if (action === 'move') {
+      if (!this.leap()) throw new Error('No other safe spot is available.');
+      return 'Moved to another safe spot.';
+    }
+    this.setAction(action, action === 'sleep' ? 20 : 3.5);
+    return `Played ${action}.`;
+  }
+
   /** Takes her off the page until `show()`; her frame loop stops meanwhile. */
   hide(): void {
     if (!this.overlay) return;
     this.hidden = true;
+    this.closeChat();
+    clearTimeout(this.tapTimer);
+    this.lastTap = null;
     this.releasePress();
     cancelAnimationFrame(this.raf);
     this.raf = 0;
@@ -315,8 +433,8 @@ export class Peetty {
     menu.classList.remove('show');
     bubble.classList.remove('show');
     // A faded figure takes no pointer events; the next retry hides the overlay if she cannot come back.
-    if (fade) pet.classList.add('gone');
-    else host.style.visibility = 'hidden';
+    if (fade || this.chatVisible) pet.classList.add('gone');
+    host.style.visibility = this.chatVisible || fade ? 'visible' : 'hidden';
     this.retryAt = this.clock + SCAN_INTERVAL;
   }
 
@@ -330,6 +448,34 @@ export class Peetty {
     const pet = this.overlay!.pet;
     const menu = this.overlay!.menu;
     on(pet, 'pointerdown', (e: PointerEvent) => this.onDown(e));
+    on(pet, 'contextmenu', (e: MouseEvent) => {
+      e.preventDefault();
+      clearTimeout(this.menuTimer);
+      clearTimeout(this.tapTimer);
+      this.lastTap = null;
+      this.menuPinned = true;
+      menu.classList.add('show');
+      this.place();
+    });
+    on(pet, 'keydown', (e: KeyboardEvent) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void this.openChat(); }
+      else if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+        e.preventDefault(); this.menuPinned = true; menu.classList.add('show');
+        menu.querySelector<HTMLButtonElement>('button')?.focus();
+      }
+    });
+    on(window, 'pointerdown', (e: PointerEvent) => {
+      const path = e.composedPath();
+      if (!path.includes(pet) && !path.includes(menu)) { this.menuPinned = false; menu.classList.remove('show'); }
+    });
+    on(menu, 'keydown', (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { this.menuPinned = false; menu.classList.remove('show'); pet.focus(); }
+    });
+    if (this.options.chat === false) {
+      for (const button of menu.children) {
+        if (['chat', 'configure'].includes(button.getAttribute('data-action') ?? '')) (button as HTMLElement).hidden = true;
+      }
+    }
     on(window, 'pointermove', (e: PointerEvent) => this.onMove(e), { passive: true });
     on(window, 'pointerup', (e: PointerEvent) => this.onUp(e));
     on(window, 'pointercancel', (e: PointerEvent) => this.onUp(e, true));
@@ -366,6 +512,7 @@ export class Peetty {
     clearTimeout(this.menuTimer);
     clearTimeout(this.bubbleTimer);
     clearTimeout(this.greetTimer);
+    clearTimeout(this.tapTimer);
   }
 
   // ------------------------------------------------------------ the loop
@@ -422,8 +569,9 @@ export class Peetty {
         this.x += Math.sign(dx) * Math.min(Math.abs(dx), this.pace * dt);
       }
     } else if (now / 1000 > this.until) {
-      if (live.clear) this.decide();
-      else this.leaveEdge();
+      if (!live.clear) this.leaveEdge();
+      else if (this.chatVisible) this.setAction(this.chatWorking ? this.chatSpeaking ? 'talk' : 'think' : 'sit', 15);
+      else this.decide();
     }
 
     // A friendly wave when the pointer comes close, now and then.
@@ -718,6 +866,8 @@ export class Peetty {
     if (!this.press || e.pointerId !== this.press.id || this.hidden) return;
     if (this.mode !== 'drag') {
       if (Math.hypot(e.clientX - this.press.x, e.clientY - this.press.y) < 5) return;
+      clearTimeout(this.tapTimer);
+      this.lastTap = null;
       this.mode = 'drag';
       this.perch = null;
       this.jump = null;
@@ -768,10 +918,25 @@ export class Peetty {
       this.dragTrail = [];
       // Let go mid-swing, she keeps flying the way she was thrown; calm until she starts coming down.
       this.startFall();
-    } else if (!cancelled) this.greet();
+    } else if (!cancelled) {
+      const now = performance.now();
+      const previous = this.lastTap;
+      if (previous && now - previous.at < 420 && Math.hypot(e.clientX - previous.x, e.clientY - previous.y) < 24) {
+        this.lastTap = null;
+        clearTimeout(this.tapTimer);
+        if (this.chatPanel?.isOpen) this.closeChat();
+        else void this.openChat();
+      } else {
+        this.lastTap = { at: now, x: e.clientX, y: e.clientY };
+        clearTimeout(this.tapTimer);
+        if (e.pointerType === 'touch') { this.menuPinned = true; this.overlay!.menu.classList.add('show'); }
+        else this.tapTimer = window.setTimeout(() => { this.lastTap = null; this.greet(); }, 420);
+      }
+    }
   }
 
   private hover(on: boolean) {
+    if (this.menuPinned || this.chatVisible) return;
     clearTimeout(this.menuTimer);
     const menu = this.overlay?.menu;
     if (!menu) return;
@@ -782,8 +947,11 @@ export class Peetty {
   }
 
   private onMenu(action: MenuAction) {
+    this.menuPinned = false;
     this.overlay!.menu.classList.remove('show');
-    if (action === 'greet') this.greet();
+    if (action === 'chat') void this.openChat();
+    else if (action === 'configure') void this.configure();
+    else if (action === 'greet') this.greet();
     else if (action === 'move') {
       if (this.mode === 'ground' && !this.leap()) this.say(pickOne(this.text.hello));
     } else if (action === 'nap') {

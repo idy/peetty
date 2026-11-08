@@ -38,7 +38,8 @@ jobs:
           node --check site/translations.js
           node --check site/script.js
           mkdir -p site/sdk site/figures site/schema
-          cp dist/peetty.global.js site/sdk/
+          cp -R dist/. site/sdk/
+          find site/sdk -name '*.map' -delete
           cp figures/*.json site/figures/
           cp schema/*.json site/schema/
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3

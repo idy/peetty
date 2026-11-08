@@ -15,6 +15,7 @@ const STYLE = `
 .pet svg { display: block; touch-action: none; user-select: none; -webkit-user-select: none; }
 .pet svg * { pointer-events: visiblePainted; cursor: grab; }
 .pet.dragging svg * { cursor: grabbing; }
+.pet:focus-visible { outline: 2px solid var(--peetty-accent, #7a6ee0); outline-offset: 3px; border-radius: 12px; }
 .float { position: absolute; left: 0; top: 0; pointer-events: none; transform-origin: 50% 100%; }
 .bubble {
   position: relative;
@@ -32,7 +33,7 @@ const STYLE = `
   border-right: 1px solid var(--peetty-line, #e2deef); border-bottom: 1px solid var(--peetty-line, #e2deef);
 }
 .menu {
-  display: flex; gap: 4px; padding: 4px; border-radius: 999px;
+  display: flex; flex-wrap: wrap; justify-content: center; width: max-content; max-width: calc(100vw - 12px); gap: 4px; padding: 4px; border-radius: 16px;
   background: var(--peetty-surface, #ffffff); border: 1px solid var(--peetty-line, #e2deef);
   box-shadow: 0 6px 18px rgba(40, 30, 80, .14); opacity: 0; transform: translateY(4px);
   transition: opacity .15s ease, transform .15s ease; visibility: hidden;
@@ -53,7 +54,7 @@ const STYLE = `
 }
 `;
 
-export type MenuAction = 'greet' | 'move' | 'nap' | 'hide';
+export type MenuAction = 'chat' | 'greet' | 'move' | 'nap' | 'configure' | 'hide';
 
 export interface BoxSize {
   width: number;
@@ -74,7 +75,7 @@ export interface Overlay {
 
 export function createOverlay(text: Strings, zIndex: number, onAction: (action: MenuAction) => void): Overlay {
   const host = document.createElement('peetty-companion');
-  host.setAttribute('aria-live', 'polite');
+  host.setAttribute('data-peetty', 'avoid');
   Object.assign(host.style, {
     position: 'fixed', inset: '0', display: 'block', pointerEvents: 'none', zIndex: String(zIndex),
     margin: '0', padding: '0', border: '0', background: 'none', contain: 'layout style',
@@ -87,6 +88,10 @@ export function createOverlay(text: Strings, zIndex: number, onAction: (action: 
 
   const pet = document.createElement('div');
   pet.className = 'pet';
+  pet.setAttribute('role', 'button');
+  pet.setAttribute('tabindex', '0');
+  pet.setAttribute('aria-label', text.pet);
+  pet.setAttribute('aria-haspopup', 'dialog');
 
   const bubbleBox = document.createElement('div');
   bubbleBox.className = 'float';
@@ -101,9 +106,10 @@ export function createOverlay(text: Strings, zIndex: number, onAction: (action: 
   menu.className = 'menu';
   menu.setAttribute('role', 'toolbar');
   menu.setAttribute('aria-label', text.menu);
-  for (const action of ['greet', 'move', 'nap', 'hide'] as const) {
+  for (const action of ['chat', 'greet', 'move', 'nap', 'configure', 'hide'] as const) {
     const button = document.createElement('button');
     button.type = 'button';
+    button.setAttribute('data-action', action);
     button.textContent = text[action];
     button.addEventListener('click', (event) => {
       event.stopPropagation();

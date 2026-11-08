@@ -814,6 +814,80 @@ describe('pointer and shadow event routing', () => {
   });
 });
 
+describe('chat entry points and SDK model injection', () => {
+  it('accepts an injected model without loading chat, resolving credentials, or calling the endpoint on mount', async (t) => {
+    let keys = 0;
+    const network = mock.method(globalThis, 'fetch', async () => { throw new Error('unexpected network'); });
+    const { pet } = await mountPet(t, { model: { baseUrl: 'https://api.example.test/v1', id: 'first', getApiKey: () => { keys++; return 'key'; } } });
+    await pet.setModel({ baseUrl: 'https://other.example.test/v1', id: 'second', apiKey: 'another-key' });
+    assert.equal(keys, 0);
+    assert.equal(network.mock.callCount(), 0);
+    assert.equal((pet as unknown as { chatLoading: unknown }).chatLoading, null);
+  });
+
+  it('opens chat once on a double tap and cancels the delayed greeting', async (t) => {
+    const { dom, pet, state } = await mountPet(t);
+    stand(state);
+    const open = mock.method(pet, 'openChat', async () => {});
+    for (let i = 0; i < 2; i++) {
+      state.overlay.pet.dispatchEvent(pointer('pointerdown', 1));
+      dom.window.dispatchEvent(pointer('pointerup', 1));
+      if (!i) dom.frame(100);
+    }
+    assert.equal(open.mock.callCount(), 1);
+    assert.equal(dom.timers.size, 0);
+  });
+
+  it('opens a pinned right-click menu and keeps the page context menu untouched elsewhere', async (t) => {
+    const { dom, state } = await mountPet(t);
+    stand(state);
+    const event = new Event('contextmenu', { cancelable: true });
+    state.overlay.pet.dispatchEvent(event);
+    assert.equal(event.defaultPrevented, true);
+    state.overlay.pet.dispatchEvent(new Event('pointerout'));
+    dom.frame(1000);
+    assert.equal(state.overlay.menu.classList.contains('show'), true);
+    const outside = new Event('contextmenu', { cancelable: true });
+    dom.window.dispatchEvent(outside);
+    assert.equal(outside.defaultPrevented, false);
+  });
+
+  it('offers the menu on a touch tap and routes the Chat action to the public API', async (t) => {
+    const { dom, pet, state } = await mountPet(t);
+    stand(state);
+    state.overlay.pet.dispatchEvent(pointer('pointerdown', 1));
+    dom.window.dispatchEvent(Object.assign(pointer('pointerup', 1), { pointerType: 'touch' }));
+    assert.equal(state.overlay.menu.classList.contains('show'), true);
+    const open = mock.method(pet, 'openChat', async () => {});
+    const button = [...state.overlay.menu.children].find((node) => node.getAttribute('data-action') === 'chat');
+    assert.ok(button);
+    button.dispatchEvent(new Event('click'));
+    assert.equal(open.mock.callCount(), 1);
+  });
+
+  it('cancels a pending tap greeting when a drag starts', async (t) => {
+    const { dom, state } = await mountPet(t);
+    stand(state);
+    state.overlay.pet.dispatchEvent(pointer('pointerdown', 1));
+    dom.window.dispatchEvent(pointer('pointerup', 1));
+    assert.equal(dom.timers.size, 1);
+    state.overlay.pet.dispatchEvent(pointer('pointerdown', 2));
+    dom.window.dispatchEvent(pointer('pointermove', 2, 150, 150));
+    assert.equal(state.mode, 'drag');
+    assert.equal(dom.timers.size, 0);
+  });
+
+  it('can disable chat without affecting local pet interactions', async (t) => {
+    const { pet, state } = await mountPet(t, { chat: false });
+    await pet.openChat();
+    await pet.configure();
+    assert.equal((pet as unknown as { chatLoading: unknown }).chatLoading, null);
+    for (const button of state.overlay.menu.children) {
+      if (['chat', 'configure'].includes(button.getAttribute('data-action') ?? '')) assert.equal((button as HTMLElement).hidden, true);
+    }
+  });
+});
+
 describe('overlay geometry and weighted selection', () => {
   it('reuses menu and bubble dimensions until content, resize or observation changes them', async (t) => {
     const { dom, pet, state } = await mountPet(t);

@@ -1,0 +1,493 @@
+import assert from 'node:assert/strict';
+import { describe, it } from 'node:test';
+import type { StreamFn } from '@earendil-works/pi-agent-core';
+import type { AssistantMessage, Message, SimpleStreamOptions, TranscriptContext } from '@earendil-works/pi-ai';
+import { AssistantMessageEventStream } from '@earendil-works/pi-ai/utils/event-stream';
+import { ChatRuntime, fetchModelList, normalizeBaseUrl } from '../src/chat/runtime.ts';
+import { boundedEntries, BrowserChatStore } from '../src/chat/store.ts';
+import type { ChatEntry, CompanionAction, PeettyModelOptions } from '../src/chat/types.ts';
+import { installChatIndexedDB, MemoryChatStorage } from './helpers/chat-storage.ts';
+
+const MODEL: PeettyModelOptions = { id: 'manual-model', baseUrl: 'https://model.example/v1', apiKey: 'secret-user-key' };
+const entry = (role: ChatEntry['role'], text: string, n = 0): ChatEntry => ({ id: `entry-${n}`, role, text, createdAt: n });
+const deferred = <T>() => {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+};
+async function until(predicate: () => boolean): Promise<void> {
+  for (let i = 0; i < 100 && !predicate(); i++) await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.ok(predicate(), 'expected asynchronous state was reached');
+}
+function assistant(text = '', stopReason: AssistantMessage['stopReason'] = 'stop'): AssistantMessage {
+  return {
+    role: 'assistant', content: text ? [{ type: 'text', text }] : [], api: 'openai-completions', provider: 'peetty', model: MODEL.id,
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    timestamp: Date.now(), stopReason,
+  };
+}
+function finished(message: AssistantMessage): AssistantMessageEventStream {
+  const stream = new AssistantMessageEventStream();
+  if (message.stopReason === 'error' || message.stopReason === 'aborted') stream.push({ type: 'error', reason: message.stopReason, error: message });
+  else stream.push({ type: 'done', reason: message.stopReason as 'stop' | 'toolUse', message });
+  stream.end();
+  return stream;
+}
+function toolCall(actions: string[]): AssistantMessage {
+  const message = assistant('', 'toolUse');
+  message.content = actions.map((action, i) => ({ type: 'toolCall', id: `call-${i}`, name: 'companion_action', arguments: { action } }));
+  return message;
+}
+function messageText(message: Message): string {
+  return 'content' in message && typeof message.content === 'string' ? message.content : JSON.stringify(message);
+}
+function heldProvider() {
+  const calls: { stream: AssistantMessageEventStream; context: TranscriptContext; options: SimpleStreamOptions | undefined }[] = [];
+  const streamFn: StreamFn = (_model, context, options) => {
+    const stream = new AssistantMessageEventStream();
+    stream.push({ type: 'start', partial: assistant('', 'pending') });
+    calls.push({ stream, context: structuredClone(context), options });
+    return stream;
+  };
+  const partial = (index: number, text: string) => {
+    const message = assistant(text, 'pending');
+    calls[index]!.stream.push({ type: 'text_delta', contentIndex: 0, delta: text, partial: message });
+  };
+  const end = (index: number, text: string, reason: 'stop' | 'error' | 'aborted' = 'stop') => {
+    const message = assistant(text, reason);
+    if (reason === 'stop') calls[index]!.stream.push({ type: 'done', reason, message });
+    else calls[index]!.stream.push({ type: 'error', reason, error: message });
+    calls[index]!.stream.end();
+  };
+  return { calls, streamFn, partial, end };
+}
+
+describe('OpenAI-compatible endpoint setup', () => {
+  it('normalizes API roots, preserves custom paths, and rejects URLs carrying credentials', () => {
+    assert.equal(normalizeBaseUrl(' https://model.example/// '), 'https://model.example/v1');
+    assert.equal(normalizeBaseUrl('http://localhost:8080/api/v2/chat/completions/'), 'http://localhost:8080/api/v2');
+    assert.equal(normalizeBaseUrl('https://model.example/v1/models'), 'https://model.example/v1');
+    for (const url of ['file:///tmp/api', 'ftp://model.example', 'https://user:secret@model.example', 'https://model.example?key=secret', 'https://model.example/#secret', 'invalid']) {
+      assert.throws(() => normalizeBaseUrl(url), (error: Error) => !error.message.includes('secret'));
+    }
+  });
+
+  it('fetches model IDs explicitly, authenticates, filters, sorts, and deduplicates', async (t) => {
+    const requests: [string, RequestInit | undefined][] = [];
+    t.mock.method(globalThis, 'fetch', async (url: string, options?: RequestInit) => {
+      requests.push([url, options]);
+      return Response.json({ data: [{ id: 'z' }, { id: 'a', name: 'Alpha' }, { id: 'z' }, {}, { id: 4 }, { id: '  ' }] });
+    });
+    assert.deepEqual(await fetchModelList('https://model.example/v1/chat/completions', ' setup-key '), [{ id: 'a', name: 'Alpha' }, { id: 'z', name: 'z' }]);
+    assert.equal(requests[0]![0], 'https://model.example/v1/models');
+    assert.equal(new Headers(requests[0]![1]?.headers).get('Authorization'), 'Bearer setup-key');
+    assert.equal(requests[0]![1]?.credentials, 'omit');
+    await fetchModelList('https://model.example/v1');
+    assert.equal(new Headers(requests[1]![1]?.headers).get('Authorization'), null);
+  });
+
+  it('supports empty lists and hides server/network messages, including secrets', async (t) => {
+    const fetch = t.mock.method(globalThis, 'fetch', async () => Response.json({ data: [] }));
+    assert.deepEqual(await fetchModelList(MODEL.baseUrl), []);
+    fetch.mock.mockImplementation(async () => Response.json({ error: 'secret-user-key' }, { status: 401 }));
+    await assert.rejects(fetchModelList(MODEL.baseUrl, MODEL.apiKey), /rejected access/);
+    fetch.mock.mockImplementation(async () => { throw new Error('secret-user-key inside request'); });
+    await assert.rejects(fetchModelList(MODEL.baseUrl, MODEL.apiKey), (error: Error) => error.message.includes('Could not load models') && !error.message.includes('secret-user-key'));
+    fetch.mock.mockImplementation(async () => Response.json({ error: 'invalid list secret-user-key' }));
+    await assert.rejects(fetchModelList(MODEL.baseUrl), /model ID manually/);
+  });
+
+  it('aborts discovery promptly even if fetch ignores its signal', async (t) => {
+    const gate = deferred<Response>();
+    let requested = false;
+    t.mock.method(globalThis, 'fetch', () => { requested = true; return gate.promise; });
+    const controller = new AbortController();
+    const request = fetchModelList(MODEL.baseUrl, MODEL.apiKey, controller.signal);
+    assert.ok(requested);
+    controller.abort();
+    await assert.rejects(request, { name: 'AbortError' });
+    gate.resolve(Response.json({ data: [{ id: 'late' }] }));
+    await assert.rejects(fetchModelList(MODEL.baseUrl, undefined, controller.signal), { name: 'AbortError' });
+  });
+});
+
+describe('local persistence and credential ownership', () => {
+  it('stores connection and plain history in a namespaced IndexedDB and restores it', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const first = new BrowserChatStore('test-pet');
+    assert.deepEqual(await first.load(), { entries: [] });
+    await first.saveConnection({ id: MODEL.id, baseUrl: MODEL.baseUrl, apiKey: MODEL.apiKey! });
+    await first.saveEntries([entry('user', 'hello'), entry('assistant', 'hi', 1), entry('action', 'wave', 2)]);
+    first.close();
+    const second = new BrowserChatStore('test-pet');
+    assert.deepEqual(await second.load(), {
+      connection: { id: MODEL.id, baseUrl: MODEL.baseUrl, apiKey: MODEL.apiKey },
+      entries: [entry('user', 'hello'), entry('assistant', 'hi', 1), entry('action', 'wave', 2)],
+    });
+    assert.deepEqual(idb.opened, ['test-pet:chat', 'test-pet:chat']);
+    assert.equal(second.persistenceWarning, false);
+    const other = new BrowserChatStore('other-pet');
+    assert.deepEqual(await other.load(), { entries: [] });
+    second.close(); other.close();
+  });
+
+  it('flushes already queued history before closing IndexedDB', async (t) => {
+    installChatIndexedDB(t);
+    const store = new BrowserChatStore('closing');
+    await store.load();
+    const writing = store.saveEntries([entry('assistant', 'partial answer')]);
+    store.close();
+    await writing;
+    const restored = new BrowserChatStore('closing');
+    assert.deepEqual((await restored.load()).entries, [entry('assistant', 'partial answer')]);
+    restored.close();
+  });
+
+  it('falls back to memory when IndexedDB is absent or a write fails', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const store = new BrowserChatStore('failure');
+    await store.load();
+    idb.failWrites();
+    await store.saveEntries([entry('user', 'kept in memory')]);
+    assert.equal(store.persistenceWarning, true);
+    assert.deepEqual((await store.load()).entries, [entry('user', 'kept in memory')]);
+    store.close();
+    Object.defineProperty(globalThis, 'indexedDB', { configurable: true, value: undefined });
+    const unavailable = new BrowserChatStore();
+    await unavailable.load();
+    await unavailable.saveEntries([entry('assistant', 'still works')]);
+    assert.equal(unavailable.persistenceWarning, true);
+    assert.deepEqual((await unavailable.load()).entries, [entry('assistant', 'still works')]);
+    unavailable.close();
+    const disabled = new BrowserChatStore('off', false);
+    await disabled.load();
+    assert.equal(disabled.persistenceWarning, false);
+    disabled.close();
+  });
+
+  it('validates and bounds restored history', () => {
+    const history = boundedEntries([
+      null, {}, entry('action', 'not-an-action'), entry('assistant', ''),
+      ...Array.from({ length: 250 }, (_, i) => entry('user', 'x'.repeat(2_000), i)),
+    ]);
+    assert.equal(history.length, 120);
+    assert.equal(history[0]!.id, 'entry-130');
+    assert.equal(history.at(-1)!.id, 'entry-249');
+    assert.ok(boundedEntries([entry('assistant', 'x'.repeat(100_000))])[0]!.text.length <= 16_000);
+  });
+
+  it('initializes without fetch or credential resolution and lets injected options fully override stored auth', async (t) => {
+    const fetch = t.mock.method(globalThis, 'fetch', async () => { throw new Error('unexpected network'); });
+    let resolutions = 0;
+    const store = new MemoryChatStorage({ connection: { ...MODEL }, entries: [entry('user', 'old hello')] });
+    const runtime = new ChatRuntime({
+      model: { id: 'injected', baseUrl: 'https://new.example/v1', getApiKey: async () => { resolutions++; return 'ephemeral'; } },
+      _testing: { storage: store, streamFn: () => finished(assistant('hello')) },
+    });
+    await runtime.initialize();
+    assert.equal(resolutions, 0);
+    assert.equal(fetch.mock.callCount(), 0);
+    assert.equal(runtime.model?.id, 'injected');
+    assert.equal(runtime.model?.apiKey, undefined);
+    assert.equal(runtime.entries[0]?.text, 'old hello');
+    await runtime.send('new hello');
+    assert.equal(resolutions, 1);
+    assert.equal(store.connections.length, 0);
+    assert.ok(!JSON.stringify(store.histories).includes('ephemeral'));
+    runtime.destroy();
+  });
+
+  it('only remembers explicitly configured static keys, drops old keys on endpoint changes, and excludes SDK headers', async () => {
+    const store = new MemoryChatStorage({ connection: { ...MODEL }, entries: [] });
+    const seen: { baseUrl: string; apiKey: string | undefined }[] = [];
+    const runtime = new ChatRuntime({ _testing: { storage: store, streamFn: (model, _context, options) => {
+      seen.push({ baseUrl: model.baseUrl, apiKey: options?.apiKey });
+      return finished(assistant('ok'));
+    } } });
+    await runtime.initialize();
+    assert.equal(runtime.model?.apiKey, MODEL.apiKey);
+    await runtime.configure({ ...MODEL, headers: { Authorization: 'Bearer private-header' } }, true);
+    assert.equal(store.state.connection?.apiKey, MODEL.apiKey);
+    assert.ok(!JSON.stringify(store.connections).includes('private-header'));
+    await runtime.configure({ id: 'local', baseUrl: 'http://localhost:8080/v1' }, false);
+    await runtime.send('hi');
+    assert.deepEqual(seen, [{ baseUrl: 'http://localhost:8080/v1', apiKey: 'peetty-keyless' }]);
+    assert.equal(store.state.connection?.apiKey, undefined);
+    await runtime.configure({ ...MODEL, getApiKey: () => 'callback-secret' }, true);
+    assert.equal(store.state.connection?.apiKey, undefined);
+    runtime.destroy();
+  });
+
+  it('disables storage writes entirely with persist:false and surfaces graceful storage failures', async () => {
+    const store = new MemoryChatStorage();
+    const runtime = new ChatRuntime({ chat: { persist: false }, _testing: { storage: store, streamFn: () => finished(assistant('hi')) } });
+    await runtime.configure(MODEL, true);
+    await runtime.send('hello');
+    assert.equal(store.connections.length, 0);
+    assert.equal(store.histories.length, 0);
+    runtime.destroy();
+    const failed = new MemoryChatStorage();
+    failed.load = async () => { throw new Error('IndexedDB denied'); };
+    failed.saveEntries = async () => { throw new Error('quota'); };
+    const fallback = new ChatRuntime({ model: MODEL, _testing: { storage: failed, streamFn: () => finished(assistant('still works')) } });
+    await fallback.send('hi');
+    assert.equal(fallback.persistenceWarning, true);
+    assert.equal(fallback.entries.at(-1)?.text, 'still works');
+    fallback.destroy();
+  });
+});
+
+describe('Pi chat streaming and actions', () => {
+  it('streams partial text, signals transitions, rejects overlapping sends, and retains partial text on provider error', async () => {
+    const provider = heldProvider();
+    const updates: { busy: boolean; last: string | undefined }[] = [];
+    const runtime = new ChatRuntime({ model: MODEL, onChange: () => updates.push({ busy: runtime.busy, last: runtime.entries.at(-1)?.text }), _testing: { storage: new MemoryChatStorage(), streamFn: provider.streamFn } });
+    const request = runtime.send('hello');
+    assert.equal(runtime.busy, true);
+    await runtime.send('ignored');
+    await until(() => provider.calls.length === 1);
+    provider.partial(0, 'A partial answer');
+    await until(() => runtime.entries.at(-1)?.text === 'A partial answer');
+    const error = assistant('', 'error');
+    error.errorMessage = `provider echoed ${MODEL.apiKey}`;
+    provider.calls[0]!.stream.push({ type: 'error', reason: 'error', error });
+    await request;
+    assert.deepEqual(runtime.entries.map((entry) => entry.text), ['hello', 'A partial answer']);
+    assert.equal(runtime.busy, false);
+    assert.match(runtime.error!, /Could not get a response/);
+    assert.ok(!runtime.error!.includes(MODEL.apiKey!));
+    assert.ok(updates.some((update) => update.busy && update.last === 'A partial answer'));
+    assert.equal(updates.at(-1)?.busy, false);
+    runtime.destroy();
+  });
+
+  it('executes all six actions through the real agent tool loop and keeps tool transcripts out of persisted history', async () => {
+    const actions: CompanionAction[] = [];
+    const calls: TranscriptContext[] = [];
+    const storage = new MemoryChatStorage();
+    let turns = 0;
+    const runtime = new ChatRuntime({ model: MODEL, onAction: (action) => { actions.push(action); return `Performed ${action}`; }, _testing: { storage, streamFn: (_model, context) => {
+      calls.push(structuredClone(context));
+      turns++;
+      return finished(turns % 2 ? toolCall(['wave', 'sit', 'lie']) : assistant('Happy to help.'));
+    } } });
+    await runtime.send('Please wave, sit and lie down.');
+    turns = 0;
+    const second = new ChatRuntime({ model: MODEL, onAction: (action) => { actions.push(action); }, _testing: { storage, streamFn: (_model, context) => {
+      calls.push(structuredClone(context));
+      return finished(++turns === 1 ? toolCall(['sleep', 'move', 'idle']) : assistant('Done.'));
+    } } });
+    await second.send('Now the other actions.');
+    assert.deepEqual(actions, ['wave', 'sit', 'lie', 'sleep', 'move', 'idle']);
+    assert.deepEqual(runtime.entries.filter((entry) => entry.role === 'action').map((entry) => entry.text), ['wave', 'sit', 'lie']);
+    assert.ok(calls[1]!.messages.some((message) => message.role === 'toolResult'));
+    assert.ok(!calls[2]!.messages.some((message) => message.role === 'toolResult'));
+    assert.ok(!JSON.stringify(storage.histories).includes('toolCall'));
+    assert.ok(calls[0]!.messages.some((message) => message.role === 'system' && message.toolsAdded?.some((tool) => tool.name === 'companion_action')));
+    assert.equal(runtime.error, null);
+    runtime.destroy(); second.destroy();
+  });
+
+  it('sends bounded recent user/assistant context and personality, without page or action entries', async () => {
+    const history = Array.from({ length: 100 }, (_, i) => entry(i % 2 ? 'assistant' : 'user', `message ${i} ${'x'.repeat(2_000)}`, i));
+    history.push(entry('action', 'wave', 101));
+    const storage = new MemoryChatStorage({ entries: history });
+    let context!: TranscriptContext;
+    const runtime = new ChatRuntime({ model: MODEL, chat: { name: 'Mira', personality: 'Speak like a cheerful librarian.' }, _testing: { storage, streamFn: (_model, value) => { context = value; return finished(assistant('Welcome.')); } } });
+    await runtime.send('latest question');
+    const conversational = context.messages.filter((message) => message.role === 'user' || message.role === 'assistant');
+    assert.ok(conversational.length <= 24);
+    assert.ok(conversational.map(messageText).join('').length < 27_000);
+    assert.match(messageText(context.messages[0]!), /Mira.*cheerful librarian/);
+    assert.ok(!JSON.stringify(context).includes('message 0 '));
+    assert.match(JSON.stringify(context), /message 99 /);
+    assert.equal(conversational[0]?.role, 'user');
+    assert.equal(conversational.at(-1)?.role, 'user');
+    assert.equal(conversational.filter((message) => messageText(message).includes('latest question')).length, 1);
+    assert.ok(!conversational.some((message) => messageText(message) === 'wave'));
+    runtime.destroy();
+  });
+
+  it('bounds repeated provider requests, actions in one batch, and invalid tools', async () => {
+    let requests = 0;
+    let actions = 0;
+    const runtime = new ChatRuntime({ model: MODEL, onAction: () => { actions++; }, _testing: { storage: new MemoryChatStorage(), streamFn: () => { requests++; return finished(toolCall(['wave'])); } } });
+    await runtime.send('Keep waving.');
+    assert.equal(requests, 4);
+    assert.equal(actions, 4);
+    assert.match(runtime.error!, /Action limit/);
+    runtime.destroy();
+    requests = 0; actions = 0;
+    const batch = new ChatRuntime({ model: MODEL, onAction: () => { actions++; }, _testing: { storage: new MemoryChatStorage(), streamFn: () => { requests++; return finished(toolCall(Array.from({ length: 20 }, () => 'wave'))); } } });
+    await batch.send('Wave lots.');
+    assert.equal(actions, 6);
+    assert.equal(requests, 1);
+    batch.destroy();
+    requests = 0;
+    const invalid = new ChatRuntime({ model: MODEL, onAction: () => { throw new Error('must not execute'); }, _testing: { storage: new MemoryChatStorage(), streamFn: () => { requests++; return finished(toolCall(['arbitrary-script'])); } } });
+    await invalid.send('Do something.');
+    assert.equal(requests, 4);
+    assert.equal(invalid.entries.filter((entry) => entry.role === 'action').length, 0);
+    invalid.destroy();
+  });
+
+  it('redacts known credentials from entries, model context, persisted history, and action feedback', async () => {
+    const storage = new MemoryChatStorage();
+    const contexts: TranscriptContext[] = [];
+    const runtime = new ChatRuntime({ model: MODEL, onAction: () => `Result ${MODEL.apiKey}`, _testing: { storage, streamFn: (_model, context) => {
+      contexts.push(structuredClone(context));
+      return finished(contexts.length === 1 ? toolCall(['wave']) : assistant(`Hello ${MODEL.apiKey}`));
+    } } });
+    await runtime.send(`My key is ${MODEL.apiKey}`);
+    for (const value of [runtime.entries, contexts, storage.histories]) assert.ok(!JSON.stringify(value).includes(MODEL.apiKey!));
+    assert.match(runtime.entries.at(-1)!.text, /\[redacted\]/);
+    runtime.destroy();
+  });
+
+  it('uses the actual lazy OpenAI adapter with explicit auth, no retries, and no keyless Authorization', async (t) => {
+    const requests: { url: string; headers: Headers; body: Record<string, unknown> }[] = [];
+    t.mock.method(globalThis, 'fetch', async (url: string | URL | Request, init?: RequestInit) => {
+      const request = new Request(url, init);
+      requests.push({ url: request.url, headers: request.headers, body: JSON.parse(await request.text()) as Record<string, unknown> });
+      const chunk = { id: 'response', object: 'chat.completion.chunk', created: 1, model: 'manual-model', choices: [{ index: 0, delta: { content: 'Real adapter response' }, finish_reason: null }] };
+      const done = { ...chunk, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] };
+      return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: ${JSON.stringify(done)}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } });
+    });
+    const runtime = new ChatRuntime({ model: MODEL, _testing: { storage: new MemoryChatStorage() } });
+    await runtime.send('Hello actual adapter');
+    assert.equal(runtime.error, null);
+    assert.equal(runtime.entries.at(-1)?.text, 'Real adapter response');
+    assert.equal(requests[0]?.url, 'https://model.example/v1/chat/completions');
+    assert.equal(requests[0]?.headers.get('Authorization'), `Bearer ${MODEL.apiKey}`);
+    assert.equal(requests[0]?.body.model, MODEL.id);
+    assert.equal(requests[0]?.body.stream, true);
+    assert.ok(Array.isArray(requests[0]?.body.tools));
+    await runtime.configure({ id: 'local', baseUrl: 'http://localhost:8080/v1' }, false);
+    await runtime.send('Keyless');
+    assert.equal(runtime.error, null);
+    assert.equal(requests[1]?.headers.get('Authorization'), null);
+    runtime.destroy();
+  });
+});
+
+describe('cancellation and stale session isolation', () => {
+  it('stops while credentials resolve and never dispatches the late key to a changed endpoint', async () => {
+    const credential = deferred<string>();
+    let resolving = false;
+    const seen: string[] = [];
+    const runtime = new ChatRuntime({ model: { ...MODEL, getApiKey: () => { resolving = true; return credential.promise; } }, _testing: { storage: new MemoryChatStorage(), streamFn: (model) => { seen.push(model.baseUrl); return finished(assistant('new response')); } } });
+    const old = runtime.send('old request');
+    await until(() => resolving);
+    await runtime.configure({ id: 'new-model', baseUrl: 'https://new.example/v1', apiKey: 'new-secret' }, false);
+    await old;
+    assert.equal(runtime.busy, false);
+    await runtime.send('new request');
+    credential.resolve('late-old-secret');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(seen, ['https://new.example/v1']);
+    assert.equal(runtime.error, null);
+    assert.equal(runtime.entries.at(-1)?.text, 'new response');
+    runtime.destroy();
+  });
+
+  it('preserves partial text on stop and ignores stale text/actions after a new send', async () => {
+    const provider = heldProvider();
+    let actions = 0;
+    const runtime = new ChatRuntime({ model: MODEL, onAction: () => { actions++; }, _testing: { storage: new MemoryChatStorage(), streamFn: provider.streamFn } });
+    const old = runtime.send('first');
+    await until(() => provider.calls.length === 1);
+    provider.partial(0, 'partial');
+    await until(() => runtime.entries.at(-1)?.text === 'partial');
+    runtime.stop();
+    await old;
+    assert.equal(provider.calls[0]?.options?.signal?.aborted, true);
+    assert.equal(runtime.entries.at(-1)?.text, 'partial');
+    const next = runtime.send('second');
+    await until(() => provider.calls.length === 2);
+    provider.calls[0]!.stream.push({ type: 'done', reason: 'toolUse', message: toolCall(['wave']) });
+    provider.partial(0, 'stale text');
+    provider.end(1, 'fresh answer');
+    await next;
+    assert.equal(actions, 0);
+    assert.deepEqual(runtime.entries.map((entry) => entry.text), ['first', 'partial', 'second', 'fresh answer']);
+    assert.equal(runtime.error, null);
+    runtime.destroy();
+  });
+
+  it('clears during streaming without resurrecting history and strips empty assistant entries', async () => {
+    const provider = heldProvider();
+    const storage = new MemoryChatStorage();
+    const runtime = new ChatRuntime({ model: MODEL, _testing: { storage, streamFn: provider.streamFn } });
+    const request = runtime.send('hello');
+    await until(() => provider.calls.length === 1);
+    await runtime.clear();
+    provider.end(0, 'late response');
+    await request;
+    assert.equal(runtime.entries.length, 0);
+    assert.equal(storage.state.entries.length, 0);
+    assert.equal(runtime.busy, false);
+    assert.equal(runtime.error, null);
+    const second = runtime.send('next');
+    await until(() => provider.calls.length === 2);
+    runtime.stop();
+    provider.end(1, '', 'aborted');
+    await second;
+    assert.deepEqual(runtime.entries.map((entry) => entry.role), ['user']);
+    runtime.destroy();
+  });
+
+  it('times out stuck providers and credential callbacks without rejected UI promises', async () => {
+    const provider = heldProvider();
+    const runtime = new ChatRuntime({ model: MODEL, _testing: { storage: new MemoryChatStorage(), streamFn: provider.streamFn, timeoutMs: 30 } });
+    await runtime.send('hello');
+    assert.equal(runtime.busy, false);
+    assert.match(runtime.error!, /timed out/);
+    if (provider.calls.length) provider.end(0, '', 'aborted');
+    runtime.destroy();
+    const credential = deferred<string>();
+    const waiting = new ChatRuntime({ model: { ...MODEL, getApiKey: () => credential.promise }, _testing: { storage: new MemoryChatStorage(), timeoutMs: 10 } });
+    await waiting.send('hello');
+    assert.match(waiting.error!, /timed out/);
+    credential.resolve('late secret');
+    waiting.destroy();
+  });
+
+  it('handles credential failures and destruction without exposing credentials or late state changes', async () => {
+    const storage = new MemoryChatStorage();
+    const runtime = new ChatRuntime({ model: { ...MODEL, getApiKey: async () => { throw new Error(`could not get ${MODEL.apiKey}`); } }, _testing: { storage } });
+    await runtime.send('hi');
+    assert.match(runtime.error!, /Could not access your API key/);
+    assert.ok(!runtime.error!.includes(MODEL.apiKey!));
+    runtime.destroy();
+    const provider = heldProvider();
+    let updates = 0;
+    const destroyed = new ChatRuntime({ model: MODEL, onChange: () => { updates++; }, _testing: { storage: new MemoryChatStorage(), streamFn: provider.streamFn } });
+    const send = destroyed.send('hi');
+    await until(() => provider.calls.length === 1);
+    destroyed.destroy();
+    const count = updates;
+    provider.end(0, 'late');
+    await send;
+    await destroyed.send('ignored');
+    await destroyed.configure(MODEL, true);
+    assert.equal(updates, count);
+    assert.equal(destroyed.busy, false);
+    assert.ok(!destroyed.entries.some((entry) => entry.text === 'late'));
+  });
+
+  it('does not restore old history or connection over an early clear/configure', async () => {
+    const load = deferred<{ connection: PeettyModelOptions; entries: ChatEntry[] }>();
+    const storage = new MemoryChatStorage();
+    storage.load = () => load.promise;
+    const runtime = new ChatRuntime({ _testing: { storage } });
+    const initialization = runtime.initialize();
+    const clearing = runtime.clear();
+    const configuring = runtime.configure({ id: 'chosen', baseUrl: 'https://chosen.example/v1' }, false);
+    load.resolve({ connection: MODEL, entries: [entry('user', 'old')] });
+    await Promise.all([initialization, clearing, configuring]);
+    assert.deepEqual(runtime.entries, []);
+    assert.equal(runtime.model?.id, 'chosen');
+    assert.equal(runtime.model?.apiKey, undefined);
+    runtime.destroy();
+  });
+});

@@ -1,8 +1,9 @@
 import { build } from 'esbuild';
+import { rm } from 'node:fs/promises';
+import { modules, global } from './build-options.mjs';
 
-const shared = { bundle: true, target: 'es2022', sourcemap: true, logLevel: 'info', legalComments: 'none' };
-
+await rm('dist', { recursive: true, force: true });
 await Promise.all([
-  build({ ...shared, entryPoints: ['src/index.ts'], format: 'esm', outfile: 'dist/index.js' }),
-  build({ ...shared, entryPoints: ['src/global.ts'], format: 'iife', globalName: 'Peetty', outfile: 'dist/peetty.global.js', minify: true }),
+  build({ ...modules, outdir: 'dist', minify: true }),
+  build({ ...global, outfile: 'dist/peetty.global.js', minify: true }),
 ]);

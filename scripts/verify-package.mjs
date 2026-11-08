@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 
 const result = JSON.parse(execFileSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], { encoding: 'utf8' }));
 const files = new Set(result[0].files.map((file) => file.path));
-const required = ['dist/index.js', 'dist/index.d.ts', 'dist/peetty.global.js', 'figures/index.json', 'schema/figure-v1.json'];
+const required = ['dist/index.js', 'dist/index.d.ts', 'dist/peetty.global.js', 'dist/chat/panel.js', 'figures/index.json', 'schema/figure-v1.json'];
 for (const path of required) {
   if (!files.has(path)) throw new Error(`Package is missing ${path}`);
 }

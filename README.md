@@ -6,7 +6,7 @@ Peetty is an open-source, local-first browser pet. The idea is simple: a small c
 
 Bring your own AI API key, shape its personality, and take its memories with you.
 
-> **Status: early development.** The companion works on real pages: six animated preset characters, a JSON format for your own, and one-script embedding. Chat, memory and the management page are not built yet. Released versions are published to GitHub Packages. The capabilities below describe the intended product.
+> **Status: early development.** The companion, chat and connection settings work: six animated presets, a JSON figure format, one-script embedding, OpenAI-compatible models and AI-triggered actions. Editable long-term memory and a dedicated management page are planned. Released versions are published to GitHub Packages.
 
 ## The experience
 
@@ -15,6 +15,47 @@ Bring your own AI API key, shape its personality, and take its memories with you
 - **A little awareness.** Use lightweight, permitted page context to get a rough sense of what you are reading or doing, without needing to understand every action.
 - **A familiar companion.** Keep the same personality, memories, and conversations as you move between websites.
 - **Quiet company.** Run movement and idle behavior locally, with configurable activity and interruptions. An AI connection is for conversation, not every animation frame.
+
+## Chat and model configuration
+
+Double-click the companion to open chat. Right-click for actions and connection settings; the hover menu also has a Chat button. Touch users can tap to open the menu, and keyboard users can focus the companion and press Enter. The website also provides a **Chat with her** button.
+
+On the first visit, enter an OpenAI-compatible API base URL and your API key, load the model list, choose a model, and save. If model discovery is unavailable, enter the model ID manually. Keyless local endpoints are supported. The endpoint must permit browser requests through CORS; an SDK or browser setting cannot bypass a provider's restrictions. An HTTPS website may also block HTTP endpoints.
+
+The SDK can inject the connection directly, including an asynchronous credential callback:
+
+```js
+import { createPeetty } from '@idy/peetty';
+
+const pet = createPeetty({
+  figure: 'miru',
+  model: {
+    baseUrl: 'https://your-api.example/v1',
+    id: 'your-model-id',
+    getApiKey: async () => yourUserProvidedKey,
+    // apiKey: 'your-user-provided-key' is also supported.
+  },
+  chat: {
+    name: 'Miru',
+    personality: 'A warm, curious companion who keeps replies concise.',
+    storageKey: 'my-companion',
+    // persist: false disables saving the connection and conversation.
+  },
+});
+await pet.mount();
+await pet.openChat();
+
+// Replace the model without rebuilding the companion.
+await pet.setModel({ baseUrl: 'https://your-api.example/v1', id: 'another-model', apiKey: yourUserProvidedKey });
+pet.closeChat();
+// await pet.configure();
+```
+
+Mounting the companion makes no AI requests. Chat and provider code load on demand. Script-tag embeds load the adjacent `chat/` and `chunks/` directories; self-host the complete `dist/` directory, not just `peetty.global.js`.
+
+Injected credentials override saved connections and are not automatically persisted. The setup form offers an explicit **Remember my key on this device** checkbox. Saved settings and conversations use this origin's IndexedDB and fall back to memory when storage is unavailable. Same-origin scripts can access browser-stored credentials: only enter a personal key on a website you trust. Never put a shared production secret in a public bundle, HTML attribute or example. Use a backend proxy when the embedding site supplies credentials for its visitors. `chat: false` disables chat entry points.
+
+Chat supports streaming, stopping a response, clearing history, and model-selected actions (`wave`, `sit`, `lie`, `sleep`, `move`, `idle`). Pi runs the tool loop; the local companion controls animation and finds safe landing spots. Model requests have a time limit and a tool-call budget. Ordinary movement never calls the model, and no page text is automatically sent. Automatic long-term memory and proactive conversations are not implemented yet.
 
 ## Make it yours
 
@@ -88,7 +129,7 @@ Release workflow: after the intended version is on the repository, push a matchi
 
 ## Development
 
-Requires Node.js 22.18 or later.
+Requires Node.js 22.19 or later.
 
 ```bash
 npm install

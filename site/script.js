@@ -55,6 +55,13 @@
     }
   });
 
+  for (const button of document.querySelectorAll('[data-peetty-chat]')) {
+    button.addEventListener('click', () => {
+      if (!pet) start();
+      if (pet) { pet.show(); void pet.openChat(); }
+    });
+  }
+
   syncPicker();
   syncPlaceholder();
   start();
