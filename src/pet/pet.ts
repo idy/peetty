@@ -8,6 +8,7 @@ import { along, GRAVITY, impact, planJump, weighted, type Jump } from './physics
 import { createOverlay, placeAbove, type MenuAction, type Overlay } from './ui.ts';
 import type { ChatPanel } from '../chat/panel.ts';
 import { loadChatPanel } from '../chat/load.ts';
+import { normalizeModelOptions } from '../chat/connections.ts';
 import type { CompanionAction, PeettyChatOptions, PeettyModelOptions } from '../chat/types.ts';
 
 export type Activity = 'calm' | 'normal' | 'lively';
@@ -123,7 +124,7 @@ export class Peetty {
   private tapTimer = 0;
 
   constructor(options: PeettyOptions = {}) {
-    this.options = { ...options };
+    this.options = { ...options, ...(options.model ? { model: normalizeModelOptions(options.model) } : {}) };
     this.text = strings(languageOf(options.language));
   }
 
@@ -241,9 +242,10 @@ export class Peetty {
 
   /** Replaces the injected model and aborts an unfinished reply. Credentials stay in memory. */
   async setModel(model: PeettyModelOptions): Promise<void> {
-    this.options = { ...this.options, model: { ...model } };
+    const next = normalizeModelOptions(model);
     const panel = this.chatPanel ?? (this.chatLoading ? await this.chatLoading : null);
-    await panel?.setModel(model);
+    await panel?.setModel(next);
+    this.options = { ...this.options, model: next };
   }
 
   private async openPanel(settings: boolean): Promise<void> {
@@ -291,6 +293,9 @@ export class Peetty {
     if (!panel || generation !== this.generation || operation !== this.chatOperation) return;
     this.chatVisible = true;
     this.menuPinned = false;
+    clearTimeout(this.menuTimer);
+    clearTimeout(this.tapTimer);
+    this.lastTap = null;
     clearTimeout(this.greetTimer);
     this.overlay?.menu.classList.remove('show');
     this.overlay?.bubble.classList.remove('show');
@@ -629,7 +634,7 @@ export class Peetty {
     }
 
     // A friendly wave when the pointer comes close, now and then.
-    if (this.pointer && this.action === 'idle' && now - this.lastGreet > 25000 && !this.view!.reducedMotion) {
+    if (this.pointer && this.action === 'idle' && !this.actionCompletion && now - this.lastGreet > 25000 && !this.view!.reducedMotion) {
       const dx = this.pointer[0] - this.x;
       const dy = this.pointer[1] - (this.y - this.view!.height / 2);
       if (dx * dx + dy * dy < 150 * 150) {

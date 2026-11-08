@@ -64,7 +64,10 @@ function heldProvider() {
 
 describe('OpenAI-compatible endpoint setup', () => {
   it('normalizes API roots, preserves custom paths, and rejects URLs carrying credentials', () => {
-    assert.equal(normalizeBaseUrl(' https://model.example/// '), 'https://model.example/v1');
+    assert.equal(normalizeBaseUrl(' https://model.example/// '), 'https://model.example');
+    assert.equal(normalizeBaseUrl('https://model.example/chat/completions'), 'https://model.example');
+    assert.equal(normalizeBaseUrl('https://model.example/models/'), 'https://model.example');
+    assert.equal(normalizeBaseUrl('https://model.example/v1/'), 'https://model.example/v1');
     assert.equal(normalizeBaseUrl('http://localhost:8080/api/v2/chat/completions/'), 'http://localhost:8080/api/v2');
     assert.equal(normalizeBaseUrl('https://model.example/v1/models'), 'https://model.example/v1');
     for (const url of ['file:///tmp/api', 'ftp://model.example', 'https://user:secret@model.example', 'https://model.example?key=secret', 'https://model.example/#secret', 'invalid']) {
@@ -84,6 +87,15 @@ describe('OpenAI-compatible endpoint setup', () => {
     assert.equal(requests[0]![1]?.credentials, 'omit');
     await fetchModelList('https://model.example/v1');
     assert.equal(new Headers(requests[1]![1]?.headers).get('Authorization'), null);
+  });
+
+  it('discovers models at the configured root without inserting a version prefix', async (t) => {
+    const urls: string[] = [];
+    t.mock.method(globalThis, 'fetch', async (url: string) => { urls.push(url); return Response.json({ data: [{ id: 'root-model' }] }); });
+    for (const base of ['https://root.example', 'https://root.example/', 'https://root.example/chat/completions', 'https://root.example/models']) {
+      assert.deepEqual(await fetchModelList(base), [{ id: 'root-model', name: 'root-model' }]);
+    }
+    assert.deepEqual(urls, Array(4).fill('https://root.example/models'));
   });
 
   it('supports empty lists and hides server/network messages, including secrets', async (t) => {
@@ -215,6 +227,31 @@ describe('local persistence and credential ownership', () => {
     assert.equal(store.state.connection?.apiKey, undefined);
     await runtime.configure({ ...MODEL, getApiKey: () => 'callback-secret' }, true);
     assert.equal(store.state.connection?.apiKey, undefined);
+    runtime.destroy();
+  });
+
+  it('rejects invalid replacements without silently changing the active or saved model', async () => {
+    const storage = new MemoryChatStorage();
+    const runtime = new ChatRuntime({ model: MODEL, _testing: { storage } });
+    await runtime.initialize();
+    for (const replacement of [
+      { ...MODEL, id: '' },
+      { ...MODEL, id: 'x'.repeat(201) },
+      { ...MODEL, baseUrl: 'https://user:private-secret@new.example/' },
+      { ...MODEL, baseUrl: 'file:///private-secret' },
+    ]) {
+      await assert.rejects(runtime.configure(replacement, true), (error: Error) => {
+        assert.match(error.message, /valid API base URL and model ID/);
+        assert.ok(!error.message.includes('private-secret'));
+        return true;
+      });
+      assert.deepEqual(runtime.model, MODEL);
+      assert.equal(storage.connections.length, 0);
+    }
+    await runtime.configure({ id: 'root-model', baseUrl: 'https://root.example/' }, false);
+    assert.equal(runtime.error, null);
+    assert.equal(runtime.model?.baseUrl, 'https://root.example');
+    assert.equal(storage.state.connection?.baseUrl, 'https://root.example');
     runtime.destroy();
   });
 
@@ -414,6 +451,11 @@ describe('Pi chat streaming and actions', () => {
     await runtime.send('Keyless');
     assert.equal(runtime.error, null);
     assert.equal(requests[1]?.headers.get('Authorization'), null);
+    await runtime.configure({ id: 'root-model', baseUrl: 'https://root.example/chat/completions', apiKey: 'root-key' }, false);
+    await runtime.send('Root-level API');
+    assert.equal(runtime.error, null);
+    assert.equal(requests[2]?.url, 'https://root.example/chat/completions');
+    assert.equal(requests[2]?.headers.get('Authorization'), 'Bearer root-key');
     runtime.destroy();
   });
 });

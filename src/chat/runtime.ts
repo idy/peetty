@@ -1,6 +1,8 @@
 import type { Agent, AgentEvent, AgentTool, StreamFn } from '@earendil-works/pi-agent-core';
 import type { Message, Model, Usage } from '@earendil-works/pi-ai';
 import { boundedEntries, BrowserChatStore } from './store.ts';
+import { normalizeBaseUrl, normalizeModelOptions as modelOptions } from './connections.ts';
+export { normalizeBaseUrl } from './connections.ts';
 import type { ChatStorage, StoredConnection } from './store.ts';
 import type { ChatEntry, CompanionAction, ModelChoice, PeettyChatOptions, PeettyModelOptions } from './types.ts';
 
@@ -55,29 +57,6 @@ export function abortable<T>(promise: PromiseLike<T>, signal: AbortSignal): Prom
       (error: unknown) => { signal.removeEventListener('abort', cancel); reject(error); },
     );
   });
-}
-
-/** Accept the API base, or recover it from the common completions/models URL. */
-export function normalizeBaseUrl(value: string): string {
-  let url: URL;
-  try { url = new URL(value.trim()); } catch { throw new Error('Enter a valid API base URL.'); }
-  if (!['https:', 'http:'].includes(url.protocol) || !url.hostname || url.username || url.password || url.search || url.hash) {
-    throw new Error('Use an HTTP or HTTPS API base URL without credentials or a query.');
-  }
-  let path = url.pathname.replace(/\/+$/, '').replace(/\/(?:chat\/completions|models)$/i, '');
-  if (!path) path = '/v1';
-  return `${url.origin}${path}`;
-}
-
-function modelOptions(model: PeettyModelOptions): PeettyModelOptions {
-  const id = model.id.trim();
-  if (!id || id.length > 200 || /[\r\n]/.test(id)) throw new Error('Enter a model ID.');
-  return {
-    id, baseUrl: normalizeBaseUrl(model.baseUrl),
-    ...(model.apiKey !== undefined ? { apiKey: model.apiKey.trim() } : {}),
-    ...(model.getApiKey ? { getApiKey: model.getApiKey } : {}),
-    ...(model.headers ? { headers: { ...model.headers } } : {}),
-  };
 }
 
 function statusError(status: number): string {
@@ -213,18 +192,19 @@ export class ChatRuntime {
 
   async configure(model: PeettyModelOptions, rememberKey: boolean): Promise<void> {
     if (this.destroyed) return;
+    let chosen: PeettyModelOptions;
+    try { chosen = modelOptions(model); }
+    catch {
+      this.currentError = 'Enter a valid API base URL and model ID.';
+      this.changed();
+      throw new Error(this.currentError);
+    }
     this.stop();
     const revision = ++this.revision;
     this.connectionChosen = true;
     this.currentError = null;
-    try { this.currentModel = modelOptions(model); }
-    catch {
-      this.currentError = 'Enter a valid API base URL and model ID.';
-      this.changed();
-      return;
-    }
-    this.rememberSecrets(this.currentModel);
-    const chosen = this.currentModel;
+    this.currentModel = chosen;
+    this.rememberSecrets(chosen);
     this.changed();
     await this.initialize();
     if (this.destroyed || revision !== this.revision) return;

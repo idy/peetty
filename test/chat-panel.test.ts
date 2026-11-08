@@ -116,6 +116,37 @@ describe('chat panel model discovery', () => {
     assert.equal(query('.pc-error').hidden, true);
   });
 
+  it('never sends a pending callback key after the URL field changes', async (t) => {
+    const credential = deferred<string>();
+    const { query, window } = await mountPanel(t, { ...MODEL, getApiKey: () => credential.promise });
+    const network = t.mock.method(globalThis, 'fetch', async () => Response.json({ data: [] }));
+    query<HTMLButtonElement>('.pc-load').click();
+    await flush();
+    const url = query<HTMLInputElement>('[name="url"]');
+    url.value = 'https://new.example/';
+    url.dispatchEvent(new window.Event('input', { bubbles: true }) as unknown as Event);
+    credential.resolve('old-secret');
+    await flush();
+    assert.equal(network.mock.callCount(), 0);
+    assert.equal(query<HTMLButtonElement>('.pc-load').disabled, false);
+    assert.equal(query('.pc-error').hidden, true);
+  });
+
+  it('rejects an invalid SDK replacement and retains the configured connection', async (t) => {
+    const { panel, query } = await mountPanel(t, MODEL);
+    await assert.rejects(panel.setModel({ id: 'new-model', baseUrl: 'https://user:secret@new.example/v1' }), (error: Error) => {
+      assert.match(error.message, /valid API base URL and model ID/);
+      assert.ok(!error.message.includes('secret'));
+      return true;
+    });
+    assert.equal(query<HTMLInputElement>('[name="url"]').value, MODEL.baseUrl);
+    assert.equal(query<HTMLInputElement>('[name="model"]').value, MODEL.id);
+    assert.equal(query('.pc-setup').hidden, false);
+    await panel.setModel({ id: 'root-model', baseUrl: 'https://root.example/' });
+    assert.equal(query('.pc-status').textContent, 'root-model');
+    assert.equal(query('.pc-error').hidden, true);
+  });
+
   it('aborts old discovery when the SDK replaces the model', async (t) => {
     const credential = deferred<string>();
     const { panel, query } = await mountPanel(t, { ...MODEL, getApiKey: () => credential.promise, headers: { 'x-api-key': 'old-secret' } });

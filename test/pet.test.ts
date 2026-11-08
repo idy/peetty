@@ -869,6 +869,25 @@ describe('multiple companions and physical chat actions', () => {
     assert.deepEqual(completed, ['wave', 'sit', 'lie']);
   });
 
+  it('keeps an idle tool from being interrupted by the nearby-pointer greeting', async (t) => {
+    const { dom, pet, state } = await mountPet(t);
+    stand(state);
+    state.chatVisible = true;
+    dom.window.dispatchEvent(pointer('pointermove', 1, state.x, state.y - state.view.height / 2));
+    let completed = false;
+    const pending = state.performChatAction('idle').then(() => { completed = true; });
+    for (let i = 0; i < 20; i++) { dom.frame(50); await Promise.resolve(); }
+    assert.equal(state.view.motion.current, 'idle');
+    assert.equal(completed, false);
+    for (let i = 0; i < 60 && !completed; i++) { dom.frame(50); await Promise.resolve(); }
+    await pending;
+    assert.equal(completed, true);
+    state.chatVisible = false;
+    pet.play('idle');
+    dom.frame(50);
+    assert.equal(state.view.motion.current, 'wave', 'ordinary proximity greetings resume when no tool is pending');
+  });
+
   it('keeps a move pending through a real jump until landing', async (t) => {
     const { dom, state } = await mountPet(t);
     const target = stand(state);
@@ -923,6 +942,23 @@ describe('chat entry points and SDK model injection', () => {
     assert.equal((pet as unknown as { chatLoading: unknown }).chatLoading, null);
   });
 
+  it('rejects an invalid SDK model replacement before chat has been loaded', async (t) => {
+    const original = { baseUrl: 'https://original.example/v1', id: 'original-model', apiKey: 'old-key' };
+    const { pet } = await mountPet(t, { model: original });
+    const network = mock.method(globalThis, 'fetch', async () => { throw new Error('unexpected network'); });
+    for (const replacement of [
+      { ...original, baseUrl: 'https://user:private-secret@new.example/' },
+      { ...original, id: '' },
+    ]) {
+      await assert.rejects(pet.setModel(replacement), (error: Error) => error.message.includes('valid API base URL and model ID') && !error.message.includes('private-secret'));
+      assert.deepEqual((pet as unknown as { options: { model: unknown } }).options.model, original);
+    }
+    await pet.setModel({ id: 'root-model', baseUrl: 'https://root.example/' });
+    assert.equal((pet as unknown as { options: { model: { baseUrl: string } } }).options.model.baseUrl, 'https://root.example');
+    assert.equal((pet as unknown as { chatLoading: unknown }).chatLoading, null);
+    assert.equal(network.mock.callCount(), 0);
+  });
+
   it('opens chat once on a double tap and cancels the delayed greeting', async (t) => {
     const { dom, pet, state } = await mountPet(t);
     stand(state);
@@ -933,6 +969,25 @@ describe('chat entry points and SDK model injection', () => {
       if (!i) dom.frame(100);
     }
     assert.equal(open.mock.callCount(), 1);
+    assert.equal(dom.timers.size, 0);
+  });
+
+  it('cancels queued hover and tap work when chat opens', async (t) => {
+    const { dom, pet, state } = await mountPet(t);
+    stand(state);
+    const panel = { isOpen: false, open() { this.isOpen = true; }, close() { this.isOpen = false; }, async setModel() {}, destroy() {} };
+    const host = pet as unknown as { chatPanel: typeof panel; chatLoading: Promise<typeof panel> };
+    host.chatPanel = panel;
+    host.chatLoading = Promise.resolve(panel);
+    state.overlay.pet.dispatchEvent(new Event('pointerover'));
+    state.overlay.pet.dispatchEvent(pointer('pointerdown', 1));
+    dom.window.dispatchEvent(pointer('pointerup', 1));
+    dom.frame(100);
+    await pet.openChat();
+    assert.equal(panel.isOpen, true);
+    dom.frame(1000);
+    assert.equal(state.overlay.menu.classList.contains('show'), false);
+    assert.equal(state.action, 'sit');
     assert.equal(dom.timers.size, 0);
   });
 
