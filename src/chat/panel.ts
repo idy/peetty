@@ -95,7 +95,7 @@ const STYLE = `
 .pc-check { display: flex; align-items: center; gap: 7px; font-size: 12px; margin: 18px 0 5px; }
 .pc-check input { accent-color: var(--pc-accent); margin: 0; width: 15px; height: 15px; }
 .pc-note { color: var(--pc-muted); font-size: 11px; margin: 5px 0 16px; line-height: 1.55; }
-.pc-primary { display: inline-flex; justify-content: center; align-items: center; gap: 8px; width: 100%; padding: 11px 15px; min-height: 43px; border: 0; border-radius: 9px; color: #fff !important; background: var(--pc-accent); font-weight: 600 !important; }
+.pc-primary { display: inline-flex; justify-content: center; align-items: center; gap: 8px; width: 100%; padding: 11px 15px; min-height: 43px; border: 0; border-radius: 9px; color: #fff !important; background: var(--pc-button, var(--pc-accent)); font-weight: 600 !important; }
 .pc-primary:hover:not(:disabled) { filter: brightness(.94); }
 .pc-empty { display: grid; align-content: center; height: 100%; min-height: 210px; padding: 30px; }
 .pc-empty h3 { font-size: 24px; line-height: 1.3; letter-spacing: -.025em; font-weight: 600; margin: 0 0 12px; }
@@ -113,18 +113,18 @@ const STYLE = `
 .pc-compose-row { display: flex; align-items: flex-end; gap: 9px; }
 .pc-compose-row textarea { display: block; min-height: 42px; max-height: 126px; resize: none; border: 0; outline-offset: 0 !important; background: transparent; color: var(--pc-ink); padding: 9px 5px; flex: 1; min-width: 0; font-size: 14px; line-height: 1.5; caret-color: var(--pc-accent); }
 .pc-compose-row textarea::placeholder { color: var(--pc-muted); opacity: 1; }
-.pc-submit { background: var(--pc-accent); color: white !important; border-radius: 10px; width: 39px; height: 39px; }
-.pc-submit:hover { background: var(--pc-accent); filter: brightness(.94); }
+.pc-submit { background: var(--pc-button, var(--pc-accent)); color: white !important; border-radius: 10px; width: 39px; height: 39px; }
+.pc-submit:hover { background: var(--pc-button, var(--pc-accent)); filter: brightness(.94); }
 .pc-foot { margin: 7px 0 0; color: var(--pc-muted); font-size: 10px; text-align: center; }
 .pc-error { font-size: 12px; color: var(--pc-error); padding: 12px 18px; margin: 0; overflow-wrap: anywhere; background: var(--pc-bg); }
 .pc-storage { font-size: 11px; color: var(--pc-muted); padding: 9px 18px; margin: 0; border-bottom: 1px solid var(--pc-line); }
 .pc-sr { position: absolute; width: 1px; height: 1px; clip-path: inset(50%); overflow: hidden; }
 @media (prefers-color-scheme: dark) {
-  .peetty-chat { --pc-bg: #24212e; --pc-ink: #f0edf6; --pc-muted: #b8b0c6; --pc-line: #4a4259; --pc-accent: #8268cf; --pc-soft: #393044; --pc-input: #2d2837; --pc-error: #ffacb9; color-scheme: dark; }
+  .peetty-chat { --pc-bg: #24212e; --pc-ink: #f0edf6; --pc-muted: #b8b0c6; --pc-line: #4a4259; --pc-accent: #bda9ef; --pc-button: #7055b4; --pc-soft: #393044; --pc-input: #2d2837; --pc-error: #ffacb9; color-scheme: dark; }
 }
 @media (max-width: 480px) {
   .peetty-chat { right: 12px; bottom: max(12px, env(safe-area-inset-bottom)); width: calc(100vw - 24px); height: min(610px, calc(100dvh - 24px)); }
-  .pc-header { padding: 12px 14px; } .pc-setup { padding: 22px 18px; } .pc-input { font-size: 16px !important; }
+  .pc-header { padding: 12px 14px; } .pc-setup { padding: 22px 18px; } .pc-input, .pc-compose-row textarea { font-size: 16px !important; }
 }
 @media (prefers-reduced-motion: no-preference) {
   .peetty-chat { animation: pc-enter .2s cubic-bezier(.16, 1, .3, 1); }
