@@ -221,16 +221,10 @@ function enclosingFigureBox(bounds: Box[], data: Scan): Box[] | null {
  * minimum query detects coverage by earlier boxes, including nested boxes, in
  * O(log n) work without filling the gaps between disconnected shapes.
  */
-function coalesceFigureBoxes(bounds: Box[], data: Scan, capacity = MAX_RECTS - data.obstacles.length - 1, force = false): Box[] {
-  // Reserve one slot for the SVG viewport. Fitting overflow needs no optional
-  // sorting or coverage index, unless later collection explicitly needs space.
-  if (!bounds.length || (!force && bounds.length <= capacity)) return bounds;
-  const enclosing = enclosingFigureBox(bounds, data);
-  if (enclosing) {
-    if (enclosing.length > capacity) data.complete = false;
-    return enclosing;
-  }
-  if (!data.complete) return [];
+function coalesceFigureBoxes(bounds: Box[], data: Scan, capacity: number): Box[] {
+  // Callers have already tried enclosure and cheap reclamation. Only the
+  // remaining cases need sorting and a coverage index.
+  if (bounds.length < 2) return bounds;
   const compare = (a: number, b: number) => {
     if (!spend(data.budget)) data.complete = false;
     return a - b;
@@ -317,7 +311,7 @@ function coalesceFigureBoxes(bounds: Box[], data: Scan, capacity = MAX_RECTS - d
  * bounds then avoid covered/offscreen geometry reads. Mixed groups are refined
  * to leaves, whose screen rectangles include bone, spring and mirror transforms.
  */
-function figureBoxes(el: Element, rect: Box, clip: Box, data: Scan, makeRoom: (count: number) => boolean): Box[] | null {
+function figureBoxes(el: Element, rect: Box, clip: Box, data: Scan, makeRoom: (count: number, cheapOnly?: boolean) => boolean): Box[] | null {
   if (el.tagName.toUpperCase() !== 'SVG' || hostOf(el)?.tagName.toUpperCase() !== 'PEETTY-COMPANION' || !finiteBox(rect)) return null;
   if (!spend(data.budget, 2)) { data.complete = false; return null; }
   const geometry = figureBounds(el);
@@ -371,9 +365,14 @@ function figureBoxes(el: Element, rect: Box, clip: Box, data: Scan, makeRoom: (c
   } catch { return null; }
   if (!data.complete) return overflow;
   if (data.obstacles.length + overflow.length + 1 > MAX_RECTS) {
-    // Determine this figure's own compacted requirement independently of earlier
-    // batches; only then reclaim the actual number of slots it needs.
-    const compacted = coalesceFigureBoxes(overflow, data, MAX_RECTS - 1, true);
+    // Try cheap work on both sides before indexing either one. Full reclamation
+    // of earlier complex batches still waits for this figure's compacted count.
+    const enclosing = enclosingFigureBox(overflow, data);
+    if (!data.complete) return overflow;
+    if (enclosing) { makeRoom(enclosing.length + 1); return enclosing; }
+    if (makeRoom(overflow.length + 1, true)) return overflow;
+    if (!data.complete) return overflow;
+    const compacted = coalesceFigureBoxes(overflow, data, MAX_RECTS - 1);
     if (data.complete) makeRoom(compacted.length + 1);
     return compacted;
   }
@@ -618,7 +617,7 @@ function scan(opts: PerchOptions): Scan {
     for (const bounds of compacted) result.obstacles.push({ ...members[0]!, box: bounds });
     return true;
   };
-  const makeRoom = (count: number): boolean => {
+  const makeRoom = (count: number, cheapOnly = false): boolean => {
     if (count > MAX_RECTS) return false;
     if (result.obstacles.length + count <= MAX_RECTS) return true;
     // Completed batches advance through these queues once. Reclaim cheap nested
@@ -632,10 +631,11 @@ function scan(opts: PerchOptions): Scan {
       if (!replaceFigure(members, enclosing)) return false;
       if (result.obstacles.length + count <= MAX_RECTS) return true;
     }
+    if (cheapOnly) return false;
     for (const [owner, members] of complexFigures) {
       complexFigures.delete(owner);
       if (!spend(result.budget, members.length)) { result.complete = false; return false; }
-      const compacted = coalesceFigureBoxes(members.map((entry) => entry.box), result, members.length, true);
+      const compacted = coalesceFigureBoxes(members.map((entry) => entry.box), result, members.length);
       if (!result.complete || !replaceFigure(members, compacted)) return false;
       if (result.obstacles.length + count <= MAX_RECTS) return true;
     }

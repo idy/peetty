@@ -624,8 +624,8 @@ describe('bounded companion graphics', () => {
     });
   }
 
-  for (const scenario of ['incoming nested groups', 'both need compaction', 'incoming disjoint'] as const) {
-    it(`sizes compacted incoming paint before reclaiming old boxes: ${scenario}`, () => {
+  for (const scenario of ['incoming nested groups', 'both need compaction', 'incoming disjoint', 'incoming overlapping'] as const) {
+    it(`preserves the scan budget across incoming and retained paint: ${scenario}`, () => {
       const first = figure(rect(650, 580, 100, 120), { x: -500, y: 0, width: 600, height: 120 });
       const oldCount = scenario === 'incoming nested groups' ? 1500 : 2044;
       for (let i = 0; i < oldCount; i++) {
@@ -635,8 +635,10 @@ describe('bounded companion graphics', () => {
           : rect(150 + inset, 610 + inset / 4, 60 - inset * 2, 60 - inset / 2), first.svg);
       }
       const second = figure(rect(0, 580, 100, 120), { x: 0, y: 0, width: 380, height: 120 });
-      if (scenario === 'incoming disjoint') {
-        for (let i = 0; i < 1500; i++) element('ellipse', rect(250, 600 + i * 0.04, 0.1, 0.02), second.svg);
+      if (scenario === 'incoming disjoint' || scenario === 'incoming overlapping') {
+        const step = scenario === 'incoming overlapping' ? 0.02 : 0.04;
+        const height = scenario === 'incoming overlapping' ? 0.03 : 0.02;
+        for (let i = 0; i < 1500; i++) element('ellipse', rect(250, 600 + i * step, 0.1, height), second.svg);
       } else {
         const count = scenario === 'both need compaction' ? 1050 : 400;
         for (const x of [250, 350]) for (let i = 0; i < count; i++) {
