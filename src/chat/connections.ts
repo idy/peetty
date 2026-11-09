@@ -1,4 +1,8 @@
-import type { PeettyModelOptions } from './types.ts';
+import type { PeettyModelOptions, PeettyReasoningEffort } from './types.ts';
+
+export function isReasoningEffort(value: unknown): value is PeettyReasoningEffort {
+  return typeof value === 'string' && ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(value);
+}
 
 /** Accept an API base or recover it from a completions/models URL, preserving root APIs. */
 export function normalizeBaseUrl(value: string): string {
@@ -19,6 +23,7 @@ export function normalizeModelOptions(model: PeettyModelOptions): PeettyModelOpt
     if (model.apiKey !== undefined && typeof model.apiKey !== 'string') throw new Error();
     if (model.getApiKey !== undefined && typeof model.getApiKey !== 'function') throw new Error();
     if (model.tools !== undefined && typeof model.tools !== 'boolean') throw new Error();
+    if (model.effort !== undefined && !isReasoningEffort(model.effort)) throw new Error();
     let headers: Record<string, string> | undefined;
     const suppliedHeaders = model.headers;
     if (suppliedHeaders !== undefined) {
@@ -36,6 +41,7 @@ export function normalizeModelOptions(model: PeettyModelOptions): PeettyModelOpt
       ...(model.getApiKey ? { getApiKey: model.getApiKey } : {}),
       ...(headers ? { headers } : {}),
       ...(model.tools !== undefined ? { tools: model.tools } : {}),
+      ...(model.effort !== undefined ? { effort: model.effort } : {}),
     };
   } catch { throw new Error('Enter a valid API base URL and model ID.'); }
 }

@@ -23,7 +23,7 @@ const STYLE = `
   font: 500 13px/1.45 system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
   color: var(--peetty-ink, #2b2840); background: var(--peetty-surface, #ffffff);
   border: 1px solid var(--peetty-line, #e2deef); box-shadow: 0 6px 18px rgba(40, 30, 80, .14);
-  overflow-wrap: anywhere; opacity: 0; transform: translateY(6px) scale(.96);
+  white-space: pre-wrap; overflow-wrap: anywhere; opacity: 0; transform: translateY(6px) scale(.96);
   transition: opacity .18s ease, transform .18s ease;
 }
 .bubble.show { opacity: 1; transform: none; }

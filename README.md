@@ -38,6 +38,7 @@ const pet = createPeetty({
     id: 'your-model-id',
     getApiKey: async () => yourUserProvidedKey,
     // apiKey: 'your-user-provided-key' is also supported.
+    // effort: 'high' requests explicit reasoning effort when the model supports it.
   },
   chat: {
     name: 'Miru',
@@ -57,9 +58,13 @@ pet.closeChat();
 // await pet.configure();
 ```
 
-Mounting the companion makes no AI requests. Chat and provider code load on demand. Script-tag embeds load the adjacent `chat/` and `chunks/` directories; self-host the complete `dist/` directory, not just `peetty.global.js`.
+Mounting the companion makes no AI requests. Chat, Markdown tokenization and provider code load on demand. Script-tag embeds load the adjacent `chat/` and `chunks/` directories; self-host the complete `dist/` directory, not just `peetty.global.js`.
 
 Injected connections override saved settings for the current session. SDK `setModel()` calls leave the saved connection intact. Remembering an injected key defaults to off; saving it requires the user to check **Remember my key on this device** and submit the setup form. Invalid `setModel()` replacements reject with a sanitized error and leave the last valid connection intact. Older asynchronous replacements are discarded after destruction or a newer replacement. Optional model headers apply to chat and model discovery only at the configured endpoint. Entering a replacement key overrides conflicting SDK authentication headers; explicitly clearing the key also disables the previous SDK credential callback for that setup connection. Header records must contain strings with valid HTTP names and values; they are normalized before replacing an active model. The setup form offers an explicit **Remember my key on this device** checkbox. Saved settings and conversations use this origin's IndexedDB and fall back to memory when storage is unavailable. Instances sharing a storage key merge message changes transactionally, refresh shared history before each turn, and reject stale writes after history is cleared. Same-origin scripts can access browser-stored credentials: only enter a personal key on a website you trust. Never put a shared production secret in a public bundle, HTML attribute or example. Use a backend proxy when the embedding site supplies credentials for its visitors. `chat: false` disables chat entry points.
+
+Thinking effort is configurable in setup and through `model.effort`: `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. Leave it at **Model default** to send no explicit effort. The selected model and endpoint must support the chosen level; existing request, output and timeout limits still apply.
+
+Assistant replies render lightweight Markdown, including line breaks, lists, quotes, tables, inline code and fenced code blocks. Short speech-bubble replies share that formatting. Rendering builds DOM nodes without HTML string sinks: raw HTML stays literal, remote images stay alt text, and links accept only HTTP(S) destinations with no referrer. User messages and persisted history retain their original text.
 
 Chat supports streaming, stopping a response, clearing history, and model-selected actions (`wave`, `sit`, `lie`, `sleep`, `move`, `idle`). For models without tool-calling support, uncheck **Let the model control companion actions** in setup or inject `model: { ..., tools: false }` to send plain text chat without tools. Requests suppress the embedding page's referrer. Pi runs the tool loop; the local companion controls animation and finds safe landing spots. Action tools wait for their animation or clear landing before the next action starts; interrupted moves report failure, and stopping a reply cancels unfinished tools. Model requests have a time limit and a tool-call budget. Ordinary movement never calls the model, and no page text is automatically sent. Automatic long-term memory and proactive conversations are not implemented yet.
 

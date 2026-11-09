@@ -228,6 +228,7 @@ export class ChatRuntime {
     const connection: StoredConnection = {
       id: chosen.id, baseUrl: chosen.baseUrl,
       ...(chosen.tools !== undefined ? { tools: chosen.tools } : {}),
+      ...(chosen.effort !== undefined ? { effort: chosen.effort } : {}),
       ...(save.rememberKey && chosen.apiKey && !chosen.getApiKey ? { apiKey: chosen.apiKey } : {}),
     };
     await this.persist(() => this.storage.saveConnection(connection));
@@ -394,7 +395,10 @@ export class ChatRuntime {
       if (!this.live(run)) return;
       const model: Model<'openai-completions'> = {
         id: selected.id, name: selected.id, api: 'openai-completions', provider: 'peetty', baseUrl: selected.baseUrl,
-        reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        reasoning: selected.effort !== undefined,
+        // Pi only advertises these levels when explicit mappings exist; preserve the user's choice.
+        ...(selected.effort !== undefined ? { thinkingLevelMap: { xhigh: 'xhigh', max: 'max' } } : {}),
+        input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 16_384, maxTokens: 1_200,
       };
       // Explicit auth only: no env lookup, prior endpoint key, or SDK credential store.
@@ -413,7 +417,7 @@ export class ChatRuntime {
       if (this.history.length > messagesBeforeInput && recent.at(-1)?.role === 'user') recent.pop();
       const tools = selected.tools !== false;
       const agent = new Agent({
-        initialState: { model, systemPrompt: this.systemPrompt(tools), messages: recent, tools: tools ? [this.tool(run)] : [], thinkingLevel: 'off' },
+        initialState: { model, systemPrompt: this.systemPrompt(tools), messages: recent, tools: tools ? [this.tool(run)] : [], thinkingLevel: selected.effort ?? 'off' },
         toolExecution: 'sequential', identity: { attribution: null },
         streamFn: async (requestModel, context, options) => {
           if (!this.live(run) || ++run.requests > MAX_REQUESTS) throw aborted();

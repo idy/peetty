@@ -164,6 +164,63 @@ describe('local persistence and credential ownership', () => {
     }
   });
 
+  it('persists and restores every explicit effort while keeping SDK overrides session-only', async (t) => {
+    installChatIndexedDB(t);
+    for (const effort of ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const) {
+      const namespace = `effort-${effort}`;
+      const runtime = new ChatRuntime({ _testing: { storage: new BrowserChatStore(namespace) } });
+      await runtime.configure({ ...MODEL, effort }, false);
+      runtime.destroy();
+      const restored = new ChatRuntime({ _testing: { storage: new BrowserChatStore(namespace) } });
+      await restored.initialize();
+      const saved = { id: MODEL.id, baseUrl: MODEL.baseUrl, effort };
+      assert.deepEqual(restored.model, saved);
+      await restored.setModel({ ...MODEL, effort: effort === 'low' ? 'max' : 'low' });
+      assert.notEqual(restored.model?.effort, effort);
+      await restored.setModel(MODEL);
+      assert.equal('effort' in restored.model!, false);
+      restored.destroy();
+      const storage = new BrowserChatStore(namespace);
+      assert.deepEqual((await storage.load()).connection, saved);
+      storage.close();
+      const injected: PeettyModelOptions = { ...MODEL, effort: effort === 'max' ? 'minimal' : 'max' };
+      const session = new ChatRuntime({ model: injected, _testing: { storage: new BrowserChatStore(namespace) } });
+      await session.initialize();
+      assert.deepEqual(session.model, injected);
+      session.destroy();
+      const unchanged = new BrowserChatStore(namespace);
+      assert.deepEqual((await unchanged.load()).connection, saved);
+      unchanged.close();
+      // Saving the default explicitly clears an earlier effort preference.
+      const reset = new ChatRuntime({ _testing: { storage: new BrowserChatStore(namespace) } });
+      await reset.configure(MODEL, false);
+      reset.destroy();
+      const defaults = new BrowserChatStore(namespace);
+      assert.deepEqual((await defaults.load()).connection, { id: MODEL.id, baseUrl: MODEL.baseUrl });
+      defaults.close();
+    }
+  });
+
+  it('rejects malformed restored effort flags and invalid replacements without losing the active connection', async (t) => {
+    installChatIndexedDB(t);
+    for (const effort of [null, false, 1, '', 'off', 'HIGH', ' high ', {}, ['high']]) {
+      const invalid = { ...MODEL, effort: effort as never };
+      const runtime = new ChatRuntime({ model: { ...MODEL, effort: 'high' }, _testing: { storage: new MemoryChatStorage() } });
+      await assert.rejects(runtime.setModel(invalid), /valid API base URL and model ID/);
+      await assert.rejects(runtime.configure(invalid, true), /valid API base URL and model ID/);
+      assert.deepEqual(runtime.model, { ...MODEL, effort: 'high' });
+      runtime.destroy();
+      const restored = new ChatRuntime({ _testing: { storage: new MemoryChatStorage({ connection: invalid, entries: [] }) } });
+      await restored.initialize();
+      assert.equal(restored.model, undefined);
+      restored.destroy();
+      const storage = new BrowserChatStore('invalid-effort');
+      await storage.saveConnection(invalid);
+      assert.equal((await storage.load()).connection, undefined);
+      storage.close();
+    }
+  });
+
   it('rejects malformed restored tool flags rather than enabling tools through coercion', async () => {
     const runtime = new ChatRuntime({ _testing: { storage: new MemoryChatStorage({ connection: { ...MODEL, tools: 'false' as unknown as boolean }, entries: [] }) } });
     await runtime.initialize();
@@ -269,7 +326,7 @@ describe('local persistence and credential ownership', () => {
         return finished(assistant('ok'));
       } } });
       if (!initializing) await runtime.initialize();
-      const injected = { id: 'session-model', baseUrl: 'https://session.example/v1', apiKey: 'fixture-session-key' };
+      const injected: PeettyModelOptions = { id: 'session-model', baseUrl: 'https://session.example/v1', apiKey: 'fixture-session-key', effort: 'max' };
       const changing = runtime.setModel(injected);
       loaded.resolve({ connection: { ...MODEL }, entries: [] });
       await changing;
@@ -532,6 +589,38 @@ describe('Pi chat streaming and actions', () => {
     assert.ok(system);
     assert.doesNotMatch(system.content, /companion_action|tool confirms|You may wave/);
     runtime.destroy();
+  });
+
+  it('sends every selected reasoning effort unchanged through the actual lazy adapter and omits the default', async (t) => {
+    const requests: { request: Request; body: Record<string, unknown> }[] = [];
+    t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
+      const request = new Request(input, init);
+      requests.push({ request, body: JSON.parse(await request.text()) as Record<string, unknown> });
+      const chunk = { id: 'reasoning', object: 'chat.completion.chunk', created: 1, model: MODEL.id, choices: [{ index: 0, delta: { content: 'Effort reply' }, finish_reason: null }] };
+      const done = { ...chunk, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] };
+      return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: ${JSON.stringify(done)}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } });
+    });
+    for (const baseUrl of [MODEL.baseUrl, 'http://127.0.0.1:3425/v1']) {
+      const runtime = new ChatRuntime({ model: { ...MODEL, baseUrl }, _testing: { storage: new MemoryChatStorage() } });
+      for (const effort of [undefined, 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', undefined] as const) {
+        await runtime.setModel({ ...MODEL, baseUrl, ...(effort !== undefined ? { effort } : {}) });
+        const before = requests.length;
+        await runtime.send('Check effort');
+        assert.equal(runtime.error, null);
+        assert.equal(runtime.entries.at(-1)?.text, 'Effort reply');
+        assert.equal(requests.length, before + 1);
+        const { request, body } = requests.at(-1)!;
+        assert.equal(body.reasoning_effort, effort);
+        assert.equal('reasoning_effort' in body, effort !== undefined);
+        assert.equal('reasoning' in body, false);
+        assert.equal(request.url, `${baseUrl}/chat/completions`);
+        assert.equal(request.headers.get('Authorization'), `Bearer ${MODEL.apiKey}`);
+        assert.equal(request.referrerPolicy, 'no-referrer');
+        assert.equal(request.redirect, 'error');
+        assert.ok(Array.isArray(body.tools));
+      }
+      runtime.destroy();
+    }
   });
 
   it('uses the actual lazy OpenAI adapter with explicit auth, no retries, and no keyless Authorization', async (t) => {

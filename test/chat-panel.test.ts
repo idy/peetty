@@ -14,7 +14,7 @@ const MODEL = { id: 'model', baseUrl: 'https://models.example/v1' };
 
 async function mountPanel(t: TestContext, model: PeettyModelOptions | undefined, options: {
   chat?: PeettyChatOptions;
-  onReply?: (text: string) => void;
+  onReply?: (text: string, render?: (target: HTMLElement) => void) => void;
   onState?: (busy: boolean, speaking: boolean) => void;
   rejectHTML?: boolean;
 } = {}) {
@@ -117,6 +117,75 @@ function textReply(text: string): Response {
   const done = { ...chunk, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] };
   return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: ${JSON.stringify(done)}\n\ndata: [DONE]\n\n`, { headers: { 'Content-Type': 'text/event-stream' } });
 }
+
+describe('effort and formatted replies', () => {
+  it('saves effort, preserves its selection during translation, and sends the chosen value', { timeout: 10000 }, async (t) => {
+    const storage = installChatIndexedDB(t);
+    const replies = [deferred<void>(), deferred<void>()];
+    let turn = 0;
+    const { panel, query, window } = await mountPanel(t, { ...MODEL, effort: 'low' }, {
+      chat: { storageKey: 'effort-panel' }, onReply: () => replies[turn++]!.resolve(),
+    });
+    const effort = query<HTMLSelectElement>('[name="effort"]');
+    assert.equal(effort.value, 'low');
+    assert.deepEqual([...effort.options].map(option => option.value), ['', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+    effort.value = 'max';
+    panel.setLanguage('zh'); panel.open(true);
+    assert.equal(effort.value, 'max');
+    const sent: (string | undefined)[] = [];
+    t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const body = await new Request(input, init).json() as { reasoning_effort?: string };
+      sent.push(body.reasoning_effort);
+      return textReply('Effort configured');
+    });
+    const send = () => {
+      const input = query<HTMLTextAreaElement>('[name="message"]');
+      input.value = 'hello'; input.dispatchEvent(new window.Event('input', { bubbles: true }) as unknown as Event);
+      query<HTMLFormElement>('.pc-composer').requestSubmit();
+    };
+    query<HTMLFormElement>('.pc-setup').requestSubmit(); await flush();
+    const saved = () => storage.databases.get('effort-panel:chat')?.get('connection') as PeettyModelOptions;
+    assert.equal(saved().effort, 'max');
+    send(); await replies[0]!.promise;
+    panel.open(true);
+    assert.equal(effort.value, 'max');
+    effort.value = '';
+    query<HTMLFormElement>('.pc-setup').requestSubmit(); await flush();
+    assert.equal(saved().effort, undefined);
+    send(); await replies[1]!.promise;
+    assert.deepEqual(sent, ['max', undefined]);
+    assert.equal(query('.pc-error').hidden, true);
+  });
+
+  it('renders assistant Markdown and a bubble preview while keeping user input literal', { timeout: 10000 }, async (t) => {
+    const completed = deferred<void>();
+    let bubble: HTMLElement;
+    let announced = 0;
+    const { panel, query, root, window } = await mountPanel(t, MODEL, {
+      rejectHTML: true,
+      onReply: (_text, render) => { assert.ok(render); render(bubble); announced++; completed.resolve(); },
+    });
+    bubble = window.document.createElement('div') as unknown as HTMLElement;
+    root.append(bubble);
+    const cat = ' /\\_/\\\n( o.o )\n > ^ <';
+    const reply = `**小猫**\n\n\`\`\`text\n${cat}\n\`\`\``;
+    t.mock.method(globalThis, 'fetch', async () => textReply(reply));
+    panel.open(false);
+    const input = query<HTMLTextAreaElement>('[name="message"]');
+    input.value = '**画猫**\n保留格式'; input.dispatchEvent(new window.Event('input', { bubbles: true }) as unknown as Event);
+    query<HTMLFormElement>('.pc-composer').requestSubmit(); await completed.promise;
+    const assistant = query('.pc-message[data-role="assistant"]');
+    const code = assistant.querySelector('pre code');
+    assert.equal(code?.textContent, cat);
+    assert.equal(assistant.querySelector('strong')?.textContent, '小猫');
+    assert.equal(bubble.querySelector('pre code')?.textContent, cat);
+    assert.equal(query('.pc-message[data-role="user"] .pc-text').textContent, '**画猫**\n保留格式');
+    assert.equal(root.querySelector('.pc-message[data-role="user"] strong'), null);
+    panel.setLanguage('zh');
+    assert.equal(assistant.querySelector('pre code'), code, 'unchanged messages keep their rendered DOM');
+    assert.equal(announced, 1);
+  });
+});
 
 describe('setup drafts and credential replacement', () => {
   it('retains a first-time form and discovered selection when opened repeatedly', async (t) => {

@@ -1,4 +1,5 @@
-import type { ChatEntry } from './types.ts';
+import type { ChatEntry, PeettyReasoningEffort } from './types.ts';
+import { isReasoningEffort } from './connections.ts';
 
 /** Only an explicitly remembered setup key may be written here. Never store SDK headers. */
 export interface StoredConnection {
@@ -6,6 +7,7 @@ export interface StoredConnection {
   baseUrl: string;
   apiKey?: string;
   tools?: boolean;
+  effort?: PeettyReasoningEffort;
 }
 
 export interface StoredChat {
@@ -54,10 +56,12 @@ function connectionFrom(value: unknown): StoredConnection | undefined {
   const connection = value as Partial<StoredConnection>;
   if (typeof connection.id !== 'string' || !connection.id.trim() || typeof connection.baseUrl !== 'string') return;
   if (connection.tools !== undefined && typeof connection.tools !== 'boolean') return;
+  if (connection.effort !== undefined && !isReasoningEffort(connection.effort)) return;
   return {
     id: connection.id.slice(0, 200), baseUrl: connection.baseUrl,
     ...(typeof connection.apiKey === 'string' && connection.apiKey ? { apiKey: connection.apiKey } : {}),
     ...(connection.tools !== undefined ? { tools: connection.tools } : {}),
+    ...(connection.effort !== undefined ? { effort: connection.effort } : {}),
   };
 }
 

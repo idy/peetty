@@ -1,9 +1,10 @@
 import { abortable, ChatRuntime, fetchModelList, normalizeBaseUrl } from './runtime.ts';
 import { LOCAL_MAGPIE, localMagpieConnection } from './connections.ts';
-import type { ChatEntry, CompanionAction, PeettyChatOptions, PeettyModelOptions } from './types.ts';
+import type { ChatEntry, CompanionAction, PeettyChatOptions, PeettyModelOptions, PeettyReasoningEffort } from './types.ts';
 import type { Language } from '../pet/i18n.ts';
 import { COPY } from './copy.ts';
 import { buildChatView, icon, setIcon } from './view.ts';
+import { MARKDOWN_STYLE, renderMarkdown, renderMarkdownBubble } from './markdown.ts';
 
 const STYLE = `
 .peetty-chat {
@@ -67,10 +68,12 @@ const STYLE = `
 .pc-tools { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 0 18px 9px; color: var(--pc-muted); font-size: 11px; }
 .pc-confirm { display: flex; align-items: center; gap: 9px; }
 .pc-composer { border-top: 1px solid var(--pc-line); padding: 12px 14px 10px; }
-.pc-compose-row { display: flex; align-items: flex-end; gap: 9px; }
-.pc-compose-row textarea { display: block; min-height: 42px; max-height: 126px; resize: none; border: 0; outline-offset: 0 !important; background: transparent; color: var(--pc-ink); padding: 9px 5px; flex: 1; min-width: 0; font-size: 14px; line-height: 1.5; caret-color: var(--pc-accent); }
+.pc-compose-row { display: flex; align-items: flex-end; gap: 8px; padding: 4px; border: 1px solid var(--pc-line); border-radius: 14px; background: var(--pc-input); }
+.pc-compose-row:focus-within { border-color: var(--pc-accent); outline: 2px solid var(--pc-accent); outline-offset: -1px; }
+.pc-compose-row textarea { display: block; min-height: 44px; max-height: 126px; resize: none; border: 0; border-radius: 9px; background: transparent; color: var(--pc-ink); padding: 10px 8px; flex: 1; min-width: 0; font-size: 14px; line-height: 1.5; caret-color: var(--pc-accent); }
+.pc-compose-row textarea:focus-visible { outline: none; }
 .pc-compose-row textarea::placeholder { color: var(--pc-muted); opacity: 1; }
-.pc-submit { background: var(--pc-button, var(--pc-accent)); color: white !important; border-radius: 10px; width: 39px; height: 39px; }
+.pc-submit { background: var(--pc-button, var(--pc-accent)); color: white !important; border-radius: 10px; min-width: 44px; min-height: 44px; width: 44px; height: 44px; }
 .pc-submit:hover { background: var(--pc-button, var(--pc-accent)); filter: brightness(.94); }
 .pc-foot { margin: 7px 0 0; color: var(--pc-muted); font-size: 10px; text-align: center; }
 .pc-error { font-size: 12px; color: var(--pc-error); padding: 12px 18px; margin: 0; overflow-wrap: anywhere; background: var(--pc-bg); }
@@ -103,7 +106,7 @@ interface PanelOptions {
   model?: PeettyModelOptions;
   chat?: PeettyChatOptions;
   onAction: (action: CompanionAction, signal?: AbortSignal) => string | void | Promise<string | void>;
-  onReply: (text: string) => void;
+  onReply: (text: string, render?: (target: HTMLElement) => void) => void;
   onState: (busy: boolean, speaking: boolean) => void;
   onClose: () => void;
 }
@@ -112,7 +115,7 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
   let t = COPY[options.language];
   let name = options.chat?.name ?? t.companion;
   const style = document.createElement('style');
-  style.textContent = STYLE;
+  style.textContent = `${STYLE}\n${MARKDOWN_STYLE}`;
   const panel = document.createElement('section');
   panel.className = 'peetty-chat';
   panel.setAttribute('data-peetty', 'avoid');
@@ -128,6 +131,7 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
   const key = find<HTMLInputElement>('[name="key"]');
   const model = find<HTMLInputElement>('[name="model"]');
   const models = find<HTMLSelectElement>('.pc-models');
+  const effort = find<HTMLSelectElement>('[name="effort"]');
   const tools = find<HTMLInputElement>('[name="tools"]');
   let keyEdited = false;
   let releaseEscapePress: (() => void) | undefined;
@@ -143,7 +147,7 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
   const clear = find<HTMLButtonElement>('.pc-clear');
   const confirmation = find<HTMLSpanElement>('.pc-confirm');
   const load = find<HTMLButtonElement>('.pc-load');
-  const nodes = new Map<string, { element: HTMLElement; text: HTMLElement; author: HTMLElement }>();
+  const nodes = new Map<string, { element: HTMLElement; text: HTMLElement; author: HTMLElement; rendered: string | undefined }>();
   let settingsOpen = false;
   let disposed = false;
   let wasBusy = false;
@@ -205,6 +209,7 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     find('.pc-show-key').textContent = t.show;
     key.placeholder = current?.getApiKey ? t.keyProvided : t.optional;
     model.value = current?.id ?? '';
+    effort.value = current?.effort ?? '';
     tools.checked = current?.tools !== false;
     model.hidden = false;
     model.required = true;
@@ -235,7 +240,7 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     text.className = 'pc-text';
     if (entry.role === 'action') element.append(icon('spark'), text);
     else element.append(author, text);
-    const item = { element, text, author };
+    const item = { element, text, author, rendered: undefined as string | undefined };
     nodes.set(entry.id, item);
     return item;
   }
@@ -250,7 +255,11 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
       if (node.element !== cursor) messages.insertBefore(node.element, cursor);
       cursor = node.element.nextElementSibling;
       const text = entry.role === 'action' ? t.actions[entry.text as CompanionAction] ?? entry.text : entry.text;
-      if (node.text.textContent !== text) node.text.textContent = text;
+      if (node.rendered !== text) {
+        if (entry.role === 'assistant') renderMarkdown(node.text, text);
+        else node.text.textContent = text;
+        node.rendered = text;
+      }
       const author = entry.role === 'user' ? t.you : name;
       if (node.author.textContent !== author) node.author.textContent = author;
     }
@@ -271,7 +280,7 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     if (wasBusy && !runtime.busy) {
       find('.pc-announcement').textContent = last?.text ?? '';
       if (runtime.error) showRuntimeError(runtime.error);
-      else { showError(); if (last?.text) options.onReply(last.text); }
+      else { showError(); if (last?.text) options.onReply(last.text, target => renderMarkdownBubble(target, last.text)); }
     }
     wasBusy = runtime.busy;
     if (runtime.error && !shownError) showRuntimeError(runtime.error);
@@ -346,6 +355,7 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     key.type = 'password';
     find('.pc-show-key').textContent = t.show;
     model.value = local.id;
+    effort.value = local.effort ?? '';
     model.hidden = false;
     model.required = true;
     models.hidden = true;
@@ -369,7 +379,7 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
         if (!id) { showError(() => t.invalid); return; }
         const { typedKey, headers, getApiKey } = connectionAuth(baseUrl);
         cancelDiscovery();
-        await runtime.configure({ baseUrl, id, tools: tools.checked, ...(typedKey ? { apiKey: typedKey } : {}), ...(getApiKey ? { getApiKey } : {}), ...(headers ? { headers } : {}) }, remember.checked);
+        await runtime.configure({ baseUrl, id, tools: tools.checked, ...(effort.value ? { effort: effort.value as PeettyReasoningEffort } : {}), ...(typedKey ? { apiKey: typedKey } : {}), ...(getApiKey ? { getApiKey } : {}), ...(headers ? { headers } : {}) }, remember.checked);
         if (disposed) return;
         showError(); setSettings(false);
       } catch { if (!disposed) showError(() => t.invalid); }

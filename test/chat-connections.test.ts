@@ -16,6 +16,22 @@ describe('model tool preference validation', () => {
   });
 });
 
+describe('model reasoning effort validation', () => {
+  it('preserves all six explicit levels and omits the default', () => {
+    const model = { id: 'model', baseUrl: 'https://api.example' };
+    assert.equal('effort' in normalizeModelOptions(model), false);
+    for (const effort of ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const) {
+      assert.deepEqual(normalizeModelOptions({ ...model, effort }), { ...model, effort });
+    }
+  });
+
+  it('rejects invalid flags without trimming, case folding, or coercion', () => {
+    for (const effort of [null, false, true, 0, 1, '', 'off', 'auto', 'HIGH', ' high ', {}, ['high'], new String('high')]) {
+      assert.throws(() => normalizeModelOptions({ id: 'model', baseUrl: 'https://api.example', effort: effort as never }), /valid API base URL and model ID/);
+    }
+  });
+});
+
 describe('model header validation', () => {
   it('validates and canonicalizes a copied string-valued header record', () => {
     const headers = { Authorization: '  Bearer gateway-secret  ', 'X-Api-Key': ' gateway-key ' };

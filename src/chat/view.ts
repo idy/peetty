@@ -80,6 +80,11 @@ export function buildChatView(panel: HTMLElement, copy: () => ChatCopy): { trans
   );
   const keyInput = el('input', 'pc-input', { name: 'key', type: 'password', autocomplete: 'off', spellcheck: 'false', autocapitalize: 'off' });
   const modelSelect = labelled(el('select', 'pc-input pc-models', { hidden: true }), 'model');
+  const effort = el('select', 'pc-input', { name: 'effort' });
+  for (const [value, label] of [
+    ['', 'effortDefault'], ['minimal', 'effortMinimal'], ['low', 'effortLow'], ['medium', 'effortMedium'],
+    ['high', 'effortHigh'], ['xhigh', 'effortXhigh'], ['max', 'effortMax'],
+  ] as const) effort.append(el('option', '', { value }, text(label)));
   const privacy = el('p', 'pc-note', {}, text('privacy'));
   privacy.style.marginTop = '12px';
   privacy.style.marginBottom = '0';
@@ -96,6 +101,8 @@ export function buildChatView(panel: HTMLElement, copy: () => ChatCopy): { trans
     el('div', 'pc-discover', {}, el('button', 'pc-small pc-load', { type: 'button' }), button('pc-link pc-manual', 'manual')),
     el('label', 'pc-field pc-model-field', {}, el('span', '', {}, text('model')),
       el('input', 'pc-input', { name: 'model', placeholder: 'model-id', required: true, autocomplete: 'off', spellcheck: 'false' }), modelSelect),
+    field('effort', effort),
+    el('p', 'pc-note', {}, text('effortHint')),
     el('label', 'pc-check', {}, el('input', '', { name: 'tools', type: 'checkbox', checked: true }), el('span', '', {}, text('allowActions'))),
     el('p', 'pc-note', {}, text('actionsHint')),
     el('label', 'pc-check', {}, el('input', '', { name: 'remember', type: 'checkbox', checked: true }), el('span', '', {}, text('remember'))),

@@ -297,7 +297,15 @@ export class Peetty {
             if (generation !== this.generation) throw new Error('Companion no longer available.');
             return this.performChatAction(action, signal);
           },
-          onReply: (text) => { if (generation === this.generation && text.length <= 180) this.say(text, 6); },
+          onReply: (text, render) => {
+            if (generation !== this.generation || text.length > 180) return;
+            this.say(text, 6);
+            if (render && this.overlay && this.mode !== 'paused') {
+              render(this.overlay.bubble);
+              this.overlay.invalidate(this.overlay.bubble);
+              this.place();
+            }
+          },
           onState: (busy, speaking) => {
             if (generation !== this.generation) return;
             this.chatWorking = busy;

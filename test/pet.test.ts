@@ -1481,6 +1481,38 @@ describe('in-place interface language', () => {
 });
 
 describe('chat entry points and SDK model injection', () => {
+  it('uses the lazy reply renderer for a short bubble and invalidates its measured size', async (t) => {
+    let reply: ((text: string, render?: (target: HTMLElement) => void) => void) | undefined;
+    const IsolatedPeetty = await petWithChatLoader(async () => ({
+      createChatPanel: async (options) => { reply = options.onReply; return chatPanelStub(); },
+    }));
+    const dom = installPetDOM(t);
+    const pet = new IsolatedPeetty({ greet: false });
+    dom.cleanup(() => pet.destroy());
+    await pet.openChat();
+    const state = controller(pet);
+    stand(state);
+    const bubble = state.overlay.bubble;
+    state.overlay.measure(bubble);
+    const render = mock.fn((target: HTMLElement) => {
+      assert.equal(target, bubble);
+      target.textContent = 'cat\n /\\_/\\';
+      (target as unknown as ElementStub).rect = { left: 0, top: 0, width: 210, height: 90 };
+    });
+    assert.ok(reply);
+    reply('**cat**\n\n```text\n /\\_/\\\n```', render);
+    assert.equal(bubble.textContent, 'cat\n /\\_/\\');
+    assert.equal(bubble.classList.contains('show'), true);
+    assert.deepEqual(state.overlay.measure(bubble), { width: 210, height: 90 });
+    reply('x'.repeat(181), render);
+    assert.equal(render.mock.callCount(), 1, 'long replies remain in the chat panel');
+    pet.say('plain\nsecond line');
+    assert.equal(bubble.textContent, 'plain\nsecond line');
+    pet.destroy();
+    reply('late', render);
+    assert.equal(render.mock.callCount(), 1);
+  });
+
   it('accepts an injected model without loading chat, resolving credentials, or calling the endpoint on mount', async (t) => {
     let keys = 0;
     const network = mock.method(globalThis, 'fetch', async () => { throw new Error('unexpected network'); });

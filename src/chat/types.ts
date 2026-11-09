@@ -1,3 +1,5 @@
+export type PeettyReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
 /** An OpenAI-compatible chat endpoint. SDK credentials are kept in memory. */
 export interface PeettyModelOptions {
   id: string;
@@ -7,6 +9,8 @@ export interface PeettyModelOptions {
   headers?: Record<string, string>;
   /** Enable companion action tools. Defaults to true. */
   tools?: boolean;
+  /** Explicit reasoning effort. Omit to leave the provider's default unchanged. */
+  effort?: PeettyReasoningEffort;
 }
 
 export interface PeettyChatOptions {
