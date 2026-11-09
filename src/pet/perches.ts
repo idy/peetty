@@ -207,7 +207,9 @@ function paddedBounds(bounds: Box, padding: PaintPadding | undefined): Box {
  * O(log n) work without filling the gaps between disconnected shapes.
  */
 function coalesceFigureBoxes(bounds: Box[], data: Scan): Box[] {
-  if (bounds.length < 2) return bounds;
+  // Reserve one slot for the SVG viewport. Fitting overflow needs no optional
+  // sorting or coverage index, leaving the work budget for placement checks.
+  if (data.obstacles.length + bounds.length + 1 <= MAX_RECTS) return bounds;
   const compare = (a: number, b: number) => {
     if (!spend(data.budget)) data.complete = false;
     return a - b;

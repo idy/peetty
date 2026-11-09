@@ -614,9 +614,21 @@ describe('bounded companion graphics', () => {
     assert.ok(fixture.geometryReads < 400, `collection visits each shape once: ${fixture.geometryReads}`);
   });
 
+  for (const count of [1500, 2046]) {
+    it(`retains ${count} disjoint overflow boxes with distinct vertical intervals when they fit`, () => {
+      const { svg } = figure(rect(650, 580, 100, 120), { x: -500, y: 0, width: 600, height: 120 });
+      for (let i = 0; i < count; i++) element('ellipse', rect(150, 600 + i * 0.04, 0.1, 0.02), svg);
+      const found = floor(fixture.opts);
+      assert.ok(found, 'fitting boxes must not spend work on optional coverage indexing');
+      assert.ok(found.left > 200 && found.right > 590);
+    });
+  }
+
   it('does not mistake separated vertical coverage for a fully covered rectangle', () => {
     const { svg } = figure(rect(650, 580, 100, 120), { x: -550, y: 0, width: 650, height: 120 });
     element('path', rect(100, 600, 200, 10), svg);
+    // Exceed the raw cap so this case continues to exercise coverage indexing.
+    for (let i = 0; i < 2100; i++) element('ellipse', rect(101 + i / 10_000, 600, 180 - i / 10_000, 10), svg);
     element('path', rect(110, 620, 190, 10), svg);
     element('path', rect(120, 600, 130, 100), svg);
     const found = floor({ ...fixture.opts, width: 20, height: 20, anchor: [10, 20] });
