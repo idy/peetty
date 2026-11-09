@@ -147,8 +147,10 @@
       <pre class="code"><code>&lt;script src="https://peetty.idy.dev/sdk/peetty.global.js"
         data-peetty-auto data-figure="shiori" defer&gt;&lt;/script&gt;</code></pre>
       <p class="code-note" data-i18n="embedOptions">Options: data-figure (a character id such as miru or amara, or a figure JSON URL), data-size (height in pixels), data-activity (calm, normal, lively), data-language (en, zh), data-greet="false".</p>
-      <p class="code-note" data-i18n="npmNote">Install from GitHub Packages. Registry authentication is required.</p>
-      <pre class="code"><code>npm install @idy/peetty --registry=https://npm.pkg.github.com</code></pre>
+      <p class="code-note" data-i18n="npmNote">Use GitHub Packages for @idy and sign in there. Other dependencies use your default npm registry.</p>
+      <pre class="code"><code>npm config set @idy:registry https://npm.pkg.github.com</code></pre>
+      <pre class="code"><code>npm login --scope=@idy --auth-type=legacy --registry=https://npm.pkg.github.com</code></pre>
+      <pre class="code"><code>npm install @idy/peetty</code></pre>
       <pre class="code"><code>import { createPeetty } from '@idy/peetty'
 
 const pet = createPeetty({

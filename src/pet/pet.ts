@@ -45,6 +45,7 @@ interface FigureRequest {
 }
 interface ActionCompletion {
   action: CompanionAction;
+  actionVersion: number;
   until: number;
   resolve: (result: string) => void;
   reject: (error: Error) => void;
@@ -94,6 +95,7 @@ export class Peetty {
   private perches: Perch[] = [];
   private scanned = -Infinity;
   private action: Action = 'idle';
+  private actionVersion = 0;
   private until = 0;
   private walkTo = 0;
   private jump: { from: [number, number]; plan: Jump; t: number; target: Perch; targetOrigin: [number, number]; hang: boolean; fright?: boolean } | null = null;
@@ -360,11 +362,21 @@ export class Peetty {
       this.setAction(action, duration / 1000);
     }
     return new Promise<string>((resolve, reject) => {
-      const stop = () => this.finishChatAction(new DOMException('Action stopped.', 'AbortError'));
-      this.actionCompletion = {
-        action, until: this.clock + duration, resolve, reject,
+      const stop = () => {
+        if (this.actionCompletion !== pending) return;
+        this.finishChatAction(new DOMException('Action stopped.', 'AbortError'));
+        // Only the tool's own stationary pose is ours to replace. Moves and later
+        // user actions (even another identical pose) keep their animation ownership.
+        if (action !== 'move' && !this.hidden && this.mode === 'ground' && this.actionVersion === pending.actionVersion) {
+          const chat = this.chatVisible && this.perch?.clear;
+          this.setAction(chat ? this.chatWorking ? this.chatSpeaking ? 'talk' : 'think' : 'sit' : 'idle', chat ? 15 : 2);
+        }
+      };
+      const pending: ActionCompletion = {
+        action, actionVersion: this.actionVersion, until: this.clock + duration, resolve, reject,
         dispose: () => signal?.removeEventListener('abort', stop),
       };
+      this.actionCompletion = pending;
       signal?.addEventListener('abort', stop, { once: true });
       if (signal?.aborted) stop();
     });
@@ -571,19 +583,46 @@ export class Peetty {
       menu.classList.add('show');
       this.place();
     });
-    on(pet, 'keydown', (e: KeyboardEvent) => {
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (!e.repeat) activateCompanion(); }
-      else if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
-        e.preventDefault(); this.menuPinned = true; menu.classList.add('show');
-        menu.querySelector<HTMLButtonElement>('button')?.focus();
+    const activationKey = (key: string) => key === 'Enter' || key === ' ';
+    const contextKey = (e: KeyboardEvent) => e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10');
+    // Focus can move between pet and menu before release, and Shift can be
+    // released before F10. Keep the consumed key contained for the whole press.
+    const consumedKeys = new Set<string>();
+    const containKey = (e: KeyboardEvent, nativeButton = false) => {
+      e.stopPropagation();
+      if (!nativeButton) e.preventDefault();
+      if (e.type === 'keydown') consumedKeys.add(e.key);
+      else if (e.type === 'keyup') consumedKeys.delete(e.key);
+    };
+    for (const target of [pet, menu]) {
+      on(target, 'keydown', (e: KeyboardEvent) => {
+        const activation = activationKey(e.key);
+        const context = contextKey(e);
+        const escape = target === menu && e.key === 'Escape';
+        const repeated = e.repeat && consumedKeys.has(e.key);
+        consumedKeys.delete(e.key);
+        if (!activation && !context && !escape && !repeated) return;
+        containKey(e, target === menu && activation);
+        if (e.repeat) return;
+        if (target === pet && activation) activateCompanion();
+        else if (context) {
+          this.menuPinned = true; menu.classList.add('show');
+          menu.querySelector<HTMLButtonElement>('button')?.focus();
+        } else if (escape) {
+          this.menuPinned = false; menu.classList.remove('show'); pet.focus();
+        }
+      });
+      for (const type of ['keypress', 'keyup']) {
+        on(target, type, (e: KeyboardEvent) => {
+          if (consumedKeys.has(e.key) || activationKey(e.key) || contextKey(e) || (target === menu && e.key === 'Escape')) {
+            containKey(e, target === menu && activationKey(e.key));
+          }
+        });
       }
-    });
+    }
     on(window, 'pointerdown', (e: PointerEvent) => {
       const path = e.composedPath();
       if (!path.includes(pet) && !path.includes(menu)) { this.menuPinned = false; menu.classList.remove('show'); }
-    });
-    on(menu, 'keydown', (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { this.menuPinned = false; menu.classList.remove('show'); pet.focus(); }
     });
     if (this.options.chat === false) {
       pet.setAttribute('aria-label', this.text.greet);
@@ -879,6 +918,7 @@ export class Peetty {
   }
 
   private setAction(action: Action, seconds: number) {
+    this.actionVersion++;
     this.action = action;
     const deadline = this.clock / 1000 + seconds;
     // A stationary pose must not extend the exit budget over covered floor.
@@ -952,6 +992,7 @@ export class Peetty {
     this.jump = null;
     this.x = clamp(this.x, perch.left, perch.right);
     this.view!.motion.land(strength);
+    this.actionVersion++;
     this.action = 'idle';
     this.until = this.clock / 1000 + (strength > 0.85 ? 1.8 : rand(0.6, 1.4));
     if (perch.input) this.until = this.clock / 1000 + 0.5;

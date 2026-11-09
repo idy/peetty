@@ -197,7 +197,17 @@ export class ChatRuntime {
     return this.initialization;
   }
 
-  async configure(model: PeettyModelOptions, rememberKey: boolean): Promise<void> {
+  /** SDK replacements are session-only and leave the remembered setup connection intact. */
+  setModel(model: PeettyModelOptions): Promise<void> {
+    return this.replaceModel(model);
+  }
+
+  /** Only the setup form's explicit save may replace the persisted connection. */
+  configure(model: PeettyModelOptions, rememberKey: boolean): Promise<void> {
+    return this.replaceModel(model, { rememberKey });
+  }
+
+  private async replaceModel(model: PeettyModelOptions, save?: { rememberKey: boolean }): Promise<void> {
     if (this.destroyed) return;
     let chosen: PeettyModelOptions;
     try { chosen = modelOptions(model); }
@@ -214,10 +224,10 @@ export class ChatRuntime {
     this.rememberSecrets(chosen);
     this.changed();
     await this.initialize();
-    if (this.destroyed || revision !== this.revision) return;
+    if (!save || this.destroyed || revision !== this.revision) return;
     const connection: StoredConnection = {
       id: chosen.id, baseUrl: chosen.baseUrl,
-      ...(rememberKey && chosen.apiKey && !chosen.getApiKey ? { apiKey: chosen.apiKey } : {}),
+      ...(save.rememberKey && chosen.apiKey && !chosen.getApiKey ? { apiKey: chosen.apiKey } : {}),
     };
     await this.persist(() => this.storage.saveConnection(connection));
   }

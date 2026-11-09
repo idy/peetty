@@ -12,7 +12,7 @@ import { stubGlobals } from './helpers/stubs.ts';
 const flush = async () => { for (let i = 0; i < 25; i++) await Promise.resolve(); };
 const MODEL = { id: 'model', baseUrl: 'https://models.example/v1' };
 
-async function mountPanel(t: TestContext, model: PeettyModelOptions, options: {
+async function mountPanel(t: TestContext, model: PeettyModelOptions | undefined, options: {
   chat?: PeettyChatOptions;
   onReply?: (text: string) => void;
   onState?: (busy: boolean, speaking: boolean) => void;
@@ -49,13 +49,68 @@ async function mountPanel(t: TestContext, model: PeettyModelOptions, options: {
   document.body.append(host);
   const root = host.attachShadow({ mode: 'open' });
   panel = await createChatPanel({
-    root, language: 'en', model, chat: options.chat ?? { persist: false },
+    root, language: 'en', ...(model ? { model } : {}), chat: options.chat ?? { persist: false },
     onAction() {}, onReply: options.onReply ?? (() => {}), onState: options.onState ?? (() => {}), onClose() {},
   });
   panel.open(true);
   const query = <T extends HTMLElement>(selector: string) => root.querySelector<T>(selector)!;
   return { panel, root, window, query, htmlWrites: () => htmlWrites };
 }
+
+describe('chat panel credential ownership', () => {
+  for (const consent of [false, true]) {
+    it(`${consent ? 'remembers' : 'does not remember'} an injected key ${consent ? 'after explicit opt-in' : 'when saving another setting'}`, async (t) => {
+      const storage = installChatIndexedDB(t);
+      const injected = { ...MODEL, apiKey: 'fixture-injected-key' };
+      const { panel, query } = await mountPanel(t, injected, { chat: { storageKey: 'injected-consent', persist: true } });
+      const remember = query<HTMLInputElement>('[name="remember"]');
+      assert.equal(remember.checked, false);
+      query<HTMLInputElement>('[name="model"]').value = 'another-model';
+      if (consent) remember.click();
+      query<HTMLFormElement>('.pc-setup').requestSubmit();
+      await flush();
+      assert.equal(query('.pc-setup').hidden, true);
+      const saved = storage.databases.get('injected-consent:chat')?.get('connection') as PeettyModelOptions;
+      assert.equal(saved.id, 'another-model');
+      assert.equal(saved.apiKey, consent ? injected.apiKey : undefined);
+      panel.open(true);
+      assert.equal(remember.checked, consent);
+      await panel.setModel({ ...injected, id: 'sdk-replacement', apiKey: 'fixture-replacement-key' });
+      panel.open(true);
+      assert.equal(remember.checked, false, 'a new SDK connection needs fresh consent');
+      assert.deepEqual(storage.databases.get('injected-consent:chat')?.get('connection'), saved);
+    });
+  }
+
+  for (const loaded of [false, true]) {
+    it(`preserves the saved endpoint and key when the SDK injects a model ${loaded ? 'after' : 'before'} loading chat`, async (t) => {
+      const storage = installChatIndexedDB(t);
+      const saved = { id: 'saved-model', baseUrl: 'https://saved.example/v1', apiKey: 'fixture-saved-key' };
+      const seed = new BrowserChatStore('saved-connection');
+      await seed.saveConnection(saved);
+      seed.close();
+      const saves = t.mock.method(BrowserChatStore.prototype, 'saveConnection');
+      const injected = { id: 'injected-model', baseUrl: 'https://injected.example/v1', apiKey: 'fixture-session-key' };
+      const { panel, query } = await mountPanel(t, loaded ? undefined : injected, { chat: { storageKey: 'saved-connection', persist: true } });
+      if (loaded) {
+        assert.equal(query<HTMLInputElement>('[name="key"]').value, saved.apiKey);
+        assert.equal(query<HTMLInputElement>('[name="remember"]').checked, true);
+        await panel.setModel(injected);
+      }
+      panel.open(true);
+      assert.equal(query<HTMLInputElement>('[name="key"]').value, injected.apiKey);
+      assert.equal(query<HTMLInputElement>('[name="model"]').value, injected.id);
+      assert.equal(query<HTMLInputElement>('[name="remember"]').checked, false);
+      assert.equal(saves.mock.callCount(), 0);
+      assert.deepEqual(storage.databases.get('saved-connection:chat')?.get('connection'), saved);
+      panel.destroy();
+      const restored = new ChatRuntime({ chat: { storageKey: 'saved-connection', persist: true } });
+      t.after(() => restored.destroy());
+      await restored.initialize();
+      assert.deepEqual(restored.model, saved);
+    });
+  }
+});
 
 describe('chat panel DOM and keyboard boundaries', () => {
   it('renders setup, icons, actions and replies with HTML string sinks blocked', { timeout: 10000 }, async (t) => {

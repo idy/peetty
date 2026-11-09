@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { runInThisContext } from 'node:vm';
 import { afterEach, describe, it, mock } from 'node:test';
 import { build } from 'esbuild';
+import { Window as BrowserWindow } from 'happy-dom';
 import { Peetty } from '../src/pet/pet.ts';
 import { AUTONOMOUS_ACTIONS, type Figure, type RigFigure } from '../src/figure/types.ts';
 import type { FigureView } from '../src/figure/view.ts';
@@ -13,6 +14,7 @@ import type { Overlay } from '../src/pet/ui.ts';
 import type { CompanionAction, PeettyModelOptions } from '../src/chat/types.ts';
 import { languageOf, strings, type Language } from '../src/pet/i18n.ts';
 import { deferred, ElementStub, installPetDOM, pointer } from './helpers/pet-dom.ts';
+import { stubGlobals } from './helpers/stubs.ts';
 
 /** Inspect controller state while driving its public methods, events and frame loop. */
 interface Controller {
@@ -44,6 +46,9 @@ interface Controller {
   makeRoom: (field: Element) => void;
   walkOver: (target: number) => void;
   chatVisible: boolean;
+  chatWorking: boolean;
+  chatSpeaking: boolean;
+  chatGestureUntil: number;
   performChatAction: (action: CompanionAction, signal?: AbortSignal) => Promise<string>;
 }
 const controller = (pet: Peetty) => pet as unknown as Controller;
@@ -58,6 +63,19 @@ async function mountPet(t: Parameters<typeof installPetDOM>[0], options: Constru
   dom.cleanup(() => pet.destroy());
   await pet.mount();
   return { dom, pet, state: controller(pet) };
+}
+
+/** Use a bubbling shadow DOM for keyboard boundaries; geometry stays in the controller harness. */
+async function mountKeyboardPet(t: Parameters<typeof installPetDOM>[0]) {
+  const dom = installPetDOM(t);
+  const window = new BrowserWindow({ url: 'https://host.example/' });
+  const restore = stubGlobals({ window, document: window.document, Element: window.Element });
+  const pet = new Peetty({ greet: false });
+  dom.cleanup(() => { pet.destroy(); window.close(); restore(); });
+  const state = controller(pet);
+  mock.method(state, 'scan', () => []);
+  await pet.mount();
+  return { pet, state, window: window as unknown as Window & typeof globalThis };
 }
 
 function stand(state: Controller, x = 300) {
@@ -1077,6 +1095,155 @@ describe('multiple companions and physical chat actions', () => {
     });
   }
 
+  for (const action of ['sleep', 'wave', 'sit', 'lie', 'idle'] as const) {
+    for (const chatVisible of [false, true]) {
+      it(`immediately releases an aborted ${action} pose with chat ${chatVisible ? 'open' : 'closed'}`, async (t) => {
+        const { state } = await mountPet(t);
+        stand(state);
+        state.chatVisible = chatVisible;
+        const abort = new AbortController();
+        const rejected = assert.rejects(state.performChatAction(action, abort.signal), { name: 'AbortError' });
+        abort.abort();
+        assert.equal(state.action, chatVisible ? 'sit' : 'idle');
+        assert.equal(state.view.motion.current, state.action, 'the visible animation changes before another frame');
+        assert.equal(state.until, state.clock / 1000 + (chatVisible ? 15 : 2));
+        assert.equal(state.chatGestureUntil, state.clock, 'chat gestures no longer wait for the cancelled tool');
+        await rejected;
+      });
+    }
+  }
+
+  for (const speaking of [false, true]) {
+    it(`restores the active chat ${speaking ? 'talk' : 'think'} pose when sleep is aborted`, async (t) => {
+      const { state } = await mountPet(t);
+      stand(state);
+      state.chatVisible = state.chatWorking = true;
+      state.chatSpeaking = speaking;
+      const abort = new AbortController();
+      const rejected = assert.rejects(state.performChatAction('sleep', abort.signal), { name: 'AbortError' });
+      abort.abort();
+      assert.equal(state.view.motion.current, speaking ? 'talk' : 'think');
+      await rejected;
+    });
+  }
+
+  for (const action of ['sleep', 'lie'] as const) {
+    it(`leaves a safe idle pose when closing chat aborts ${action}`, async (t) => {
+      const { pet, state } = await mountPet(t);
+      stand(state);
+      const panel = attachChatPanel(pet);
+      await pet.openChat();
+      const abort = new AbortController();
+      mock.method(panel, 'close', () => { panel.isOpen = false; abort.abort(); });
+      const rejected = assert.rejects(state.performChatAction(action, abort.signal), { name: 'AbortError' });
+      pet.closeChat();
+      assert.equal(state.chatVisible, false);
+      assert.equal(state.view.motion.current, 'idle');
+      assert.equal(state.until, state.clock / 1000 + 2);
+      await rejected;
+    });
+  }
+
+  for (const replacement of ['sit', 'nap', 'walk'] as const) {
+    it(`does not overwrite a user-selected ${replacement} when the previous sleep tool is aborted`, async (t) => {
+      const { pet, state } = await mountPet(t);
+      stand(state);
+      state.chatVisible = true;
+      const abort = new AbortController();
+      const rejected = assert.rejects(state.performChatAction('sleep', abort.signal), { name: 'AbortError' });
+      if (replacement === 'nap') {
+        const nap = [...state.overlay.menu.children].find((button) => button.getAttribute('data-action') === 'nap');
+        assert.ok(nap);
+        nap.dispatchEvent(new Event('click'));
+      } else pet.play(replacement);
+      const action = state.action;
+      const deadline = state.until;
+      const walkTo = state.walkTo;
+      abort.abort();
+      assert.equal(state.action, action);
+      assert.equal(state.view.motion.current, action);
+      assert.equal(state.until, deadline, 'even a replacement with the same pose and deadline keeps ownership');
+      assert.equal(state.walkTo, walkTo);
+      await rejected;
+    });
+  }
+
+  for (const replacement of ['drag', 'fall', 'landing'] as const) {
+    it(`does not overwrite ${replacement} when an earlier idle tool is aborted`, async (t) => {
+      const { dom, state } = await mountPet(t);
+      const perch = stand(state);
+      state.chatVisible = true;
+      const abort = new AbortController();
+      const rejected = assert.rejects(state.performChatAction('idle', abort.signal), { name: 'AbortError' });
+      if (replacement === 'drag') {
+        state.overlay.pet.dispatchEvent(pointer('pointerdown', 1));
+        dom.window.dispatchEvent(pointer('pointermove', 1, 150, 150));
+      } else {
+        state.startFall();
+        if (replacement === 'landing') state.land(perch, 0.2);
+      }
+      const mode = state.mode;
+      const motion = state.view.motion.current;
+      const deadline = state.until;
+      const play = mock.method(state.view.motion, 'play');
+      abort.abort();
+      assert.equal(state.mode, mode);
+      assert.equal(state.view.motion.current, motion);
+      assert.equal(state.until, deadline);
+      assert.equal(play.mock.callCount(), 0, 'physics retains animation ownership');
+      await rejected;
+    });
+  }
+
+  it('keeps an aborted move flying on its original arc through landing', async (t) => {
+    const { dom, state } = await mountPet(t);
+    const target = stand(state);
+    state.chatVisible = true;
+    const from: [number, number] = [state.x, state.y];
+    const plan = planJump(from, [500, target.y]);
+    assert.ok(plan);
+    mock.method(state, 'leap', () => {
+      state.mode = 'jump';
+      state.perch = null;
+      state.jump = { from, plan, t: -0.18, target, targetOrigin: [target.left, target.y], hang: false };
+      state.view.motion.play('jump');
+      return true;
+    });
+    const abort = new AbortController();
+    const rejected = assert.rejects(state.performChatAction('move', abort.signal), { name: 'AbortError' });
+    for (let i = 0; i < 5; i++) dom.frame(50);
+    const jump = state.jump;
+    const position = [state.x, state.y, state.vx, state.vy];
+    abort.abort();
+    assert.equal(state.mode, 'jump');
+    assert.equal(state.jump, jump);
+    assert.equal(state.view.motion.current, 'jump');
+    assert.deepEqual([state.x, state.y, state.vx, state.vy], position);
+    await rejected;
+    for (let i = 0; i < 100 && state.mode === 'jump'; i++) dom.frame(50);
+    assert.equal(state.mode, 'ground');
+    assert.ok(Math.abs(state.x - 500) < 1);
+  });
+
+  it('does not extend a covered-floor evacuation deadline when a stationary tool is aborted', async (t) => {
+    const { dom, state } = await mountPet(t);
+    const perch = stand(state, 380);
+    state.chatVisible = true;
+    const abort = new AbortController();
+    const rejected = assert.rejects(state.performChatAction('sleep', abort.signal), { name: 'AbortError' });
+    const wall = dom.document.createElement('button');
+    wall.rect = { left: 0, top: 0, width: 400, height: 768 };
+    dom.document.body.append(wall);
+    state.perch = { ...perch, clear: false };
+    const deadline = state.until = state.clock / 1000 + 0.2;
+    abort.abort();
+    assert.equal(state.action, 'idle', 'a covered surface must not regain a stationary chat pose');
+    assert.ok(state.until <= deadline);
+    await rejected;
+    for (let i = 0; !state.perch?.clear && i < 400; i++) dom.frame(20);
+    assert.equal(state.perch?.clear, true, 'she still evacuates all the way to clear floor');
+  });
+
   for (const interruption of ['abort', 'hide', 'destroy'] as const) {
     it(`releases a pending physical action on ${interruption}`, async (t) => {
       const { pet, state } = await mountPet(t);
@@ -1085,9 +1252,13 @@ describe('multiple companions and physical chat actions', () => {
       const controller = new AbortController();
       const pending = state.performChatAction('sit', controller.signal);
       const rejected = assert.rejects(pending, interruption === 'abort' ? { name: 'AbortError' } : /interrupted/);
+      const motion = state.view.motion;
       if (interruption === 'abort') controller.abort();
       else pet[interruption]();
       await rejected;
+      const play = mock.method(motion, 'play');
+      controller.abort();
+      assert.equal(play.mock.callCount(), 0, 'disposed abort handlers cannot regain pose ownership');
     });
   }
 });
@@ -1497,6 +1668,121 @@ describe('chat entry points and SDK model injection', () => {
       if (['chat', 'configure'].includes(button.getAttribute('data-action') ?? '')) assert.equal((button as HTMLElement).hidden, true);
     }
   });
+});
+
+describe('companion and menu keyboard boundaries', () => {
+  for (const key of ['Enter', ' '] as const) {
+    it(`contains every phase of ${JSON.stringify(key)} activation without duplicating chat`, async (t) => {
+      const { pet, state, window } = await mountKeyboardPet(t);
+      const open = mock.method(pet, 'openChat', async () => {});
+      const host = mock.fn();
+      for (const type of ['keydown', 'keypress', 'keyup']) window.document.addEventListener(type, host);
+      for (const [type, repeat] of [['keydown', false], ['keydown', true], ['keypress', false], ['keyup', false]] as const) {
+        const event = new window.KeyboardEvent(type, { key, repeat, bubbles: true, composed: true, cancelable: true });
+        state.overlay.pet.dispatchEvent(event);
+        assert.equal(event.defaultPrevented, true, `${type} is consumed by the companion`);
+      }
+      state.overlay.pet.dispatchEvent(new window.MouseEvent('click', { detail: 0, bubbles: true, composed: true }));
+      assert.equal(open.mock.callCount(), 1);
+      assert.equal(host.mock.callCount(), 0);
+    });
+  }
+
+  for (const key of ['ContextMenu', 'F10'] as const) {
+    it(`contains ${key} through the focus transfer to the menu and modifier release`, async (t) => {
+      const { state, window } = await mountKeyboardPet(t);
+      const host = mock.fn();
+      for (const type of ['keydown', 'keypress', 'keyup']) window.document.addEventListener(type, host);
+      state.overlay.pet.focus();
+      state.overlay.pet.dispatchEvent(new window.KeyboardEvent('keydown', {
+        key, shiftKey: key === 'F10', bubbles: true, composed: true, cancelable: true,
+      }));
+      assert.equal(state.overlay.menu.classList.contains('show'), true);
+      const button = state.overlay.menu.querySelector('button')!;
+      assert.equal(state.overlay.host.shadowRoot!.activeElement, button);
+      for (const type of ['keypress', 'keyup']) {
+        const event = new window.KeyboardEvent(type, { key, shiftKey: false, bubbles: true, composed: true, cancelable: true });
+        button.dispatchEvent(event);
+        assert.equal(event.defaultPrevented, true);
+      }
+      assert.equal(host.mock.callCount(), 0);
+      if (key === 'F10') {
+        for (const type of ['keydown', 'keypress', 'keyup']) {
+          const event = new window.KeyboardEvent(type, { key, bubbles: true, composed: true, cancelable: true });
+          state.overlay.pet.dispatchEvent(event);
+          assert.equal(event.defaultPrevented, false, 'a new unmodified F10 press belongs to the host');
+        }
+        assert.equal(host.mock.callCount(), 3);
+      }
+    });
+  }
+
+  it('contains menu Escape through the return of focus, then lets unrelated companion Escape through', async (t) => {
+    const { state, window } = await mountKeyboardPet(t);
+    const host = mock.fn();
+    for (const type of ['keydown', 'keypress', 'keyup']) window.document.addEventListener(type, host);
+    state.overlay.menu.classList.add('show');
+    const button = state.overlay.menu.querySelector('button')!;
+    button.focus();
+    const down = new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, composed: true, cancelable: true });
+    button.dispatchEvent(down);
+    assert.equal(down.defaultPrevented, true);
+    assert.equal(state.overlay.menu.classList.contains('show'), false);
+    assert.equal(state.overlay.host.shadowRoot!.activeElement, state.overlay.pet);
+    const repeat = new window.KeyboardEvent('keydown', { key: 'Escape', repeat: true, bubbles: true, composed: true, cancelable: true });
+    state.overlay.pet.dispatchEvent(repeat);
+    assert.equal(repeat.defaultPrevented, true, 'a held Escape remains consumed after focus returns');
+    for (const type of ['keypress', 'keyup']) {
+      const event = new window.KeyboardEvent(type, { key: 'Escape', bubbles: true, composed: true, cancelable: true });
+      state.overlay.pet.dispatchEvent(event);
+      assert.equal(event.defaultPrevented, true);
+    }
+    assert.equal(host.mock.callCount(), 0);
+    for (const type of ['keydown', 'keypress', 'keyup']) {
+      const event = new window.KeyboardEvent(type, { key: 'Escape', bubbles: true, composed: true, cancelable: true });
+      state.overlay.pet.dispatchEvent(event);
+      assert.equal(event.defaultPrevented, false);
+    }
+    assert.equal(host.mock.callCount(), 3);
+  });
+
+  for (const key of ['Enter', ' '] as const) {
+    it(`contains native menu-button ${JSON.stringify(key)} without preventing its activation`, async (t) => {
+      const { pet, state, window } = await mountKeyboardPet(t);
+      const open = mock.method(pet, 'openChat', async () => {});
+      const host = mock.fn();
+      for (const type of ['keydown', 'keypress', 'keyup', 'click']) window.document.addEventListener(type, host);
+      state.overlay.menu.classList.add('show');
+      const button = state.overlay.menu.querySelector<HTMLButtonElement>('[data-action="chat"]')!;
+      button.focus();
+      for (const type of ['keydown', 'keypress', 'keyup']) {
+        const event = new window.KeyboardEvent(type, { key, bubbles: true, composed: true, cancelable: true });
+        button.dispatchEvent(event);
+        assert.equal(event.defaultPrevented, false, 'native buttons retain their default keyboard action');
+      }
+      // The DOM fixture does not synthesize the browser's default keyboard click.
+      button.click();
+      assert.equal(open.mock.callCount(), 1);
+      assert.equal(host.mock.callCount(), 0);
+    });
+  }
+
+  for (const target of ['pet', 'menu'] as const) {
+    it(`preserves unrelated host shortcuts from the ${target}`, async (t) => {
+      const { state, window } = await mountKeyboardPet(t);
+      const host = mock.fn();
+      for (const type of ['keydown', 'keypress', 'keyup']) window.document.addEventListener(type, host);
+      const origin = target === 'pet' ? state.overlay.pet : state.overlay.menu.querySelector('button')!;
+      for (const key of ['k', 'Tab', 'ArrowLeft', 'F10']) {
+        for (const type of ['keydown', 'keypress', 'keyup']) {
+          const event = new window.KeyboardEvent(type, { key, ctrlKey: key === 'k', bubbles: true, composed: true, cancelable: true });
+          origin.dispatchEvent(event);
+          assert.equal(event.defaultPrevented, false);
+        }
+      }
+      assert.equal(host.mock.callCount(), 12);
+    });
+  }
 });
 
 describe('overlay geometry and weighted selection', () => {

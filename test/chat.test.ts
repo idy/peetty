@@ -230,6 +230,32 @@ describe('local persistence and credential ownership', () => {
     runtime.destroy();
   });
 
+  for (const initializing of [false, true]) {
+    it(`keeps SDK model replacements ephemeral ${initializing ? 'during initialization' : 'after initialization'}`, async () => {
+      const storage = new MemoryChatStorage({ connection: { ...MODEL }, entries: [] });
+      const loaded = deferred<{ connection: PeettyModelOptions; entries: ChatEntry[] }>();
+      if (initializing) storage.load = () => loaded.promise;
+      const seen: { baseUrl: string; apiKey: string | undefined }[] = [];
+      const runtime = new ChatRuntime({ _testing: { storage, streamFn: (model, _context, options) => {
+        seen.push({ baseUrl: model.baseUrl, apiKey: options?.apiKey });
+        return finished(assistant('ok'));
+      } } });
+      if (!initializing) await runtime.initialize();
+      const injected = { id: 'session-model', baseUrl: 'https://session.example/v1', apiKey: 'fixture-session-key' };
+      const changing = runtime.setModel(injected);
+      loaded.resolve({ connection: { ...MODEL }, entries: [] });
+      await changing;
+      assert.deepEqual(runtime.model, injected);
+      assert.deepEqual(storage.state.connection, MODEL);
+      assert.equal(storage.connections.length, 0);
+      await runtime.send('hello');
+      assert.deepEqual(seen, [{ baseUrl: injected.baseUrl, apiKey: injected.apiKey }]);
+      assert.deepEqual(storage.state.connection, MODEL);
+      assert.equal(storage.connections.length, 0);
+      runtime.destroy();
+    });
+  }
+
   it('rejects invalid replacements without silently changing the active or saved model', async () => {
     const storage = new MemoryChatStorage();
     const runtime = new ChatRuntime({ model: MODEL, _testing: { storage } });

@@ -129,6 +129,8 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
   const model = find<HTMLInputElement>('[name="model"]');
   const models = find<HTMLSelectElement>('.pc-models');
   const remember = find<HTMLInputElement>('[name="remember"]');
+  // A host-supplied connection is ephemeral until the user opts in to saving its key.
+  if (options.model) remember.checked = false;
   const input = find<HTMLTextAreaElement>('[name="message"]');
   const messages = find<HTMLDivElement>('.pc-messages');
   const content = find<HTMLDivElement>('.pc-content');
@@ -405,7 +407,11 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
       panel.setAttribute('lang', language);
       refreshCopy();
     },
-    async setModel(next) { cancelDiscovery(); await runtime.configure(next, false); if (!disposed) { showError(); setSettings(false); } },
+    async setModel(next) {
+      cancelDiscovery();
+      await runtime.setModel(next);
+      if (!disposed) { remember.checked = false; showError(); setSettings(false); }
+    },
     destroy() { disposed = true; cancelDiscovery(); runtime.destroy(); panel.remove(); style.remove(); },
   };
 }

@@ -48,7 +48,7 @@
       embedTitle: "一行脚本。",
       embedIntro: "把下面这行加到任意网页。用 data-peetty=\"perch\" 标出推荐落脚点，用 data-peetty=\"avoid\" 让她远离某块区域。",
       embedOptions: "可选属性：data-figure（角色 id，如 miru、amara，或形象 JSON 的地址）、data-size（高度像素）、data-activity（calm、normal、lively）、data-language（en、zh）、data-greet=\"false\"。",
-      npmNote: "从 GitHub Packages 安装，需要先完成仓库认证。",
+      npmNote: "仅让 @idy 使用 GitHub Packages，并在该仓库完成登录。其他依赖仍使用默认 npm 仓库。",
       questionsTitle: "一些说明。",
       dataQuestion: "她会把我页面上的内容发出去吗？",
       dataAnswer: "寻找落脚点和播放动画都在浏览器本地完成，不会为这些动作发送网页内容。",
