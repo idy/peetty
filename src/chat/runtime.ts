@@ -20,7 +20,6 @@ const EMPTY_USAGE: Usage = {
   input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
-let sequence = 0;
 
 export interface ChatRuntimeOptions {
   model?: PeettyModelOptions;
@@ -40,6 +39,7 @@ interface Run {
   agent?: Agent;
   unsubscribe?: () => void;
   assistantId?: string;
+  inputId?: string;
   requests: number;
   actions: number;
 }
@@ -126,9 +126,11 @@ export class ChatRuntime {
   private currentModel: PeettyModelOptions | undefined;
   private history: ChatEntry[] = [];
   private currentError: string | null = null;
+  private replyId: string | undefined;
   private storageFailed = false;
   private active: Run | undefined;
   private initialization: Promise<void> | undefined;
+  private clearing: Promise<void> = Promise.resolve();
   private connectionChosen: boolean;
   private historyTouched = false;
   private revision = 0;
@@ -148,6 +150,8 @@ export class ChatRuntime {
     return this.currentModel ? { ...this.currentModel, ...(this.currentModel.headers ? { headers: { ...this.currentModel.headers } } : {}) } : undefined;
   }
   get entries(): readonly ChatEntry[] { return this.history; }
+  /** Only a reply produced by this runtime's latest turn, never one imported from another tab. */
+  get reply(): ChatEntry | undefined { return this.history.find((entry) => entry.id === this.replyId); }
   get busy(): boolean { return this.active !== undefined; }
   get error(): string | null { return this.currentError; }
   get persistenceWarning(): boolean { return this.storageFailed || this.storage.persistenceWarning; }
@@ -230,8 +234,20 @@ export class ChatRuntime {
     return this.persist(() => this.storage.saveEntries(entries));
   }
 
+  private async refreshHistory(run: Run): Promise<void> {
+    if (this.options.chat?.persist === false) return;
+    try {
+      const stored = await this.storage.load();
+      if (!this.live(run)) return;
+      if (stored.connection?.apiKey) this.secrets.add(stored.connection.apiKey);
+      this.history = boundedEntries(stored.entries).map((entry) => ({ ...entry, text: this.redact(entry.text) }));
+    } catch { if (this.live(run)) this.storageFailed = true; }
+  }
+
   private append(role: ChatEntry['role'], text: string): ChatEntry {
-    const entry: ChatEntry = { id: `chat-${Date.now().toString(36)}-${++sequence}`, role, text: this.redact(text), createdAt: Date.now() };
+    // Randomness is per entry, independent of timestamps and module counters in other tabs.
+    const id = `chat-${Array.from(crypto.getRandomValues(new Uint32Array(4)), (part) => part.toString(36)).join('-')}`;
+    const entry: ChatEntry = { id, role, text: this.redact(text), createdAt: Date.now() };
     this.history = [...this.history, entry];
     this.historyTouched = true;
     return entry;
@@ -302,6 +318,7 @@ export class ChatRuntime {
       if (event.type === 'message_start') delete run.assistantId;
       if (text && !run.assistantId) run.assistantId = this.append('assistant', text).id;
       else if (text && run.assistantId) this.history = this.history.map((entry) => entry.id === run.assistantId ? { ...entry, text } : entry);
+      if (text && run.assistantId) this.replyId = run.assistantId;
       if (event.type === 'message_end' && message.stopReason === 'error') {
         // Provider error bodies may echo a key. Only fixed app-owned copy reaches the UI.
         this.currentError = 'Could not get a response. Check the endpoint, model, and API key.';
@@ -323,6 +340,7 @@ export class ChatRuntime {
       return;
     }
     const run: Run = { controller: new AbortController(), requests: 0, actions: 0 };
+    this.replyId = undefined;
     this.active = run;
     this.currentError = null;
     this.changed();
@@ -334,6 +352,9 @@ export class ChatRuntime {
     }, timeout);
     try {
       await abortable(this.initialize(), run.controller.signal);
+      await abortable(this.clearing, run.controller.signal);
+      if (!this.live(run)) return;
+      await abortable(this.refreshHistory(run), run.controller.signal);
       if (!this.live(run)) return;
       const selected = this.currentModel;
       if (!selected) {
@@ -341,7 +362,7 @@ export class ChatRuntime {
         return;
       }
       const messagesBeforeInput = this.history.length;
-      this.append('user', text);
+      run.inputId = this.append('user', text).id;
       this.changed();
       let key: string;
       try {
@@ -413,33 +434,43 @@ export class ChatRuntime {
       if (this.active === run) {
         this.active = undefined;
         this.history = boundedEntries(this.history);
+        const saving = run.inputId ? this.saveHistory() : Promise.resolve();
         this.changed();
-        await this.saveHistory();
+        await saving;
       }
     }
   }
 
-  stop(): void {
+  private stopRun(): boolean {
     const run = this.active;
-    if (!run) return;
+    if (!run) return false;
     this.active = undefined;
     run.controller.abort();
     run.agent?.abort();
     run.unsubscribe?.();
     this.history = boundedEntries(this.history);
-    this.changed();
-    void this.saveHistory();
+    // A canceled initialization/refresh has no local changes. Saving its old UI
+    // snapshot after the load adopts a new epoch could otherwise undo a peer clear.
+    if (run.inputId) void this.saveHistory();
+    return true;
+  }
+
+  stop(): void {
+    if (this.stopRun()) this.changed();
   }
 
   async clear(): Promise<void> {
     if (this.destroyed) return;
-    this.stop();
+    this.stopRun();
     this.historyTouched = true;
     this.history = [];
+    this.replyId = undefined;
     this.currentError = null;
+    // Queue the barrier before callbacks or destruction can start another operation.
+    this.clearing = this.persist(() => this.storage.clearEntries());
+    const clearing = this.clearing;
     this.changed();
-    await this.initialize();
-    if (!this.destroyed) await this.saveHistory();
+    await Promise.all([this.initialize(), clearing]);
   }
 
   destroy(): void {

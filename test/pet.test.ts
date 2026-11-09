@@ -336,6 +336,31 @@ describe('safe surfaces and autonomous walking', () => {
     assert.ok(state.x - state.view.anchor[0] > 400, 'clear of the button');
   });
 
+  for (const request of ['chat', 'think', 'say', 'sleep', 'tool'] as const) {
+    it(`preserves the covered-floor evacuation deadline when asked to ${request}`, async (t) => {
+      const { dom, pet, state } = await mountPet(t);
+      const wall = dom.document.createElement('button');
+      wall.rect = { left: 0, top: 0, width: 400, height: 768 };
+      dom.document.body.append(wall);
+      dom.frame(300);
+      state.scanned = -Infinity;
+      state.x = 380;
+      state.y = 700;
+      state.vx = 0;
+      state.vy = 400;
+      for (let i = 0; state.mode === 'fall' && i < 50; i++) dom.frame(20);
+      assert.equal(state.perch?.clear, false);
+      const deadline = state.until;
+      if (request === 'chat') { attachChatPanel(pet); await pet.openChat(); }
+      else if (request === 'say') pet.say('A short reply.');
+      else if (request === 'tool') await assert.rejects(state.performChatAction('wave'), /clear ground/);
+      else pet.play(request);
+      assert.ok(state.until <= deadline, 'chat and stationary poses must not extend the existing exit budget');
+      for (let i = 0; !state.perch?.clear && i < 400; i++) dom.frame(20);
+      assert.equal(state.perch?.clear, true, 'evacuation still walks all the way to clear floor');
+    });
+  }
+
   it('fades out instead of walking or leaping off a covered spot when motion is reduced', async (t) => {
     const { dom, state } = await mountPet(t);
     Object.defineProperty(state.view, 'reducedMotion', { get: () => true });
@@ -1104,6 +1129,37 @@ describe('chat entry points and SDK model injection', () => {
     dom.window.dispatchEvent(outside);
     assert.equal(outside.defaultPrevented, false);
   });
+
+  it('restores hover access after dragging dismisses a pinned menu', async (t) => {
+    const { dom, state } = await mountPet(t);
+    stand(state);
+    state.overlay.pet.dispatchEvent(new Event('contextmenu', { cancelable: true }));
+    assert.equal(state.overlay.menu.classList.contains('show'), true);
+    state.overlay.pet.dispatchEvent(pointer('pointerdown', 1));
+    dom.window.dispatchEvent(pointer('pointermove', 1, 150, 150));
+    assert.equal(state.mode, 'drag');
+    assert.equal(state.overlay.menu.classList.contains('show'), false);
+    dom.window.dispatchEvent(pointer('pointerup', 1, 150, 150));
+    state.overlay.pet.dispatchEvent(new Event('pointerover'));
+    dom.frame(300);
+    assert.equal(state.overlay.menu.classList.contains('show'), true);
+  });
+
+  for (const dismissal of ['park', 'hide'] as const) {
+    it(`restores hover access after ${dismissal} dismisses a pinned menu`, async (t) => {
+      const { dom, pet, state } = await mountPet(t);
+      stand(state);
+      state.overlay.pet.dispatchEvent(new Event('contextmenu', { cancelable: true }));
+      if (dismissal === 'park') (pet as unknown as { park(): void }).park();
+      else pet.hide();
+      assert.equal(state.overlay.menu.classList.contains('show'), false);
+      if (dismissal === 'hide') pet.show();
+      else for (let i = 0; i < 30; i++) dom.frame(50);
+      state.overlay.pet.dispatchEvent(new Event('pointerover'));
+      dom.frame(300);
+      assert.equal(state.overlay.menu.classList.contains('show'), true);
+    });
+  }
 
   it('offers the menu on a touch tap and routes the Chat action to the public API', async (t) => {
     const { dom, pet, state } = await mountPet(t);

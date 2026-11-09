@@ -19,6 +19,10 @@ export class MemoryChatStorage implements ChatStorage {
     this.state.entries = structuredClone([...entries]);
     this.histories.push(structuredClone([...entries]));
   }
+  async clearEntries(): Promise<void> {
+    this.state.entries = [];
+    this.histories.push([]);
+  }
   close(): void { this.closed = true; }
 }
 

@@ -460,6 +460,188 @@ describe('Pi chat streaming and actions', () => {
   });
 });
 
+describe('shared history runtime ownership', () => {
+  it('keeps concurrent turns from independent module instances and refreshes context on the next turn', async (t) => {
+    installChatIndexedDB(t);
+    const [tabA, tabB] = await Promise.all([
+      import(new URL('../src/chat/runtime.ts?tab=a', import.meta.url).href) as Promise<typeof import('../src/chat/runtime.ts')>,
+      import(new URL('../src/chat/runtime.ts?tab=b', import.meta.url).href) as Promise<typeof import('../src/chat/runtime.ts')>,
+    ]);
+    t.mock.method(Date, 'now', () => 123_456);
+    const a = heldProvider();
+    const b = heldProvider();
+    const first = new tabA.ChatRuntime({ model: MODEL, chat: { storageKey: 'tabs' }, _testing: { streamFn: a.streamFn } });
+    const second = new tabB.ChatRuntime({ model: MODEL, chat: { storageKey: 'tabs' }, _testing: { streamFn: b.streamFn } });
+    const reader = new BrowserChatStore('tabs');
+    t.after(() => { first.destroy(); second.destroy(); reader.close(); });
+    await Promise.all([first.initialize(), second.initialize()]);
+    const sendingA = first.send('tab-a-question');
+    const sendingB = second.send('tab-b-question');
+    await until(() => a.calls.length === 1 && b.calls.length === 1);
+    b.end(0, 'tab-b-answer');
+    await sendingB;
+    a.end(0, 'tab-a-answer');
+    await sendingA;
+    const expected = ['tab-b-question', 'tab-b-answer', 'tab-a-question', 'tab-a-answer'];
+    const stored = (await reader.load()).entries;
+    assert.deepEqual(stored.map((value) => value.text), expected);
+    assert.equal(new Set(stored.map((value) => value.id)).size, 4, 'module counters and identical clocks cannot collide across tabs');
+    const next = first.send('tab-a-next');
+    await until(() => a.calls.length === 2);
+    const context = a.calls[1]!.context.messages.filter((value) => value.role === 'user' || value.role === 'assistant').map(messageText);
+    for (const text of [...expected, 'tab-a-next']) assert.equal(context.filter((value) => value.includes(text)).length, 1);
+    a.partial(1, 'tab-a-partial');
+    await until(() => first.entries.at(-1)?.text === 'tab-a-partial');
+    first.stop();
+    await next;
+    a.end(1, 'ignored');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual((await reader.load()).entries.map((value) => value.text), [...expected, 'tab-a-next', 'tab-a-partial']);
+  });
+
+  for (const ending of ['complete', 'stop', 'destroy'] as const) {
+    it(`rejects a peer's old turn on ${ending} after clear and accepts subsequent fresh turns`, async (t) => {
+      installChatIndexedDB(t);
+      const clearingStore = new BrowserChatStore(`runtime-clear-${ending}`);
+      const peerStore = new BrowserChatStore(`runtime-clear-${ending}`);
+      const reader = new BrowserChatStore(`runtime-clear-${ending}`);
+      await clearingStore.saveEntries([entry('user', 'before-clear-question'), entry('assistant', 'before-clear-answer', 1)]);
+      const a = heldProvider();
+      const b = heldProvider();
+      const first = new ChatRuntime({ model: MODEL, _testing: { storage: clearingStore, streamFn: a.streamFn } });
+      const second = new ChatRuntime({ model: MODEL, _testing: { storage: peerStore, streamFn: b.streamFn } });
+      t.after(() => { first.destroy(); second.destroy(); reader.close(); });
+      await Promise.all([first.initialize(), second.initialize()]);
+      const sending = second.send('before-clear-inflight');
+      await until(() => b.calls.length === 1);
+      b.partial(0, 'before-clear-partial');
+      await until(() => second.entries.at(-1)?.text === 'before-clear-partial');
+      await first.clear();
+      if (ending === 'complete') b.end(0, 'before-clear-late');
+      else {
+        if (ending === 'stop') second.stop();
+        else second.destroy();
+        b.end(0, 'before-clear-late');
+      }
+      await sending;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.deepEqual((await reader.load()).entries, []);
+      let peer = second;
+      if (ending === 'destroy') {
+        peer = new ChatRuntime({ model: MODEL, _testing: { storage: new BrowserChatStore(`runtime-clear-${ending}`), streamFn: b.streamFn } });
+        t.after(() => peer.destroy());
+      }
+      const freshB = peer.send('fresh-b-question');
+      await until(() => b.calls.length === 2);
+      assert.ok(!JSON.stringify(b.calls[1]!.context).includes('before-clear'));
+      b.end(1, 'fresh-b-answer');
+      await freshB;
+      assert.deepEqual((await reader.load()).entries.map((value) => value.text), ['fresh-b-question', 'fresh-b-answer']);
+      const freshA = first.send('fresh-a-question');
+      await until(() => a.calls.length === 1);
+      assert.ok(!JSON.stringify(a.calls[0]!.context).includes('before-clear'));
+      assert.match(JSON.stringify(a.calls[0]!.context), /fresh-b-answer/);
+      a.end(0, 'fresh-a-answer');
+      await freshA;
+      const againB = peer.send('fresh-b-next');
+      await until(() => b.calls.length === 3);
+      assert.ok(!JSON.stringify(b.calls[2]!.context).includes('before-clear'));
+      assert.match(JSON.stringify(b.calls[2]!.context), /fresh-a-answer/);
+      b.end(2, 'fresh-b-next-answer');
+      await againB;
+      assert.deepEqual((await reader.load()).entries.map((value) => value.text), [
+        'fresh-b-question', 'fresh-b-answer', 'fresh-a-question', 'fresh-a-answer', 'fresh-b-next', 'fresh-b-next-answer',
+      ]);
+    });
+  }
+
+  for (const cancellation of ['stop', 'configure', 'destroy'] as const) {
+    it(`does not save the old UI snapshot on ${cancellation} during a history refresh`, async (t) => {
+      installChatIndexedDB(t);
+      const store = new BrowserChatStore(`refresh-${cancellation}`);
+      const peer = new BrowserChatStore(`refresh-${cancellation}`);
+      await store.saveEntries([entry('user', 'cleared-old-history')]);
+      const contexts: TranscriptContext[] = [];
+      const runtime = new ChatRuntime({ model: MODEL, _testing: { storage: store, streamFn: (_model, context) => {
+        contexts.push(structuredClone(context));
+        return finished(assistant('fresh-response'));
+      } } });
+      t.after(() => { runtime.destroy(); peer.close(); });
+      await runtime.initialize();
+      await peer.clearEntries();
+      const gate = deferred<void>();
+      const originalLoad = store.load.bind(store);
+      let refreshing = false;
+      let loads = 0;
+      store.load = async () => {
+        const state = await originalLoad();
+        if (++loads === 1) { refreshing = true; await gate.promise; }
+        return state;
+      };
+      const sending = runtime.send('canceled-before-input');
+      await until(() => refreshing);
+      if (cancellation === 'stop') runtime.stop();
+      else if (cancellation === 'configure') await runtime.configure({ id: 'new-model', baseUrl: 'https://new.example' }, false);
+      else runtime.destroy();
+      await sending;
+      assert.equal(contexts.length, 0);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.deepEqual((await peer.load()).entries, []);
+      if (cancellation !== 'destroy') {
+        await runtime.send('new-owned-turn');
+        assert.equal(contexts.length, 1);
+        assert.ok(!JSON.stringify(contexts).includes('cleared-old-history'));
+        assert.ok(!JSON.stringify(contexts).includes('canceled-before-input'));
+      }
+      gate.resolve();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.deepEqual((await peer.load()).entries.map((value) => value.text), cancellation === 'destroy' ? [] : ['new-owned-turn', 'fresh-response']);
+      if (cancellation === 'configure') assert.equal(runtime.model?.id, 'new-model');
+    });
+  }
+
+  it('queues an early clear before an immediate new turn and flushes clear on destruction', async (t) => {
+    installChatIndexedDB(t);
+    const store = new BrowserChatStore('early-clear');
+    const reader = new BrowserChatStore('early-clear');
+    await reader.saveEntries([entry('user', 'old-early-history')]);
+    const contexts: TranscriptContext[] = [];
+    const runtime = new ChatRuntime({ model: MODEL, _testing: { storage: store, streamFn: (_model, context) => {
+      contexts.push(structuredClone(context));
+      return finished(assistant('first-fresh-answer'));
+    } } });
+    t.after(() => { runtime.destroy(); reader.close(); });
+    const initializing = runtime.initialize();
+    const clearing = runtime.clear();
+    const sending = runtime.send('first-fresh-input');
+    await Promise.all([initializing, clearing, sending]);
+    assert.ok(!JSON.stringify(contexts).includes('old-early-history'));
+    assert.deepEqual((await reader.load()).entries.map((value) => value.text), ['first-fresh-input', 'first-fresh-answer']);
+    const clearOnClose = runtime.clear();
+    runtime.destroy();
+    await clearOnClose;
+    assert.deepEqual((await reader.load()).entries, []);
+  });
+
+  it('retains local context across turns with persistence disabled', async () => {
+    const storage = new MemoryChatStorage();
+    const contexts: TranscriptContext[] = [];
+    const runtime = new ChatRuntime({ model: MODEL, chat: { persist: false }, _testing: { storage, streamFn: (_model, context) => {
+      contexts.push(structuredClone(context));
+      return finished(assistant('local-answer'));
+    } } });
+    await runtime.send('local-first');
+    await runtime.send('local-next');
+    assert.match(JSON.stringify(contexts[1]), /local-first/);
+    assert.equal(storage.histories.length, 0);
+    await runtime.clear();
+    await runtime.send('local-after-clear');
+    assert.ok(!JSON.stringify(contexts[2]).includes('local-first'));
+    assert.equal(storage.histories.length, 0);
+    runtime.destroy();
+  });
+});
+
 describe('cancellation and stale session isolation', () => {
   it('stops while credentials resolve and never dispatches the late key to a changed endpoint', async () => {
     const credential = deferred<string>();

@@ -21,6 +21,8 @@ const COPY = {
     clearNow: 'Clear', cancel: 'Keep it', storage: 'Browser storage is unavailable. This conversation will last for this visit only.',
     network: 'Check the API URL, key and model. Your endpoint must allow browser requests (CORS).',
     modelsFailed: 'Couldn’t load models. You can enter a model ID instead.', modelsEmpty: 'No models were returned. Enter a model ID.',
+    authFailed: 'The endpoint rejected access. Check your API key and its permissions.',
+    magpieAuthFailed: 'Magpie rejected gateway authentication. Create or check a key on Magpie’s Gateway page and enter it here. Allowing a website does not replace a gateway key.',
     invalid: 'Enter an HTTP or HTTPS API URL and a model ID.', keyProvided: 'Provided by this page',
     you: 'You', companion: 'Peetty', reply: 'Reply received.', connectFirst: 'Connect a model to start chatting.',
     actions: { wave: 'Waved hello', sit: 'Sat down', lie: 'Lay down', sleep: 'Took a nap', move: 'Looked for another spot', idle: 'Settled down' },
@@ -42,6 +44,8 @@ const COPY = {
     clearNow: '清空', cancel: '保留', storage: '浏览器存储暂不可用。对话仅在本次访问保留。',
     network: '请检查地址、key 和模型；接口需要允许浏览器跨域请求（CORS）。',
     modelsFailed: '暂时无法获取模型，可以手动填写模型 ID。', modelsEmpty: '接口没有返回模型，请手动填写模型 ID。',
+    authFailed: '接口拒绝访问，请检查 API key 及其访问权限。',
+    magpieAuthFailed: 'Magpie 网关认证未通过。请在 Magpie 的 Gateway（网关）页创建或检查网关 key，并填到这里；允许网页来源并不能替代 key。',
     invalid: '请填写 HTTP 或 HTTPS API 地址，以及模型 ID。', keyProvided: '由当前网页提供',
     you: '你', companion: 'Peetty', reply: '收到回复。', connectFirst: '先连接一个模型，再开始聊天。',
     actions: { wave: '挥了挥手', sit: '坐了下来', lie: '躺了下来', sleep: '打起了盹', move: '去找另一个落脚点', idle: '安静待着' },
@@ -224,7 +228,6 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
   let settingsOpen = false;
   let disposed = false;
   let wasBusy = false;
-  let repliesBeforeTurn = new Set<string>();
   let discovery: AbortController | null = null;
   let returnFocus: HTMLElement | null = null;
   let shownError = '';
@@ -245,9 +248,11 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
   });
 
   function showError(text: string) { shownError = text; error.textContent = text; error.hidden = !text; }
+  function isLocalMagpie(): boolean {
+    try { return normalizeBaseUrl(url.value) === LOCAL_MAGPIE.baseUrl; } catch { return false; }
+  }
   function updateLocalHint() {
-    let local = false;
-    try { local = normalizeBaseUrl(url.value) === LOCAL_MAGPIE.baseUrl; } catch { /* Not a valid address yet. */ }
+    const local = isLocalMagpie();
     find('.pc-magpie-note').hidden = !local;
     find('.pc-key-label').textContent = local ? t.magpieKey : t.key;
     key.placeholder = sameEndpoint() && runtime.model?.getApiKey ? t.keyProvided : local ? t.magpieKey : t.optional;
@@ -314,7 +319,7 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     submit.title = runtime.busy ? t.stop : t.send;
     submit.disabled = !runtime.busy && (!input.value.trim() || !runtime.model);
     clear.hidden = !runtime.entries.length || !confirmation.hidden;
-    const last = [...runtime.entries].reverse().find((entry) => entry.role === 'assistant' && !repliesBeforeTurn.has(entry.id));
+    const last = runtime.reply;
     const speaking = runtime.busy && !!last?.text && runtime.entries[runtime.entries.length - 1]?.role === 'assistant';
     options.onState(runtime.busy, speaking);
     if (wasBusy && !runtime.busy) {
@@ -362,8 +367,12 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
         model.value = models.value;
         models.focus();
       }
-    } catch {
-      if (!disposed && discovery === controller) { manualModel(); showError(`${t.modelsFailed} ${t.network}`); }
+    } catch (error) {
+      if (!disposed && discovery === controller) {
+        manualModel();
+        const auth = error instanceof Error && error.message === 'The endpoint rejected access. Check your API key.';
+        showError(auth ? isLocalMagpie() ? t.magpieAuthFailed : t.authFailed : `${t.modelsFailed} ${t.network}`);
+      }
     } finally {
       clearTimeout(timeout);
       if (discovery === controller) cancelDiscovery();
@@ -413,7 +422,6 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     if (runtime.busy) { runtime.stop(); return; }
     const text = input.value.trim();
     if (!text || !runtime.model) return;
-    repliesBeforeTurn = new Set(runtime.entries.filter((entry) => entry.role === 'assistant').map((entry) => entry.id));
     input.value = ''; input.style.height = '';
     showError('');
     void runtime.send(text);

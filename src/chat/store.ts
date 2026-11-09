@@ -17,7 +17,10 @@ export interface ChatStorage {
   readonly persistenceWarning: boolean;
   load(): Promise<StoredChat>;
   saveConnection(connection: StoredConnection): Promise<void>;
+  /** Merge changes since this client's last load/save; omission does not delete entries. */
   saveEntries(entries: readonly ChatEntry[]): Promise<void>;
+  /** Clear history and invalidate writes from clients that have not loaded the new history. */
+  clearEntries(): Promise<void>;
   close(): void;
 }
 
@@ -55,9 +58,35 @@ function connectionFrom(value: unknown): StoredConnection | undefined {
   };
 }
 
+interface EntryChange { entry: ChatEntry; added: boolean }
+
+function entryChanges(previous: readonly ChatEntry[], next: readonly ChatEntry[]): EntryChange[] {
+  const known = new Map(previous.map((entry) => [entry.id, entry]));
+  return next.flatMap((entry) => {
+    const old = known.get(entry.id);
+    return old && old.role === entry.role && old.text === entry.text && old.createdAt === entry.createdAt
+      ? [] : [{ entry, added: !old }];
+  });
+}
+
+function mergeEntries(current: readonly ChatEntry[], changes: readonly EntryChange[]): ChatEntry[] {
+  const pending = new Map(changes.map((change) => [change.entry.id, change]));
+  const merged = current.map((entry) => {
+    const change = pending.get(entry.id);
+    pending.delete(entry.id);
+    return change?.entry ?? entry;
+  });
+  // Keep committed order, update entries in place, and append new entries in their local order.
+  // An edit to an entry already evicted by the bounds must not reinsert it at the end.
+  for (const { entry, added } of pending.values()) if (added) merged.push(entry);
+  return boundedEntries(merged);
+}
+
 /** IndexedDB failures switch this instance to memory; no localStorage key fallback. */
 export class BrowserChatStore implements ChatStorage {
   private state: StoredChat = { entries: [] };
+  private snapshot: ChatEntry[] = [];
+  private epoch: string | undefined;
   private db: IDBDatabase | undefined;
   private opening: Promise<IDBDatabase | undefined> | undefined;
   private writes: Promise<void> = Promise.resolve();
@@ -141,40 +170,88 @@ export class BrowserChatStore implements ChatStorage {
     });
   }
 
-  async load(): Promise<StoredChat> {
-    if (this.closing) return structuredClone(this.state);
-    const restored: StoredChat = { entries: [] };
-    const ok = await this.transact(false, (store) => {
-      const connection = store.get('connection');
-      connection.onsuccess = () => {
-        const value = connectionFrom(connection.result);
-        if (value) restored.connection = value;
-      };
-      const entries = store.get('entries');
-      entries.onsuccess = () => { restored.entries = boundedEntries(entries.result); };
+  load(): Promise<StoredChat> {
+    if (this.closing) return Promise.resolve(structuredClone(this.state));
+    return this.enqueue(async () => {
+      const restored: StoredChat = { entries: [] };
+      let epoch = '';
+      const ok = await this.transact(false, (store) => {
+        const connection = store.get('connection');
+        connection.onsuccess = () => {
+          const value = connectionFrom(connection.result);
+          if (value) restored.connection = value;
+        };
+        const entries = store.get('entries');
+        entries.onsuccess = () => { restored.entries = boundedEntries(entries.result); };
+        const barrier = store.get('entriesEpoch');
+        barrier.onsuccess = () => { if (typeof barrier.result === 'string') epoch = barrier.result; };
+      });
+      if (ok) { this.state = restored; this.epoch = epoch; }
+      this.snapshot = structuredClone(this.state.entries);
+      return structuredClone(this.state);
     });
-    if (ok && !this.closed) this.state = restored;
-    return structuredClone(this.state);
   }
 
-  private enqueue(key: string, value: unknown): Promise<void> {
-    this.writes = this.writes.then(async () => {
-      await this.transact(true, (store) => { store.put(value, key); });
-    });
-    return this.writes;
+  private enqueue<T>(action: () => Promise<T>): Promise<T> {
+    const operation = this.writes.then(action);
+    this.writes = operation.then(() => {}, () => {});
+    return operation;
   }
 
   saveConnection(connection: StoredConnection): Promise<void> {
     const copy = connectionFrom(connection);
     if (!copy || this.closing) return Promise.resolve();
-    this.state.connection = copy;
-    return this.enqueue('connection', structuredClone(copy));
+    return this.enqueue(async () => {
+      this.state.connection = copy;
+      await this.transact(true, (store) => { store.put(copy, 'connection'); });
+    });
   }
 
   saveEntries(entries: readonly ChatEntry[]): Promise<void> {
     if (this.closing) return Promise.resolve();
-    this.state.entries = boundedEntries(entries);
-    return this.enqueue('entries', structuredClone(this.state.entries));
+    const copy = boundedEntries(entries);
+    return this.enqueue(async () => {
+      const changes = entryChanges(this.snapshot, copy);
+      this.snapshot = copy;
+      let merged = mergeEntries(this.state.entries, changes);
+      let epoch = this.epoch;
+      const ok = await this.transact(true, (store) => {
+        const barrier = store.get('entriesEpoch');
+        barrier.onsuccess = () => {
+          const currentEpoch = typeof barrier.result === 'string' ? barrier.result : '';
+          const entries = store.get('entries');
+          entries.onsuccess = () => {
+            const current = boundedEntries(entries.result);
+            if (epoch === undefined || epoch === currentEpoch) {
+              epoch = currentEpoch;
+              merged = mergeEntries(current, changes);
+              store.put(merged, 'entries');
+            } else {
+              // Keep the old epoch until load(): late replies and repeated stale saves
+              // cannot adopt the clear barrier and write their old snapshot back.
+              merged = current;
+            }
+          };
+        };
+      });
+      if (ok) this.epoch = epoch;
+      this.state.entries = merged;
+    });
+  }
+
+  clearEntries(): Promise<void> {
+    if (this.closing) return Promise.resolve();
+    return this.enqueue(async () => {
+      // A separate record keeps the barrier even when the bounded history is empty.
+      const epoch = Array.from(crypto.getRandomValues(new Uint32Array(4)), (part) => part.toString(36)).join('-');
+      this.epoch = epoch;
+      this.snapshot = [];
+      this.state.entries = [];
+      await this.transact(true, (store) => {
+        store.put([], 'entries');
+        store.put(epoch, 'entriesEpoch');
+      });
+    });
   }
 
   close(): void {

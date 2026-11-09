@@ -218,7 +218,7 @@ export class Peetty {
     bubble.classList.add('show');
     clearTimeout(this.bubbleTimer);
     this.bubbleTimer = window.setTimeout(() => bubble.classList.remove('show'), seconds * 1000);
-    if (this.mode === 'ground' && this.action !== 'lie' && this.action !== 'sit' && this.action !== 'sleep') {
+    if (this.mode === 'ground' && this.perch?.clear && this.action !== 'lie' && this.action !== 'sit' && this.action !== 'sleep') {
       this.setAction('talk', Math.min(seconds, 2.6));
     }
   }
@@ -279,7 +279,7 @@ export class Peetty {
             if (generation !== this.generation) return;
             this.chatWorking = busy;
             this.chatSpeaking = speaking;
-            if (this.chatVisible && busy && this.mode === 'ground' && this.clock >= this.chatGestureUntil) {
+            if (this.chatVisible && busy && this.mode === 'ground' && this.perch?.clear && this.clock >= this.chatGestureUntil) {
               const action = speaking ? 'talk' : 'think';
               if (this.action !== action) this.setAction(action, 15);
             }
@@ -312,7 +312,7 @@ export class Peetty {
       this.overlay.host.style.visibility = 'visible';
       if (this.mode === 'paused') this.overlay.pet.classList.add('gone');
     }
-    if (opening && this.mode === 'ground' && !this.actionCompletion) this.setAction('sit', 30);
+    if (opening && this.mode === 'ground' && this.perch?.clear && !this.actionCompletion) this.setAction('sit', 30);
     panel.open(settings);
   }
 
@@ -326,6 +326,7 @@ export class Peetty {
     if (signal?.aborted) throw new DOMException('Action stopped.', 'AbortError');
     if (this.hidden || this.mode === 'paused') throw new Error('The companion is not currently visible.');
     if (this.mode !== 'ground' || this.actionCompletion) throw new Error('The companion is moving; try again once she lands.');
+    if (action !== 'move' && !this.perch?.clear) throw new Error('The companion must reach clear ground before playing a pose.');
     clearTimeout(this.greetTimer);
     const duration = action === 'sleep' ? 20000 : 3500;
     if (action === 'move') {
@@ -379,6 +380,9 @@ export class Peetty {
     this.hidden = true;
     this.finishChatAction(new Error('Companion action interrupted by hiding.'));
     this.closeChat();
+    this.menuPinned = false;
+    this.overlay.menu.classList.remove('show');
+    clearTimeout(this.menuTimer);
     clearTimeout(this.tapTimer);
     this.lastTap = null;
     this.releasePress();
@@ -493,6 +497,8 @@ export class Peetty {
     this.mode = 'paused';
     this.perch = null;
     this.jump = null;
+    this.menuPinned = false;
+    clearTimeout(this.menuTimer);
     this.releasePress();
     this.vx = this.vy = 0;
     const { pet, host, menu, bubble } = this.overlay!;
@@ -831,7 +837,11 @@ export class Peetty {
 
   private setAction(action: Action, seconds: number) {
     this.action = action;
-    this.until = this.clock / 1000 + seconds;
+    const deadline = this.clock / 1000 + seconds;
+    // A stationary pose must not extend the exit budget over covered floor.
+    // Walking keeps its own deadline so evacuation can reach a clear spot.
+    this.until = this.mode === 'ground' && this.perch?.clear === false && action !== 'walk'
+      ? Math.min(this.until, deadline) : deadline;
     this.view!.motion.play(action);
   }
 
@@ -935,7 +945,9 @@ export class Peetty {
     if (this.mode !== 'drag') {
       if (Math.hypot(e.clientX - this.press.x, e.clientY - this.press.y) < 5) return;
       clearTimeout(this.tapTimer);
+      clearTimeout(this.menuTimer);
       this.lastTap = null;
+      this.menuPinned = false;
       this.mode = 'drag';
       this.perch = null;
       this.jump = null;
