@@ -1010,6 +1010,44 @@ describe('multiple companions and physical chat actions', () => {
     assert.equal(completed, true);
   });
 
+  for (const failure of ['removed', 'covered'] as const) {
+    it(`rejects a move when its target is ${failure}, even if the fall reaches covered floor`, async (t) => {
+      const { dom, state } = await mountPet(t);
+      const ledge = dom.document.createElement('button');
+      ledge.rect = { left: 450, top: 700, width: 240, height: 40 };
+      dom.document.body.append(ledge);
+      dom.frame(300);
+      const target = state.scan(true).find((perch) => perch.el === ledge as unknown as Element);
+      assert.ok(target);
+      stand(state, (target.left + target.right) / 2);
+      state.chatVisible = true;
+      const from: [number, number] = [state.x, state.y];
+      const plan = planJump(from, [(target.left + target.right) / 2, target.y]);
+      assert.ok(plan);
+      t.mock.method(state, 'leap', () => {
+        state.mode = 'jump';
+        state.perch = null;
+        state.jump = { from, plan, t: -0.18, target, targetOrigin: [target.left, target.y], hang: false };
+        state.view.motion.play('jump');
+        return true;
+      });
+      const rejection = assert.rejects(state.performChatAction('move'), /interrupted/);
+      for (let i = 0; i < 5; i++) { dom.frame(50); await Promise.resolve(); }
+      const mode = () => state.mode;
+      assert.equal(mode(), 'jump');
+      if (failure === 'removed') ledge.remove();
+      const blocker = dom.document.createElement('input');
+      blocker.rect = { left: 0, top: 0, width: 1024, height: 768 };
+      dom.document.body.append(blocker);
+      dom.frame(300);
+      for (let i = 0; i < 100 && mode() === 'jump'; i++) { dom.frame(50); await Promise.resolve(); }
+      await rejection;
+      for (let i = 0; i < 200 && mode() === 'fall'; i++) dom.frame(20);
+      assert.equal(state.mode, 'ground');
+      assert.equal(state.perch?.clear, false, 'landing on the catch-all is not a successful safe move');
+    });
+  }
+
   for (const interruption of ['abort', 'hide', 'destroy'] as const) {
     it(`releases a pending physical action on ${interruption}`, async (t) => {
       const { pet, state } = await mountPet(t);

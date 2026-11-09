@@ -4,6 +4,7 @@ import { Window } from 'happy-dom';
 import { createChatPanel, type ChatPanel } from '../src/chat/panel.ts';
 import type { PeettyChatOptions, PeettyModelOptions } from '../src/chat/types.ts';
 import { BrowserChatStore } from '../src/chat/store.ts';
+import { ChatRuntime } from '../src/chat/runtime.ts';
 import { installChatIndexedDB } from './helpers/chat-storage.ts';
 import { deferred } from './helpers/pet-dom.ts';
 import { stubGlobals } from './helpers/stubs.ts';
@@ -68,6 +69,74 @@ describe('chat panel turn ownership', () => {
     assert.match(query('.pc-messages').textContent ?? '', /Only the peer said this/);
     assert.deepEqual(spoken, []);
     assert.equal(query('.pc-announcement').textContent, '');
+    assert.equal(query('.pc-error').hidden, true);
+  });
+});
+
+describe('chat panel shared-history order', () => {
+  it('reorders existing message nodes to match the refreshed model context', { timeout: 10000 }, async (t) => {
+    installChatIndexedDB(t);
+    const visible = deferred<void>();
+    const completed = [deferred<void>(), deferred<void>()];
+    let busySeen = false;
+    let completedTurns = 0;
+    let currentRoot: ShadowRoot | undefined;
+    const { panel, query, root, window } = await mountPanel(t, MODEL, {
+      chat: { storageKey: 'shared-order', persist: true },
+      onState: (busy) => {
+        if (busy) {
+          busySeen = true;
+          if (currentRoot?.textContent?.includes('local answer')) visible.resolve();
+        } else if (busySeen) {
+          busySeen = false;
+          completed[completedTurns++]?.resolve();
+        }
+      },
+    });
+    currentRoot = root;
+    const peer = new ChatRuntime({ model: MODEL, chat: { storageKey: 'shared-order', persist: true } });
+    t.after(() => peer.destroy());
+    const held: { finish: () => void } = { finish() { throw new Error('Local response has not started.'); } };
+    let nextContext: string[] = [];
+    t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
+      const body = await request.json() as { messages: { role: string; content: string | { text?: string }[] }[] };
+      const textOf = (message: (typeof body.messages)[number]) => typeof message.content === 'string' ? message.content : message.content.map((part) => part.text ?? '').join('');
+      const inputText = textOf(body.messages.filter((message) => message.role === 'user').at(-1)!);
+      if (inputText === 'next input') nextContext = body.messages.filter((message) => message.role === 'user' || message.role === 'assistant').map(textOf);
+      const answer = inputText === 'local input' ? 'local answer' : inputText === 'peer input' ? 'peer answer' : 'next answer';
+      const chunk = { id: 'order', object: 'chat.completion.chunk', created: 1, model: MODEL.id, choices: [{ index: 0, delta: { role: 'assistant', content: answer }, finish_reason: null }] };
+      const done = { ...chunk, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] };
+      const encoder = new TextEncoder();
+      return new Response(new ReadableStream({ start(controller) {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+        const finish = () => { controller.enqueue(encoder.encode(`data: ${JSON.stringify(done)}\n\ndata: [DONE]\n\n`)); controller.close(); };
+        if (inputText === 'local input') {
+          held.finish = finish;
+          request.signal.addEventListener('abort', () => { try { controller.close(); } catch { /* Already closed. */ } }, { once: true });
+        } else finish();
+      } }), { headers: { 'Content-Type': 'text/event-stream' } });
+    });
+    panel.open(false);
+    const send = (text: string) => {
+      const input = query<HTMLTextAreaElement>('[name="message"]');
+      input.value = text;
+      input.dispatchEvent(new window.Event('input', { bubbles: true }) as unknown as Event);
+      query<HTMLFormElement>('.pc-composer').requestSubmit();
+    };
+    send('local input');
+    await visible.promise;
+    const localNode = query('.pc-message');
+    await peer.send('peer input');
+    assert.equal(peer.error, null);
+    held.finish();
+    await completed[0]!.promise;
+    send('next input');
+    await completed[1]!.promise;
+    assert.deepEqual(nextContext, ['peer input', 'peer answer', 'local input', 'local answer', 'next input']);
+    const displayed = [...root.querySelectorAll<HTMLElement>('.pc-message .pc-text')].map((node) => node.textContent);
+    assert.deepEqual(displayed, [...nextContext, 'next answer']);
+    assert.equal([...root.querySelectorAll('.pc-message')][2], localNode, 'reconciliation retains the existing keyed node');
     assert.equal(query('.pc-error').hidden, true);
   });
 });

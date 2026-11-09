@@ -282,7 +282,7 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     render();
     if (!panel.hidden) (show ? url : input).focus();
   }
-  function appendEntry(entry: ChatEntry) {
+  function createEntry(entry: ChatEntry) {
     const element = document.createElement('div');
     element.className = 'pc-message';
     element.dataset.role = entry.role;
@@ -293,7 +293,6 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     text.className = 'pc-text';
     if (entry.role === 'action') { element.innerHTML = icon('spark'); element.append(text); }
     else element.append(author, text);
-    messages.append(element);
     const item = { element, text };
     nodes.set(entry.id, item);
     return item;
@@ -303,8 +302,11 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     const nearBottom = content.scrollHeight - content.scrollTop - content.clientHeight < 90;
     const live = new Set(runtime.entries.map((entry) => entry.id));
     for (const [id, node] of nodes) if (!live.has(id)) { node.element.remove(); nodes.delete(id); }
+    let cursor = messages.firstElementChild;
     for (const entry of runtime.entries) {
-      const node = nodes.get(entry.id) ?? appendEntry(entry);
+      const node = nodes.get(entry.id) ?? createEntry(entry);
+      if (node.element !== cursor) messages.insertBefore(node.element, cursor);
+      cursor = node.element.nextElementSibling;
       const text = entry.role === 'action' ? t.actions[entry.text as CompanionAction] ?? entry.text : entry.text;
       if (node.text.textContent !== text) node.text.textContent = text;
     }

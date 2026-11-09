@@ -364,7 +364,10 @@ export class Peetty {
     if (this.hidden || this.mode === 'paused' || this.mode === 'drag') {
       this.finishChatAction(new Error('Companion action interrupted.'));
     } else if (pending.action === 'move') {
-      if (this.mode === 'ground') this.finishChatAction();
+      if (this.mode === 'ground') {
+        if (this.perch?.clear) this.finishChatAction();
+        else this.finishChatAction(new Error('Companion move interrupted without a clear landing.'));
+      }
     } else if (this.mode !== 'ground') {
       this.finishChatAction(new Error('Companion action interrupted.'));
     } else if (this.clock >= pending.until) {
@@ -892,6 +895,7 @@ export class Peetty {
 
   /** Lets go; the viewport bottom catches her if nothing else does. A calm fall never frightens her. */
   private startFall(calm = false) {
+    if (this.actionCompletion?.action === 'move') this.finishChatAction(new Error('Companion move interrupted before landing.'));
     this.perch = null;
     this.jump = null;
     this.mode = 'fall';
