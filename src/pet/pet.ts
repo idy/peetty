@@ -318,7 +318,8 @@ export class Peetty {
 
   private chatClosed(): void {
     this.chatVisible = this.chatWorking = this.chatSpeaking = false;
-    this.overlay?.pet.setAttribute('aria-expanded', 'false');
+    if (this.options.chat === false) this.overlay?.pet.removeAttribute('aria-expanded');
+    else this.overlay?.pet.setAttribute('aria-expanded', 'false');
     if (this.mode === 'ground' && (this.action === 'think' || this.action === 'talk' || this.action === 'sit')) this.setAction('idle', 2);
   }
 
@@ -523,6 +524,21 @@ export class Peetty {
     };
     const pet = this.overlay!.pet;
     const menu = this.overlay!.menu;
+    let activatingChat = false;
+    const activateCompanion = () => {
+      if (activatingChat) return;
+      activatingChat = true;
+      const finished = () => { activatingChat = false; };
+      const action = this.options.chat === false ? Promise.resolve(this.greet()) : this.openChat();
+      void action.then(finished, finished);
+    };
+    on(pet, 'click', (e: MouseEvent) => {
+      // Pointer taps are handled on release; assistive/programmatic clicks have no pointer source.
+      if (e.detail || (e as PointerEvent).pointerType) return;
+      e.preventDefault();
+      e.stopPropagation();
+      activateCompanion();
+    });
     on(pet, 'pointerdown', (e: PointerEvent) => this.onDown(e));
     on(pet, 'contextmenu', (e: MouseEvent) => {
       e.preventDefault();
@@ -534,7 +550,7 @@ export class Peetty {
       this.place();
     });
     on(pet, 'keydown', (e: KeyboardEvent) => {
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void this.openChat(); }
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (!e.repeat) activateCompanion(); }
       else if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
         e.preventDefault(); this.menuPinned = true; menu.classList.add('show');
         menu.querySelector<HTMLButtonElement>('button')?.focus();
@@ -548,6 +564,8 @@ export class Peetty {
       if (e.key === 'Escape') { this.menuPinned = false; menu.classList.remove('show'); pet.focus(); }
     });
     if (this.options.chat === false) {
+      pet.setAttribute('aria-label', this.text.greet);
+      pet.removeAttribute('aria-haspopup');
       for (const button of menu.children) {
         if (['chat', 'configure'].includes(button.getAttribute('data-action') ?? '')) (button as HTMLElement).hidden = true;
       }

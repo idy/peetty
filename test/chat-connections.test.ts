@@ -1,6 +1,34 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { LOCAL_MAGPIE, localMagpieConnection } from '../src/chat/connections.ts';
+import { LOCAL_MAGPIE, localMagpieConnection, normalizeModelOptions } from '../src/chat/connections.ts';
+
+describe('model header validation', () => {
+  it('validates and canonicalizes a copied string-valued header record', () => {
+    const headers = { Authorization: '  Bearer gateway-secret  ', 'X-Api-Key': ' gateway-key ' };
+    const model = normalizeModelOptions({ id: 'model', baseUrl: 'https://api.example', headers });
+    assert.deepEqual(model.headers, { authorization: 'Bearer gateway-secret', 'x-api-key': 'gateway-key' });
+    assert.notEqual(model.headers, headers);
+    assert.deepEqual(headers, { Authorization: '  Bearer gateway-secret  ', 'X-Api-Key': ' gateway-key ' });
+  });
+
+  it('rejects malformed JavaScript header inputs with sanitized errors', () => {
+    const throwing = Object.defineProperty({}, 'Authorization', { enumerable: true, get() { throw new Error('private-secret'); } });
+    const invalid: unknown[] = [
+      null, 123, 'private-secret', [], new Headers({ Authorization: 'private-secret' }),
+      { Authorization: 123 }, { Authorization: null }, { 'X-Key': undefined },
+      { 'bad header': 'private-secret' },
+      { Authorization: 'Bearer private-secret' + String.fromCharCode(13, 10) + 'X-Injected: true' },
+      throwing,
+    ];
+    for (const headers of invalid) {
+      assert.throws(() => normalizeModelOptions({ id: 'model', baseUrl: 'https://api.example', headers: headers as Record<string, string> }), (error: Error) => {
+        assert.equal(error.message, 'Enter a valid API base URL and model ID.');
+        assert.ok(!error.message.includes('private-secret'));
+        return true;
+      });
+    }
+  });
+});
 
 describe('local Magpie shortcut credentials', () => {
   it('uses the default loopback gateway without embedding credentials or a model choice', () => {

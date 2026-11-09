@@ -18,11 +18,22 @@ export function normalizeModelOptions(model: PeettyModelOptions): PeettyModelOpt
     if (!id || id.length > 200 || /[\r\n]/.test(id)) throw new Error();
     if (model.apiKey !== undefined && typeof model.apiKey !== 'string') throw new Error();
     if (model.getApiKey !== undefined && typeof model.getApiKey !== 'function') throw new Error();
+    let headers: Record<string, string> | undefined;
+    const suppliedHeaders = model.headers;
+    if (suppliedHeaders !== undefined) {
+      if (Object.prototype.toString.call(suppliedHeaders) !== '[object Object]') throw new Error();
+      const normalized = new Headers();
+      for (const [name, value] of Object.entries(suppliedHeaders)) {
+        if (typeof value !== 'string') throw new Error();
+        normalized.set(name, value);
+      }
+      headers = Object.fromEntries(normalized.entries());
+    }
     return {
       id, baseUrl: normalizeBaseUrl(model.baseUrl),
       ...(model.apiKey !== undefined ? { apiKey: model.apiKey.trim() } : {}),
       ...(model.getApiKey ? { getApiKey: model.getApiKey } : {}),
-      ...(model.headers ? { headers: { ...model.headers } } : {}),
+      ...(headers ? { headers } : {}),
     };
   } catch { throw new Error('Enter a valid API base URL and model ID.'); }
 }

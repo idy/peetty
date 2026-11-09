@@ -239,6 +239,10 @@ describe('local persistence and credential ownership', () => {
       { ...MODEL, id: 'x'.repeat(201) },
       { ...MODEL, baseUrl: 'https://user:private-secret@new.example/' },
       { ...MODEL, baseUrl: 'file:///private-secret' },
+      { ...MODEL, headers: { Authorization: 123 } as unknown as Record<string, string> },
+      { ...MODEL, headers: { 'x-api-key': null } as unknown as Record<string, string> },
+      { ...MODEL, headers: { 'bad header': 'private-secret' } },
+      { ...MODEL, headers: { Authorization: 'Bearer private-secret\r\nX-Injected: true' } },
     ]) {
       await assert.rejects(runtime.configure(replacement, true), (error: Error) => {
         assert.match(error.message, /valid API base URL and model ID/);

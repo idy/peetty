@@ -1081,6 +1081,7 @@ describe('chat entry points and SDK model injection', () => {
     for (const replacement of [
       { ...original, baseUrl: 'https://user:private-secret@new.example/' },
       { ...original, id: '' },
+      { ...original, headers: { Authorization: 123 } as unknown as Record<string, string> },
     ]) {
       await assert.rejects(pet.setModel(replacement), (error: Error) => error.message.includes('valid API base URL and model ID') && !error.message.includes('private-secret'));
       assert.deepEqual((pet as unknown as { options: { model: unknown } }).options.model, original);
@@ -1123,6 +1124,60 @@ describe('chat entry points and SDK model injection', () => {
     first.resolve();
     await old;
     assert.equal((pet as unknown as { options: { model: PeettyModelOptions } }).options.model.id, 'second');
+  });
+
+  it('opens chat from a synthesized click with no pointer or keyboard events', async (t) => {
+    const { pet, state } = await mountPet(t);
+    stand(state);
+    const open = mock.method(pet, 'openChat', async () => {});
+    const click = new Event('click', { bubbles: true, cancelable: true });
+    state.overlay.pet.dispatchEvent(click);
+    assert.equal(open.mock.callCount(), 1);
+    assert.equal(click.defaultPrevented, true);
+    await turns();
+    state.overlay.pet.dispatchEvent(Object.assign(new Event('click'), { detail: 0, pointerType: '' }));
+    assert.equal(open.mock.callCount(), 2);
+  });
+
+  for (const device of ['mouse', 'touch'] as const) {
+    it(`ignores ${device} compatibility clicks after handling pointer releases`, async (t) => {
+      const { dom, pet, state } = await mountPet(t);
+      stand(state);
+      const open = mock.method(pet, 'openChat', async () => {});
+      for (let i = 0; i < 2; i++) {
+        state.overlay.pet.dispatchEvent(Object.assign(pointer('pointerdown', 1), { pointerType: device }));
+        dom.window.dispatchEvent(Object.assign(pointer('pointerup', 1), { pointerType: device }));
+        state.overlay.pet.dispatchEvent(Object.assign(new Event('click'), { detail: device === 'touch' ? 0 : i + 1, pointerType: device }));
+        assert.equal(open.mock.callCount(), i);
+        if (!i) dom.frame(100);
+      }
+    });
+  }
+
+  for (const key of ['Enter', ' '] as const) {
+    it(`does not duplicate ${JSON.stringify(key)} activation through key repeat or a synthesized click`, async (t) => {
+      const { pet, state } = await mountPet(t);
+      stand(state);
+      const open = mock.method(pet, 'openChat', async () => {});
+      state.overlay.pet.dispatchEvent(Object.assign(new Event('keydown', { cancelable: true }), { key, repeat: false }));
+      state.overlay.pet.dispatchEvent(Object.assign(new Event('keydown', { cancelable: true }), { key, repeat: true }));
+      state.overlay.pet.dispatchEvent(Object.assign(new Event('click'), { detail: 0, pointerType: '' }));
+      assert.equal(open.mock.callCount(), 1);
+    });
+  }
+
+  it('keeps synthesized activation local when chat is disabled', async (t) => {
+    const { pet, state } = await mountPet(t, { chat: false, language: 'en' });
+    stand(state);
+    const network = mock.method(globalThis, 'fetch', async () => { throw new Error('unexpected network'); });
+    state.overlay.pet.dispatchEvent(new Event('click'));
+    assert.equal(state.action, 'wave');
+    assert.equal(state.overlay.pet.getAttribute('aria-label'), 'Say hi');
+    assert.equal(state.overlay.pet.getAttribute('aria-haspopup'), null);
+    pet.closeChat();
+    assert.equal(state.overlay.pet.getAttribute('aria-expanded'), null);
+    assert.equal((pet as unknown as { chatLoading: unknown }).chatLoading, null);
+    assert.equal(network.mock.callCount(), 0);
   });
 
   it('opens chat once on a double tap and cancels the delayed greeting', async (t) => {
