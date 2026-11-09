@@ -49,10 +49,7 @@
     syncPlaceholder();
     if (IdySite.language === language) return;
     language = IdySite.language;
-    if (pet) {
-      pet.destroy();
-      start();
-    }
+    pet?.setLanguage(language);
   });
 
   for (const button of document.querySelectorAll('[data-peetty-chat]')) {

@@ -242,6 +242,27 @@ export class Peetty {
     this.chatClosed();
   }
 
+  /** Changes interface language in place. Unsupported values throw without changing the session. */
+  setLanguage(language: Language | 'auto'): void {
+    if (language !== 'en' && language !== 'zh' && language !== 'auto') {
+      throw new TypeError('Language must be en, zh, or auto.');
+    }
+    const resolved = languageOf(language);
+    this.options = { ...this.options, language };
+    this.text = strings(resolved);
+    const overlay = this.overlay;
+    if (overlay) {
+      overlay.pet.setAttribute('aria-label', this.options.chat === false ? this.text.greet : this.text.pet);
+      overlay.menu.setAttribute('aria-label', this.text.menu);
+      for (const button of overlay.menu.children) {
+        const action = button.getAttribute('data-action') as MenuAction;
+        button.textContent = this.text[action];
+      }
+      overlay.invalidate(overlay.menu);
+    }
+    this.chatPanel?.setLanguage(resolved);
+  }
+
   /** Replaces the injected model and aborts an unfinished reply. Credentials stay in memory. */
   async setModel(model: PeettyModelOptions): Promise<void> {
     const next = normalizeModelOptions(model);
@@ -288,6 +309,7 @@ export class Peetty {
         });
       }).then((panel) => {
         if (generation !== this.generation) { panel?.destroy(); return null; }
+        panel?.setLanguage(languageOf(this.options.language));
         this.chatPanel = panel;
         return panel;
       }).catch(() => {

@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
+import { fileURLToPath } from 'node:url';
+import { runInThisContext } from 'node:vm';
 import { afterEach, describe, it, mock } from 'node:test';
+import { build } from 'esbuild';
 import { Peetty } from '../src/pet/pet.ts';
 import { AUTONOMOUS_ACTIONS, type Figure, type RigFigure } from '../src/figure/types.ts';
 import type { FigureView } from '../src/figure/view.ts';
@@ -8,6 +11,7 @@ import { floor, limits, type Perch, type PerchOptions } from '../src/pet/perches
 import { planJump, weighted } from '../src/pet/physics.ts';
 import type { Overlay } from '../src/pet/ui.ts';
 import type { CompanionAction, PeettyModelOptions } from '../src/chat/types.ts';
+import { languageOf, strings, type Language } from '../src/pet/i18n.ts';
 import { deferred, ElementStub, installPetDOM, pointer } from './helpers/pet-dom.ts';
 
 /** Inspect controller state while driving its public methods, events and frame loop. */
@@ -64,18 +68,43 @@ function stand(state: Controller, x = 300) {
   return perch;
 }
 
-function attachChatPanel(pet: Peetty, setModel: (model: PeettyModelOptions) => Promise<void> = async () => {}) {
-  const panel = {
+function chatPanelStub(setModel: (model: PeettyModelOptions) => Promise<void> = async () => {}) {
+  return {
     isOpen: false,
+    language: 'en' as Language,
     open() { this.isOpen = true; },
     close() { this.isOpen = false; },
+    setLanguage(language: Language) { this.language = language; },
     setModel,
     destroy() { this.isOpen = false; },
   };
+}
+
+function attachChatPanel(pet: Peetty, setModel: (model: PeettyModelOptions) => Promise<void> = async () => {}) {
+  const panel = chatPanelStub(setModel);
   const host = pet as unknown as { chatPanel: typeof panel; chatLoading: Promise<typeof panel> };
   host.chatPanel = panel;
   host.chatLoading = Promise.resolve(panel);
   return panel;
+}
+
+/** Exercise the real initialization chain with only the lazy chat module replaced. */
+async function petWithChatLoader(loadChatPanel: typeof import('../src/chat/load.ts').loadChatPanel): Promise<typeof Peetty> {
+  const result = await build({
+    entryPoints: [fileURLToPath(new URL('../src/pet/pet.ts', import.meta.url))],
+    bundle: true, write: false, platform: 'node', format: 'cjs',
+    plugins: [{
+      name: 'deferred-chat-loader',
+      setup(builder) {
+        builder.onLoad({ filter: /\/chat\/load\.ts$/ }, () => ({
+          contents: 'export const loadChatPanel = () => loadChatPanelForTest();',
+        }));
+      },
+    }],
+  });
+  const module = { exports: {} as { Peetty: typeof Peetty } };
+  runInThisContext(`(function(module, loadChatPanelForTest) { ${result.outputFiles[0]!.text}\n})`)(module, loadChatPanel);
+  return module.exports.Peetty;
 }
 
 describe('mount and figure request ownership', () => {
@@ -1061,6 +1090,186 @@ describe('multiple companions and physical chat actions', () => {
       await rejected;
     });
   }
+});
+
+describe('in-place interface language', () => {
+  it('updates overlay and existing panel without replacing the session or interrupting an action', async (t) => {
+    const { dom, pet, state } = await mountPet(t, { language: 'en' });
+    stand(state);
+    const panel = attachChatPanel(pet);
+    await pet.openChat();
+    const overlay = state.overlay;
+    const view = state.view;
+    const figure = state.figure;
+    const buttons = [...overlay.menu.children];
+    const frames = [...dom.frames.keys()];
+    const localize = mock.method(panel, 'setLanguage');
+    const model = mock.method(panel, 'setModel');
+    const destroyPanel = mock.method(panel, 'destroy');
+    const destroyPet = mock.method(pet, 'destroy');
+    const mount = mock.method(pet, 'mount');
+    pet.say('Keep this reply visible');
+    const running = state.performChatAction('wave');
+    const deadline = state.until;
+    overlay.menu.classList.add('show');
+    overlay.measure(overlay.menu);
+    const menu = overlay.menu as unknown as ElementStub;
+    const dimensions = menu.dimensionReads;
+
+    assert.equal(pet.setLanguage('zh'), undefined, 'language switching is synchronous');
+    assert.equal(state.overlay, overlay);
+    assert.equal(state.view, view);
+    assert.equal(state.figure, figure);
+    assert.equal(dom.hosts.length, 1);
+    assert.deepEqual([...dom.frames.keys()], frames);
+    assert.deepEqual([...overlay.menu.children], buttons);
+    assert.equal(overlay.pet.getAttribute('aria-label'), strings('zh').pet);
+    assert.equal(overlay.menu.getAttribute('aria-label'), strings('zh').menu);
+    for (const button of buttons) {
+      const action = button.getAttribute('data-action') as 'chat' | 'greet' | 'move' | 'nap' | 'configure' | 'hide';
+      assert.equal(button.textContent, strings('zh')[action]);
+    }
+    overlay.measure(overlay.menu);
+    assert.equal(menu.dimensionReads, dimensions + 2, 'translated menu dimensions must be remeasured');
+    assert.equal(overlay.menu.classList.contains('show'), true);
+    assert.equal(overlay.pet.getAttribute('aria-expanded'), 'true');
+    assert.equal(overlay.bubble.textContent, 'Keep this reply visible');
+    assert.equal(overlay.bubble.classList.contains('show'), true);
+    assert.equal(panel.isOpen, true);
+    assert.equal(panel.language, 'zh');
+    assert.deepEqual(localize.mock.calls.map((call) => call.arguments), [['zh']]);
+    assert.equal(model.mock.callCount(), 0);
+    assert.equal(destroyPanel.mock.callCount(), 0);
+    assert.equal(destroyPet.mock.callCount(), 0);
+    assert.equal(mount.mock.callCount(), 0);
+    assert.equal(state.action, 'wave');
+    assert.equal(state.until, deadline);
+    for (let i = 0; i < 180; i++) dom.frame(20);
+    assert.equal(await running, 'Finished wave.');
+    assert.equal((pet as unknown as { options: { language: string } }).options.language, 'zh');
+  });
+
+  it('keeps chat:false activation and greetings local in the new language', async (t) => {
+    const { dom, pet, state } = await mountPet(t, { chat: false, language: 'en' });
+    stand(state);
+    const network = mock.method(globalThis, 'fetch', async () => { throw new Error('unexpected network'); });
+    pet.setLanguage('zh');
+    assert.equal(state.overlay.pet.getAttribute('aria-label'), strings('zh').greet);
+    assert.equal(state.overlay.pet.getAttribute('aria-haspopup'), null);
+    assert.equal(state.overlay.pet.getAttribute('aria-expanded'), null);
+    for (const button of state.overlay.menu.children) {
+      if (['chat', 'configure'].includes(button.getAttribute('data-action') ?? '')) assert.equal((button as HTMLElement).hidden, true);
+    }
+    state.overlay.pet.dispatchEvent(new Event('click'));
+    dom.frame(400);
+    assert.ok((strings('zh').hello as readonly string[]).includes(state.overlay.bubble.textContent ?? ''));
+    assert.equal((pet as unknown as { chatLoading: unknown }).chatLoading, null);
+    assert.equal(network.mock.callCount(), 0);
+  });
+
+  it('uses the latest language when a pending figure is first mounted and resolves auto', async (t) => {
+    const dom = installPetDOM(t);
+    const figure = deferred<Response>();
+    mock.method(globalThis, 'fetch', () => figure.promise);
+    const pet = new Peetty({ figure: '/pending-language.json', language: 'en', greet: false });
+    dom.cleanup(() => pet.destroy());
+    const mounting = pet.mount();
+    pet.setLanguage('zh');
+    figure.resolve(response(PRESETS.miru));
+    await mounting;
+    const state = controller(pet);
+    assert.equal(state.overlay.menu.getAttribute('aria-label'), strings('zh').menu);
+    pet.setLanguage('auto');
+    assert.equal(state.overlay.menu.getAttribute('aria-label'), strings(languageOf('auto')).menu);
+    assert.equal((pet as unknown as { options: { language: string } }).options.language, 'auto');
+  });
+
+  it('applies the latest language before publishing and opening a panel initialized asynchronously', async (t) => {
+    const module = deferred<Awaited<ReturnType<typeof import('../src/chat/load.ts').loadChatPanel>>>();
+    const ready = deferred<ReturnType<typeof chatPanelStub>>();
+    const IsolatedPeetty = await petWithChatLoader(() => module.promise);
+    const dom = installPetDOM(t);
+    const pet = new IsolatedPeetty({ language: 'en', greet: false });
+    dom.cleanup(() => pet.destroy());
+    const create = mock.fn(async (_options: { language: Language }) => ready.promise);
+    const opening = pet.openChat();
+    await turns();
+    pet.setLanguage('zh');
+    module.resolve({ createChatPanel: create });
+    await turns();
+    assert.equal(create.mock.callCount(), 1);
+    assert.equal(create.mock.calls[0]!.arguments[0].language, 'zh');
+    pet.setLanguage('zh');
+    pet.setLanguage('en');
+    const panel = chatPanelStub();
+    const events: string[] = [];
+    mock.method(panel, 'setLanguage', (language: Language) => {
+      assert.equal((pet as unknown as { chatPanel: unknown }).chatPanel, null);
+      panel.language = language;
+      events.push(`language:${language}`);
+    });
+    mock.method(panel, 'open', () => { panel.isOpen = true; events.push('open'); });
+    ready.resolve(panel);
+    await opening;
+    assert.deepEqual(events, ['language:en', 'open']);
+    assert.equal(panel.language, 'en');
+    assert.equal((pet as unknown as { chatPanel: unknown }).chatPanel, panel);
+    assert.equal(controller(pet).overlay.menu.getAttribute('aria-label'), strings('en').menu);
+  });
+
+  for (const interruption of ['closeChat', 'destroy'] as const) {
+    it(`preserves ${interruption} ownership when language changes during panel initialization`, async (t) => {
+      const ready = deferred<ReturnType<typeof chatPanelStub>>();
+      const create = mock.fn(async () => ready.promise);
+      const IsolatedPeetty = await petWithChatLoader(async () => ({ createChatPanel: create }));
+      const dom = installPetDOM(t);
+      const pet = new IsolatedPeetty({ language: 'en', greet: false });
+      dom.cleanup(() => pet.destroy());
+      const opening = pet.openChat();
+      await turns();
+      assert.equal(create.mock.callCount(), 1);
+      pet.setLanguage('zh');
+      pet[interruption]();
+      const panel = chatPanelStub();
+      const localize = mock.method(panel, 'setLanguage');
+      const open = mock.method(panel, 'open');
+      const destroy = mock.method(panel, 'destroy');
+      ready.resolve(panel);
+      await opening;
+      assert.equal(open.mock.callCount(), 0);
+      assert.equal(destroy.mock.callCount(), interruption === 'destroy' ? 1 : 0);
+      assert.deepEqual(localize.mock.calls.map((call) => call.arguments), interruption === 'destroy' ? [] : [['zh']]);
+    });
+  }
+
+  it('retains a concurrent language change when an asynchronous model update finishes', async (t) => {
+    const { pet, state } = await mountPet(t, { language: 'en' });
+    const applying = deferred<void>();
+    const panel = attachChatPanel(pet, () => applying.promise);
+    const next = { id: 'new-model', baseUrl: 'https://new.example/v1', apiKey: 'ephemeral-key' };
+    const updating = pet.setModel(next);
+    pet.setLanguage('zh');
+    applying.resolve();
+    await updating;
+    assert.equal(panel.language, 'zh');
+    assert.equal(state.overlay.pet.getAttribute('aria-label'), strings('zh').pet);
+    const options = (pet as unknown as { options: { language: string; model: PeettyModelOptions } }).options;
+    assert.equal(options.language, 'zh');
+    assert.deepEqual(options.model, next);
+  });
+
+  it('rejects unsupported values without echoing input or changing the current language', async (t) => {
+    const { pet, state } = await mountPet(t, { language: 'en' });
+    const panel = attachChatPanel(pet);
+    const localize = mock.method(panel, 'setLanguage');
+    const invalid = [null, undefined, 1, '', 'fr', 'private-secret', { toString() { throw new Error('must not coerce input'); } }];
+    for (const value of invalid) {
+      assert.throws(() => pet.setLanguage(value as Language), { name: 'TypeError', message: 'Language must be en, zh, or auto.' });
+    }
+    assert.equal((pet as unknown as { options: { language: string } }).options.language, 'en');
+    assert.equal(state.overlay.pet.getAttribute('aria-label'), strings('en').pet);
+    assert.equal(localize.mock.callCount(), 0);
+  });
 });
 
 describe('chat entry points and SDK model injection', () => {

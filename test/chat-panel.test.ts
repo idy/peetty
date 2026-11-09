@@ -16,17 +16,35 @@ async function mountPanel(t: TestContext, model: PeettyModelOptions, options: {
   chat?: PeettyChatOptions;
   onReply?: (text: string) => void;
   onState?: (busy: boolean, speaking: boolean) => void;
+  rejectHTML?: boolean;
 } = {}) {
   const window = new Window({ url: 'https://host.example/' });
   const document = window.document as unknown as Document;
   const restore = stubGlobals({ window, document, location: window.location, HTMLElement: window.HTMLElement });
   let panel: ChatPanel | undefined;
+  let htmlWrites = 0;
+  const restoreSinks: (() => void)[] = [];
   t.after(async () => {
     panel?.destroy();
+    for (const restoreSink of restoreSinks.reverse()) restoreSink();
     await window.happyDOM.abort();
     window.close();
     restore();
   });
+  if (options.rejectHTML) {
+    const patched = new Set<object>();
+    for (const start of [window.HTMLElement.prototype, window.SVGElement.prototype]) {
+      let prototype: object | null = start;
+      while (prototype && !Object.getOwnPropertyDescriptor(prototype, 'innerHTML')?.set) prototype = Object.getPrototypeOf(prototype) as object | null;
+      assert.ok(prototype, 'the DOM fixture exposes the HTML setter');
+      if (patched.has(prototype)) continue;
+      patched.add(prototype);
+      const descriptor = Object.getOwnPropertyDescriptor(prototype, 'innerHTML')!;
+      const target = prototype;
+      Object.defineProperty(target, 'innerHTML', { ...descriptor, set() { htmlWrites++; throw new TypeError('TrustedHTML required.'); } });
+      restoreSinks.push(() => Object.defineProperty(target, 'innerHTML', descriptor));
+    }
+  }
   const host = document.createElement('div');
   document.body.append(host);
   const root = host.attachShadow({ mode: 'open' });
@@ -36,8 +54,182 @@ async function mountPanel(t: TestContext, model: PeettyModelOptions, options: {
   });
   panel.open(true);
   const query = <T extends HTMLElement>(selector: string) => root.querySelector<T>(selector)!;
-  return { panel, root, window, query };
+  return { panel, root, window, query, htmlWrites: () => htmlWrites };
 }
+
+describe('chat panel DOM and keyboard boundaries', () => {
+  it('renders setup, icons, actions and replies with HTML string sinks blocked', { timeout: 10000 }, async (t) => {
+    const completed = deferred<void>();
+    let busySeen = false;
+    const { panel, query, root, htmlWrites, window } = await mountPanel(t, MODEL, {
+      rejectHTML: true,
+      onState: (busy) => { if (busy) busySeen = true; else if (busySeen) completed.resolve(); },
+    });
+    let chatRequests = 0;
+    t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
+      if (request.method === 'GET') return Response.json({ data: [{ id: MODEL.id }] });
+      chatRequests++;
+      const body = await request.json() as { messages: { role: string }[] };
+      const afterTool = body.messages.some((message) => message.role === 'tool');
+      const delta = afterTool ? { role: 'assistant', content: 'A safe reply.' } : {
+        role: 'assistant', tool_calls: [{ index: 0, id: 'wave', type: 'function', function: { name: 'companion_action', arguments: JSON.stringify({ action: 'wave' }) } }],
+      };
+      const chunk = { id: 'safe', object: 'chat.completion.chunk', created: 1, model: MODEL.id, choices: [{ index: 0, delta, finish_reason: null }] };
+      const done = { ...chunk, choices: [{ index: 0, delta: {}, finish_reason: afterTool ? 'stop' : 'tool_calls' }] };
+      return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: ${JSON.stringify(done)}\n\ndata: [DONE]\n\n`, { headers: { 'Content-Type': 'text/event-stream' } });
+    });
+    query<HTMLButtonElement>('.pc-show-key').click();
+    assert.equal(query<HTMLInputElement>('[name="key"]').type, 'text');
+    query<HTMLButtonElement>('.pc-load').click();
+    await flush();
+    assert.equal(query<HTMLSelectElement>('.pc-models').value, MODEL.id);
+    query<HTMLButtonElement>('.pc-settings').click();
+    panel.setLanguage('zh');
+    const input = query<HTMLTextAreaElement>('[name="message"]');
+    input.value = '挥手';
+    input.dispatchEvent(new window.Event('input', { bubbles: true }) as unknown as Event);
+    query<HTMLFormElement>('.pc-composer').requestSubmit();
+    await completed.promise;
+    assert.equal(chatRequests, 2);
+    assert.match(query('.pc-messages').textContent ?? '', /A safe reply/);
+    assert.equal(root.querySelector('.pc-message[data-role="action"] svg')?.namespaceURI, 'http://www.w3.org/2000/svg');
+    assert.equal(query('.pc-submit').getAttribute('aria-label'), '发送消息');
+    assert.equal(query('.pc-error').hidden, true);
+    query<HTMLButtonElement>('.pc-close').click();
+    assert.equal(panel.isOpen, false);
+    assert.equal(htmlWrites(), 0);
+  });
+
+  it('contains keydown, keypress and keyup without disabling ordinary host shortcuts', async (t) => {
+    const { panel, query, window } = await mountPanel(t, MODEL);
+    const hostEvents: string[] = [];
+    for (const type of ['keydown', 'keypress', 'keyup']) {
+      window.document.addEventListener(type, () => hostEvents.push(type));
+      window.addEventListener(type, () => hostEvents.push(type));
+    }
+    const dispatch = (target: HTMLElement) => {
+      for (const type of ['keydown', 'keypress', 'keyup']) {
+        const event = new window.KeyboardEvent(type, { key: 'j', code: 'KeyJ', bubbles: true, composed: true, cancelable: true });
+        target.dispatchEvent(event as unknown as Event);
+        assert.equal(event.defaultPrevented, false, 'ordinary editing keeps its default behavior');
+      }
+    };
+    dispatch(query<HTMLInputElement>('[name="url"]'));
+    dispatch(query<HTMLInputElement>('[name="key"]'));
+    panel.open(false);
+    dispatch(query<HTMLTextAreaElement>('[name="message"]'));
+    assert.deepEqual(hostEvents, []);
+    window.document.body.dispatchEvent(new window.KeyboardEvent('keyup', { key: 'j', bubbles: true, composed: true }));
+    assert.ok(hostEvents.length > 0);
+  });
+});
+
+describe('chat panel live language changes', () => {
+  for (const available of [true, false]) {
+    it(`preserves the active turn, draft and unsaved credentials with storage ${available ? 'available' : 'unavailable'}`, { timeout: 10000 }, async (t) => {
+      const storage = available ? installChatIndexedDB(t) : undefined;
+      if (!available) t.after(stubGlobals({ indexedDB: undefined }));
+      const saves = t.mock.method(BrowserChatStore.prototype, 'saveConnection');
+      const streaming = deferred<void>();
+      const completed = [deferred<void>(), deferred<void>()];
+      let busySeen = false;
+      let turns = 0;
+      const { panel, query, root, window } = await mountPanel(t, { ...MODEL, apiKey: 'fixture-ephemeral-key' }, {
+        chat: { persist: true, storageKey: 'language-session' },
+        onState(busy, speaking) {
+          if (busy) { busySeen = true; if (speaking) streaming.resolve(); }
+          else if (busySeen) { busySeen = false; completed[turns++]?.resolve(); }
+        },
+      });
+      const remember = query<HTMLInputElement>('[name="remember"]');
+      remember.checked = false;
+      query<HTMLFormElement>('.pc-setup').requestSubmit();
+      await flush();
+      assert.equal(query('.pc-setup').hidden, true);
+      assert.equal(saves.mock.callCount(), 1);
+      assert.equal(query('.pc-storage').hidden, available);
+      const savedConnection = () => storage?.databases.get('language-session:chat')?.get('connection') as { apiKey?: string } | undefined;
+      if (available) { assert.ok(savedConnection()); assert.equal(savedConnection()?.apiKey, undefined); }
+      const authorization: (string | null)[] = [];
+      const contexts: string[][] = [];
+      let finishFirst: () => void = () => { throw new Error('The first stream has not started.'); };
+      let activeSignal: AbortSignal | undefined;
+      t.mock.method(globalThis, 'fetch', async (url: RequestInfo | URL, init?: RequestInit) => {
+        const request = new Request(url, init);
+        authorization.push(request.headers.get('authorization'));
+        const body = await request.json() as { messages: { role: string; content: string | { text?: string }[] }[] };
+        contexts.push(body.messages.filter(message => message.role === 'user' || message.role === 'assistant').map(message => typeof message.content === 'string' ? message.content : message.content.map(part => part.text ?? '').join('')));
+        const answer = authorization.length === 1 ? 'First answer' : 'Second answer';
+        const chunk = { id: 'language', object: 'chat.completion.chunk', created: 1, model: MODEL.id, choices: [{ index: 0, delta: { role: 'assistant', content: answer }, finish_reason: null }] };
+        const done = { ...chunk, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] };
+        return new Response(new ReadableStream({ start(controller) {
+          const encoder = new TextEncoder();
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+          const finish = () => { controller.enqueue(encoder.encode(`data: ${JSON.stringify(done)}\n\ndata: [DONE]\n\n`)); controller.close(); };
+          if (authorization.length === 1) { finishFirst = finish; activeSignal = request.signal; }
+          else finish();
+        } }), { headers: { 'Content-Type': 'text/event-stream' } });
+      });
+      const input = query<HTMLTextAreaElement>('[name="message"]');
+      const edit = (element: HTMLInputElement | HTMLTextAreaElement, value: string) => {
+        element.value = value;
+        element.dispatchEvent(new window.Event('input', { bubbles: true }) as unknown as Event);
+      };
+      edit(input, 'Before language switch');
+      query<HTMLFormElement>('.pc-composer').requestSubmit();
+      await streaming.promise;
+      const messageNodes = [...root.querySelectorAll('.pc-message')];
+      edit(input, 'An unsent draft');
+      input.focus();
+      input.setSelectionRange(2, 8);
+      panel.setLanguage('zh');
+      assert.equal(panel.isOpen, true);
+      assert.equal(query('.pc-composer').hidden, false);
+      assert.equal(query('.peetty-chat').getAttribute('lang'), 'zh');
+      assert.equal(query('.peetty-chat').getAttribute('aria-label'), '和 Peetty 聊天');
+      assert.equal(query('.pc-submit').getAttribute('aria-label'), '停止回复');
+      assert.equal(input.value, 'An unsent draft');
+      assert.deepEqual([input.selectionStart, input.selectionEnd], [2, 8]);
+      assert.equal(root.activeElement, input);
+      assert.deepEqual([...root.querySelectorAll('.pc-message')], messageNodes);
+      assert.equal(activeSignal?.aborted, false);
+      assert.equal(saves.mock.callCount(), 1);
+      finishFirst();
+      await completed[0]!.promise;
+      assert.match(query('.pc-messages').textContent ?? '', /First answer/);
+      query<HTMLButtonElement>('.pc-settings').click();
+      const url = query<HTMLInputElement>('[name="url"]');
+      const key = query<HTMLInputElement>('[name="key"]');
+      assert.equal(key.value, 'fixture-ephemeral-key');
+      edit(url, 'https://draft.example/v1');
+      edit(key, 'fixture-unsaved-key');
+      query<HTMLInputElement>('[name="model"]').value = 'draft-model';
+      query<HTMLButtonElement>('.pc-show-key').click();
+      key.focus();
+      key.setSelectionRange(1, 5);
+      panel.setLanguage('en');
+      assert.equal(query('.pc-setup').hidden, false);
+      assert.equal(url.value, 'https://draft.example/v1');
+      assert.equal(key.value, 'fixture-unsaved-key');
+      assert.equal(key.type, 'text');
+      assert.deepEqual([key.selectionStart, key.selectionEnd], [1, 5]);
+      assert.equal(query<HTMLInputElement>('[name="model"]').value, 'draft-model');
+      assert.equal(remember.checked, false);
+      assert.equal(saves.mock.callCount(), 1);
+      query<HTMLButtonElement>('.pc-settings').click();
+      assert.equal(input.value, 'An unsent draft');
+      edit(input, 'After language switch');
+      query<HTMLFormElement>('.pc-composer').requestSubmit();
+      await completed[1]!.promise;
+      assert.deepEqual(authorization, ['Bearer fixture-ephemeral-key', 'Bearer fixture-ephemeral-key']);
+      assert.deepEqual(contexts[1], ['Before language switch', 'First answer', 'After language switch']);
+      assert.match(query('.pc-messages').textContent ?? '', /Second answer/);
+      assert.equal(query('.pc-error').hidden, true);
+      if (available) assert.equal(savedConnection()?.apiKey, undefined);
+    });
+  }
+});
 
 describe('chat panel turn ownership', () => {
   it('does not announce a peer reply refreshed during a silent turn', { timeout: 10000 }, async (t) => {

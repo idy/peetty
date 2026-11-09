@@ -2,66 +2,8 @@ import { abortable, ChatRuntime, fetchModelList, normalizeBaseUrl } from './runt
 import { LOCAL_MAGPIE, localMagpieConnection } from './connections.ts';
 import type { ChatEntry, CompanionAction, PeettyChatOptions, PeettyModelOptions } from './types.ts';
 import type { Language } from '../pet/i18n.ts';
-
-const COPY = {
-  en: {
-    chat: 'Chat with Peetty', settings: 'Connection settings', close: 'Close chat', back: 'Back to chat',
-    title: 'A little company.', intro: 'Connect your own model, then make yourself at home.',
-    magpie: 'Use local Magpie', magpieKey: 'Magpie gateway key',
-    magpieHint: 'Start Magpie on this device. In Settings → Network and sharing → Web pages, allow this website:',
-    magpieAuth: 'Enter your Magpie gateway key and load models. HTTPS-to-loopback access depends on browser support and may require local-network permission.',
-    url: 'API URL', key: 'API key', show: 'Show key', hide: 'Hide key', optional: 'Optional for local models',
-    load: 'Load models', loading: 'Loading models…', manual: 'Enter a model ID', model: 'Model', choose: 'Choose a model',
-    remember: 'Remember my key on this device', keyNote: 'Saved on this website. Other scripts on this site can access a saved key.',
-    privacy: 'Only your conversation is sent to your chosen endpoint. Page content is not collected.',
-    connect: 'Save and start chatting', connected: 'Connected to', empty: 'What’s on your mind?',
-    emptyBody: 'Tell me about your day. Or ask me to wave, sit down, or take a little nap.',
-    placeholder: 'Say something…', send: 'Send message', stop: 'Stop response', thinking: 'Thinking…',
-    footer: 'Your conversation stays in this browser.', clear: 'Clear conversation', confirmClear: 'Clear this conversation?',
-    clearNow: 'Clear', cancel: 'Keep it', storage: 'Browser storage is unavailable. This conversation will last for this visit only.',
-    network: 'Check the API URL, key and model. Your endpoint must allow browser requests (CORS).',
-    modelsFailed: 'Couldn’t load models. You can enter a model ID instead.', modelsEmpty: 'No models were returned. Enter a model ID.',
-    authFailed: 'The endpoint rejected access. Check your API key and its permissions.',
-    magpieAuthFailed: 'Magpie rejected gateway authentication. Create or check a key on Magpie’s Gateway page and enter it here. Allowing a website does not replace a gateway key.',
-    invalid: 'Enter an HTTP or HTTPS API URL and a model ID.', keyProvided: 'Provided by this page',
-    you: 'You', companion: 'Peetty', reply: 'Reply received.', connectFirst: 'Connect a model to start chatting.',
-    actions: { wave: 'Waved hello', sit: 'Sat down', lie: 'Lay down', sleep: 'Took a nap', move: 'Looked for another spot', idle: 'Settled down' },
-  },
-  zh: {
-    chat: '和 Peetty 聊天', settings: '连接配置', close: '收起聊天', back: '返回聊天',
-    title: '在这里，陪你聊聊。', intro: '连接你自己的模型，就可以开始聊天了。',
-    magpie: '使用本机 Magpie', magpieKey: 'Magpie 网关 key',
-    magpieHint: '先启动这台设备上的 Magpie，在「设置 → 网络与共享 → 网页」中允许此网站：',
-    magpieAuth: '再填入 Magpie 网关 key，获取模型。HTTPS 页面连接本机 HTTP 还取决于浏览器支持，可能需要本地网络权限。',
-    url: 'API 地址', key: 'API key', show: '显示 key', hide: '隐藏 key', optional: '本地模型可以留空',
-    load: '获取模型', loading: '正在获取模型…', manual: '手动填写模型 ID', model: '模型', choose: '选择一个模型',
-    remember: '在这台设备上记住 key', keyNote: '保存在本网站。同一网站的其他脚本可以读取已保存的 key。',
-    privacy: '仅将对话发送到你选择的接口，不采集网页内容。',
-    connect: '保存，开始聊天', connected: '已连接', empty: '今天想聊些什么？',
-    emptyBody: '和我说说今天的事吧。也可以让我挥挥手、坐下来，或者打个小盹。',
-    placeholder: '和她说点什么…', send: '发送消息', stop: '停止回复', thinking: '正在想…',
-    footer: '对话记录保存在这个浏览器里。', clear: '清空对话', confirmClear: '清空这段对话吗？',
-    clearNow: '清空', cancel: '保留', storage: '浏览器存储暂不可用。对话仅在本次访问保留。',
-    network: '请检查地址、key 和模型；接口需要允许浏览器跨域请求（CORS）。',
-    modelsFailed: '暂时无法获取模型，可以手动填写模型 ID。', modelsEmpty: '接口没有返回模型，请手动填写模型 ID。',
-    authFailed: '接口拒绝访问，请检查 API key 及其访问权限。',
-    magpieAuthFailed: 'Magpie 网关认证未通过。请在 Magpie 的 Gateway（网关）页创建或检查网关 key，并填到这里；允许网页来源并不能替代 key。',
-    invalid: '请填写 HTTP 或 HTTPS API 地址，以及模型 ID。', keyProvided: '由当前网页提供',
-    you: '你', companion: 'Peetty', reply: '收到回复。', connectFirst: '先连接一个模型，再开始聊天。',
-    actions: { wave: '挥了挥手', sit: '坐了下来', lie: '躺了下来', sleep: '打起了盹', move: '去找另一个落脚点', idle: '安静待着' },
-  },
-} as const;
-
-const ICONS = {
-  close: '<path d="m6 6 12 12M18 6 6 18"/>',
-  settings: '<path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z"/><path d="m9.5 3-.7 2.1-2 .9-2-.5-2.5 4.3L4 11.4v2.2L2.3 15l2.5 4.3 2-.5 2 .9.7 2.1h5l.7-2.1 2-.9 2 .5 2.5-4.3-1.7-1.4v-2.2l1.7-1.6-2.5-4.3-2 .5-2-.9-.7-2.1Z"/>',
-  send: '<path d="m5 12 7-7 7 7M12 5v15"/>',
-  stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
-  back: '<path d="m10 5-7 7 7 7M3 12h17"/>',
-  clear: '<path d="M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14M10 11v6m4-6v6"/>',
-  spark: '<path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z"/>',
-};
-const icon = (name: keyof typeof ICONS) => `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
+import { COPY } from './copy.ts';
+import { buildChatView, icon, setIcon } from './view.ts';
 
 const STYLE = `
 .peetty-chat {
@@ -152,6 +94,7 @@ export interface ChatPanel {
   open: (settings?: boolean) => void;
   close: () => void;
   setModel: (model: PeettyModelOptions) => Promise<void>;
+  setLanguage: (language: Language) => void;
   destroy: () => void;
 }
 interface PanelOptions {
@@ -166,8 +109,8 @@ interface PanelOptions {
 }
 
 export async function createChatPanel(options: PanelOptions): Promise<ChatPanel> {
-  const t = COPY[options.language];
-  const name = options.chat?.name ?? t.companion;
+  let t = COPY[options.language];
+  let name = options.chat?.name ?? t.companion;
   const style = document.createElement('style');
   style.textContent = STYLE;
   const panel = document.createElement('section');
@@ -177,36 +120,7 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
   panel.setAttribute('aria-label', t.chat);
   panel.setAttribute('lang', options.language);
   panel.hidden = true;
-  // All interpolated content below is static translation text, never model/user output.
-  panel.innerHTML = `
-    <header class="pc-header">
-      <div class="pc-mark">${icon('spark')}</div>
-      <div class="pc-heading"><h2 class="pc-name"></h2><div class="pc-status"></div></div>
-      <button class="pc-icon pc-settings" type="button" aria-label="${t.settings}" title="${t.settings}">${icon('settings')}</button>
-      <button class="pc-icon pc-close" type="button" aria-label="${t.close}" title="${t.close}">${icon('close')}</button>
-    </header>
-    <p class="pc-storage" hidden>${t.storage}</p>
-    <div class="pc-content">
-      <form class="pc-setup" hidden>
-        <h3>${t.title}</h3><p class="pc-intro">${t.intro}</p>
-        <div class="pc-local"><button class="pc-small pc-magpie" type="button">${t.magpie}</button><p class="pc-note pc-magpie-note" hidden>${t.magpieHint} <code class="pc-magpie-origin"></code><br>${t.magpieAuth}</p></div>
-        <label class="pc-field"><span>${t.url}</span><input class="pc-input" name="url" type="url" placeholder="https://api.example.com/v1" required autocomplete="off" spellcheck="false"></label>
-        <label class="pc-field"><span class="pc-key-label">${t.key}</span><div class="pc-key"><input class="pc-input" name="key" type="password" placeholder="${t.optional}" autocomplete="off" spellcheck="false" autocapitalize="off"><button type="button" class="pc-show-key">${t.show}</button></div></label>
-        <div class="pc-discover"><button type="button" class="pc-small pc-load">${t.load}</button><button type="button" class="pc-link pc-manual">${t.manual}</button></div>
-        <label class="pc-field pc-model-field"><span>${t.model}</span><input class="pc-input" name="model" placeholder="model-id" required autocomplete="off" spellcheck="false"><select class="pc-input pc-models" aria-label="${t.model}" hidden></select></label>
-        <label class="pc-check"><input name="remember" type="checkbox" checked><span>${t.remember}</span></label>
-        <p class="pc-note">${t.keyNote}</p>
-        <button class="pc-primary" type="submit">${t.connect}${icon('send')}</button>
-        <p class="pc-note" style="margin-top: 12px; margin-bottom: 0">${t.privacy}</p>
-      </form>
-      <div class="pc-empty"><h3>${t.empty}</h3><p>${t.emptyBody}</p></div>
-      <div class="pc-messages" role="log" aria-label="${t.chat}" aria-live="off"></div>
-    </div>
-    <p class="pc-error" role="alert" hidden></p>
-    <div class="pc-tools"><span class="pc-activity"></span><button class="pc-link pc-clear" type="button">${t.clear}</button><span class="pc-confirm" hidden><span>${t.confirmClear}</span><button type="button" class="pc-link pc-clear-now">${t.clearNow}</button><button type="button" class="pc-link pc-cancel">${t.cancel}</button></span></div>
-    <form class="pc-composer"><div class="pc-compose-row"><textarea name="message" rows="1" maxlength="8000" aria-label="${t.placeholder}" placeholder="${t.placeholder}"></textarea><button class="pc-icon pc-submit" type="submit" aria-label="${t.send}" title="${t.send}">${icon('send')}</button></div><p class="pc-foot">${t.footer}</p></form>
-    <span class="pc-sr pc-announcement" role="status"></span>
-  `;
+  const view = buildChatView(panel, () => t);
   const find = <T extends HTMLElement>(selector: string) => panel.querySelector<T>(selector)!;
   const setup = find<HTMLFormElement>('.pc-setup');
   const composer = find<HTMLFormElement>('.pc-composer');
@@ -224,13 +138,13 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
   const clear = find<HTMLButtonElement>('.pc-clear');
   const confirmation = find<HTMLSpanElement>('.pc-confirm');
   const load = find<HTMLButtonElement>('.pc-load');
-  const nodes = new Map<string, { element: HTMLElement; text: HTMLElement }>();
+  const nodes = new Map<string, { element: HTMLElement; text: HTMLElement; author: HTMLElement }>();
   let settingsOpen = false;
   let disposed = false;
   let wasBusy = false;
   let discovery: AbortController | null = null;
   let returnFocus: HTMLElement | null = null;
-  let shownError = '';
+  let shownError: (() => string) | undefined;
   let scheduled = false;
   find('.pc-name').textContent = name;
   find('.pc-magpie-origin').textContent = location.origin;
@@ -247,7 +161,13 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     },
   });
 
-  function showError(text: string) { shownError = text; error.textContent = text; error.hidden = !text; }
+  function updateError() {
+    const text = shownError?.() ?? '';
+    error.textContent = text;
+    error.hidden = !text;
+  }
+  function showError(content?: () => string) { shownError = content; updateError(); }
+  function showRuntimeError(message: string) { showError(() => `${message}\n${t.network}`); }
   function isLocalMagpie(): boolean {
     try { return normalizeBaseUrl(url.value) === LOCAL_MAGPIE.baseUrl; } catch { return false; }
   }
@@ -256,6 +176,20 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     find('.pc-magpie-note').hidden = !local;
     find('.pc-key-label').textContent = local ? t.magpieKey : t.key;
     key.placeholder = sameEndpoint() && runtime.model?.getApiKey ? t.keyProvided : local ? t.magpieKey : t.optional;
+  }
+  function refreshCopy() {
+    view.translate();
+    name = options.chat?.name ?? t.companion;
+    find('.pc-name').textContent = name;
+    setIcon(settings, settingsOpen ? 'back' : 'settings');
+    settings.setAttribute('aria-label', settingsOpen ? t.back : t.settings);
+    settings.title = settingsOpen ? t.back : t.settings;
+    find('.pc-show-key').textContent = key.type === 'password' ? t.show : t.hide;
+    load.textContent = discovery ? t.loading : t.load;
+    if (models.options[0]?.value === '') models.options[0].textContent = t.choose;
+    updateLocalHint();
+    updateError();
+    render();
   }
   function fillSettings() {
     const current = runtime.model;
@@ -275,7 +209,7 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     setup.hidden = !show;
     composer.hidden = show;
     find('.pc-tools').hidden = show;
-    settings.innerHTML = icon(show ? 'back' : 'settings');
+    setIcon(settings, show ? 'back' : 'settings');
     settings.setAttribute('aria-label', show ? t.back : t.settings);
     settings.title = show ? t.back : t.settings;
     if (show) fillSettings();
@@ -291,9 +225,9 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     author.textContent = entry.role === 'user' ? t.you : name;
     const text = document.createElement('div');
     text.className = 'pc-text';
-    if (entry.role === 'action') { element.innerHTML = icon('spark'); element.append(text); }
+    if (entry.role === 'action') element.append(icon('spark'), text);
     else element.append(author, text);
-    const item = { element, text };
+    const item = { element, text, author };
     nodes.set(entry.id, item);
     return item;
   }
@@ -309,6 +243,8 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
       cursor = node.element.nextElementSibling;
       const text = entry.role === 'action' ? t.actions[entry.text as CompanionAction] ?? entry.text : entry.text;
       if (node.text.textContent !== text) node.text.textContent = text;
+      const author = entry.role === 'user' ? t.you : name;
+      if (node.author.textContent !== author) node.author.textContent = author;
     }
     messages.hidden = settingsOpen || !runtime.entries.length;
     find('.pc-empty').hidden = settingsOpen || !!runtime.entries.length;
@@ -316,7 +252,7 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     find('.pc-status').textContent = settingsOpen ? t.settings : runtime.model?.id ?? t.connectFirst;
     find('.pc-status').title = runtime.model?.baseUrl ?? '';
     find('.pc-activity').textContent = runtime.busy ? t.thinking : '';
-    submit.innerHTML = icon(runtime.busy ? 'stop' : 'send');
+    setIcon(submit, runtime.busy ? 'stop' : 'send');
     submit.setAttribute('aria-label', runtime.busy ? t.stop : t.send);
     submit.title = runtime.busy ? t.stop : t.send;
     submit.disabled = !runtime.busy && (!input.value.trim() || !runtime.model);
@@ -326,11 +262,11 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     options.onState(runtime.busy, speaking);
     if (wasBusy && !runtime.busy) {
       find('.pc-announcement').textContent = last?.text ?? '';
-      if (runtime.error) showError(`${runtime.error}\n${t.network}`);
-      else { showError(''); if (last?.text) options.onReply(last.text); }
+      if (runtime.error) showRuntimeError(runtime.error);
+      else { showError(); if (last?.text) options.onReply(last.text); }
     }
     wasBusy = runtime.busy;
-    if (runtime.error && !shownError) showError(`${runtime.error}\n${t.network}`);
+    if (runtime.error && !shownError) showRuntimeError(runtime.error);
     if (nearBottom && !settingsOpen) content.scrollTop = content.scrollHeight;
   }
   function cancelDiscovery() { discovery?.abort(); discovery = null; load.disabled = false; load.textContent = t.load; }
@@ -344,7 +280,7 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     discovery = controller;
     load.disabled = true;
     load.textContent = t.loading;
-    showError('');
+    showError();
     const timeout = setTimeout(() => controller.abort(), 20000);
     try {
       const baseUrl = normalizeBaseUrl(url.value);
@@ -362,7 +298,7 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
       first.value = ''; first.textContent = t.choose;
       models.append(first);
       for (const item of list) { const option = document.createElement('option'); option.value = item.id; option.textContent = item.name === item.id ? item.id : `${item.name} · ${item.id}`; models.append(option); }
-      if (!list.length) { manualModel(); showError(t.modelsEmpty); }
+      if (!list.length) { manualModel(); showError(() => t.modelsEmpty); }
       else {
         model.hidden = true; model.required = false; models.hidden = false;
         models.value = list.some((item) => item.id === model.value) ? model.value : list.length === 1 ? list[0]!.id : '';
@@ -373,7 +309,8 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
       if (!disposed && discovery === controller) {
         manualModel();
         const auth = error instanceof Error && error.message === 'The endpoint rejected access. Check your API key.';
-        showError(auth ? isLocalMagpie() ? t.magpieAuthFailed : t.authFailed : `${t.modelsFailed} ${t.network}`);
+        const local = isLocalMagpie();
+        showError(() => auth ? local ? t.magpieAuthFailed : t.authFailed : `${t.modelsFailed} ${t.network}`);
       }
     } finally {
       clearTimeout(timeout);
@@ -392,7 +329,7 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     model.hidden = false;
     model.required = true;
     models.hidden = true;
-    showError('');
+    showError();
     updateLocalHint();
     // Magpie requires page authorization and a gateway key for browser clients.
     if (local.apiKey || local.getApiKey) void discover();
@@ -409,15 +346,15 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
       try {
         const baseUrl = normalizeBaseUrl(url.value);
         const id = model.value.trim();
-        if (!id) { showError(t.invalid); return; }
+        if (!id) { showError(() => t.invalid); return; }
         const current = runtime.model;
         const getApiKey = !key.value.trim() && sameEndpoint() ? current?.getApiKey : undefined;
         const headers = sameEndpoint() ? current?.headers : undefined;
         cancelDiscovery();
         await runtime.configure({ baseUrl, id, ...(key.value.trim() ? { apiKey: key.value.trim() } : {}), ...(getApiKey ? { getApiKey } : {}), ...(headers ? { headers } : {}) }, remember.checked);
         if (disposed) return;
-        showError(''); setSettings(false);
-      } catch { if (!disposed) showError(t.invalid); }
+        showError(); setSettings(false);
+      } catch { if (!disposed) showError(() => t.invalid); }
     })();
   });
   function send() {
@@ -425,7 +362,7 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     const text = input.value.trim();
     if (!text || !runtime.model) return;
     input.value = ''; input.style.height = '';
-    showError('');
+    showError();
     void runtime.send(text);
     render(); content.scrollTop = content.scrollHeight; input.focus();
   }
@@ -434,8 +371,8 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
   input.addEventListener('keydown', (event) => { if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); if (!runtime.busy) send(); } });
   clear.addEventListener('click', () => { confirmation.hidden = false; clear.hidden = true; });
   find('.pc-cancel').addEventListener('click', () => { confirmation.hidden = true; render(); });
-  find('.pc-clear-now').addEventListener('click', () => { confirmation.hidden = true; showError(''); void runtime.clear().then(render); });
-  settings.addEventListener('click', () => { showError(''); cancelDiscovery(); setSettings(!settingsOpen || !runtime.model); });
+  find('.pc-clear-now').addEventListener('click', () => { confirmation.hidden = true; showError(); void runtime.clear().then(render); });
+  settings.addEventListener('click', () => { showError(); cancelDiscovery(); setSettings(!settingsOpen || !runtime.model); });
   const close = () => {
     cancelDiscovery(); panel.hidden = true; runtime.stop(); options.onClose();
     if (returnFocus?.isConnected) returnFocus.focus();
@@ -443,23 +380,32 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
   find('.pc-close').addEventListener('click', close);
   panel.addEventListener('keydown', (event) => { if (event.key === 'Escape') { event.stopPropagation(); close(); } });
   // Keep composer key events out of the host site's keyboard shortcuts.
-  panel.addEventListener('keydown', (event) => event.stopPropagation());
+  for (const type of ['keydown', 'keyup', 'keypress'] as const) {
+    panel.addEventListener(type, (event) => event.stopPropagation());
+  }
   options.root.append(style, panel);
   try { await runtime.initialize(); }
   catch (error) { runtime.destroy(); panel.remove(); style.remove(); throw error; }
-  if (disposed) return { isOpen: false, open() {}, close() {}, async setModel() {}, destroy() {} };
-  render();
+  if (disposed) return { isOpen: false, open() {}, close() {}, async setModel() {}, setLanguage() {}, destroy() {} };
+  refreshCopy();
   return {
     get isOpen() { return !panel.hidden; },
     open(showSettings = false) {
       const active = options.root.activeElement ?? document.activeElement;
       if (panel.hidden && active instanceof HTMLElement && !panel.contains(active)) returnFocus = active;
       panel.hidden = false;
-      showError('');
+      showError();
       setSettings(showSettings || !runtime.model);
     },
     close,
-    async setModel(next) { cancelDiscovery(); await runtime.configure(next, false); if (!disposed) { showError(''); setSettings(false); } },
+    setLanguage(language) {
+      if (disposed) return;
+      if (language !== 'en' && language !== 'zh') throw new TypeError('Unsupported interface language.');
+      t = COPY[language];
+      panel.setAttribute('lang', language);
+      refreshCopy();
+    },
+    async setModel(next) { cancelDiscovery(); await runtime.configure(next, false); if (!disposed) { showError(); setSettings(false); } },
     destroy() { disposed = true; cancelDiscovery(); runtime.destroy(); panel.remove(); style.remove(); },
   };
 }

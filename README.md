@@ -22,7 +22,7 @@ Double-click the companion to open chat. Right-click for actions and connection 
 
 On the first visit, enter an OpenAI-compatible API base URL and your API key, load the model list, choose a model, and save. If model discovery is unavailable, enter the model ID manually. Keyless local endpoints are supported. Use the actual API base path: root-level endpoints stay at the root, and `/v1` is never inserted automatically. Requests do not follow HTTP redirects, so use the final API base URL. The endpoint must permit browser requests through CORS; an SDK or browser setting cannot bypass a provider's restrictions. An HTTPS website may also block HTTP endpoints.
 
-The **Use local Magpie** shortcut fills `http://127.0.0.1:3425/v1`. Start Magpie on the device running the browser, allow the current website origin in **Settings → Network and sharing → Web pages**, create a gateway key on Magpie's **Gateway** page and enter it, then load and select a model. Website authorization and gateway-key authentication are separate; a 401 response means gateway authentication failed. The shortcut never copies credentials from a different endpoint. HTTPS pages accessing HTTP loopback depend on browser support, local-network permissions and Magpie's CORS policy; this is not a universal browser bypass. An HTTPS public server cannot proxy a visitor's `127.0.0.1` gateway.
+The **Use local Magpie** shortcut fills `http://127.0.0.1:3425/v1`. Start Magpie on the device running the browser, allow the current website origin in **Settings → Network and sharing → Web pages**, create a gateway key in Magpie's **Gateway → Gateway keys** and enter it, then load and select a model. Website authorization and gateway-key authentication are separate; a 401 response means gateway authentication failed. The shortcut never copies credentials from a different endpoint. HTTPS pages accessing HTTP loopback depend on browser support, local-network permissions and Magpie's CORS policy; this is not a universal browser bypass. An HTTPS public server cannot proxy a visitor's `127.0.0.1` gateway.
 
 SDK callers can use `model: { ...LOCAL_MAGPIE, id: 'your-model-id', apiKey: yourGatewayKey }`, importing `LOCAL_MAGPIE` from `@idy/peetty`. The preset contains only the loopback base URL, with no embedded key or default model.
 
@@ -51,6 +51,8 @@ await pet.openChat();
 
 // Replace the model without rebuilding the companion.
 await pet.setModel({ baseUrl: 'https://your-api.example/v1', id: 'another-model', apiKey: yourUserProvidedKey });
+// Translate controls in place, retaining chat, drafts and in-memory credentials.
+pet.setLanguage('zh'); // Also accepts 'en' and 'auto'.
 pet.closeChat();
 // await pet.configure();
 ```
