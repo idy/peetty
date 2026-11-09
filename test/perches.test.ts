@@ -540,11 +540,46 @@ describe('bounded companion graphics', () => {
     assert.ok(fixture.geometryReads < 13_450, `one native screen read per visited group/shape: ${fixture.geometryReads}`);
   });
 
+  for (const direction of ['horizontal', 'vertical'] as const) {
+    it(`protects a ${direction} stroked path when all paint geometry has zero area`, () => {
+      const horizontal = direction === 'horizontal';
+      const { svg } = figure(rect(650, 580, 100, 120), { x: -500, y: 30, width: horizontal ? 20 : 0, height: horizontal ? 0 : 20 });
+      const bounds = rect(150, 610, horizontal ? 20 : 0, horizontal ? 0 : 20);
+      const path = element('path', bounds, part(svg, bounds));
+      path.setAttribute('stroke', '#6753b8'); path.setAttribute('stroke-width', '50'); path.setAttribute('stroke-linejoin', 'round');
+      Object.assign(path, { getScreenCTM: () => ({ a: 1, b: 0, c: 0, d: 1, e: 650, f: 580 }) });
+      const found = floor(fixture.opts);
+      assert.ok(found, 'clear floor remains beside the painted stroke');
+      assert.ok(found.left > (horizontal ? 245 : 225), `the full stroke must block the anchor span: ${found.left}`);
+      assert.ok(found.right > 590 && found.right < 600);
+    });
+  }
+
+  it('includes the screen-space stroke width of a mirrored, scaled path', () => {
+    const { svg } = figure(rect(650, 580, 100, 120), { x: -500, y: 30, width: 0, height: 20 });
+    const bounds = rect(150, 610, 0, 20);
+    const path = element('path', bounds, part(svg, bounds));
+    path.setAttribute('stroke', '#6753b8'); path.setAttribute('stroke-width', '50'); path.setAttribute('stroke-linejoin', 'miter');
+    Object.assign(path, { getScreenCTM: () => ({ a: -2, b: 0, c: 0, d: 0.5, e: 150, f: 600 }) });
+    const found = floor(fixture.opts);
+    assert.ok(found);
+    assert.ok(found.left > 400, `transformed miter extents remain blocked: ${found.left}`);
+  });
+
+  it('leaves usable floor beside 300 distinct overflow shapes without quadratic collection work', () => {
+    const { svg } = figure(rect(650, 580, 100, 120), { x: -550, y: 0, width: 650, height: 120 });
+    for (let i = 0; i < 300; i++) element('ellipse', rect(100 + i, 610, 0.1, 0.1), svg);
+    const found = floor(fixture.opts);
+    assert.ok(found, 'a modest number of distinct shapes must not exhaust collection');
+    assert.ok(found.left > 450 && found.right > 590);
+    assert.ok(fixture.geometryReads < 400, `collection visits each shape once: ${fixture.geometryReads}`);
+  });
+
   it('bounds extra collection work when a companion has too many disconnected overflow shapes', () => {
     const { svg } = figure(rect(0, 580, 100, 120), { x: 0, y: 0, width: 800, height: 120 });
     for (let i = 0; i < 10_000; i++) element('path', rect(110 + (i % 600), 600 + Math.floor(i / 600), 0.1, 0.1), svg);
     assert.equal(floor(fixture.opts), null, 'an incomplete overflow collection cannot certify clear floor');
-    assert.ok(fixture.geometryReads < 1000, `coverage comparisons share the work budget: ${fixture.geometryReads}`);
+    assert.ok(fixture.geometryReads < 2100, `the rectangle cap bounds linear collection: ${fixture.geometryReads}`);
   });
 
   it('falls back to normal descendant scanning if native SVG bounds fail', () => {

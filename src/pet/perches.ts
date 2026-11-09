@@ -145,6 +145,25 @@ function figureBounds(el: Element): Box | null {
   } catch { return null; }
 }
 
+/** getBoundingClientRect excludes SVG stroke, including all paint on a straight path. */
+function strokedBounds(el: Element, bounds: Box): Box | null {
+  const stroke = el.getAttribute('stroke');
+  const width = Number(el.getAttribute('stroke-width') ?? 1);
+  if (!stroke || stroke === 'none' || width <= 0) return bounds;
+  try {
+    const matrix = (el as SVGGraphicsElement).getScreenCTM();
+    if (!Number.isFinite(width) || !matrix || ![matrix.a, matrix.b, matrix.c, matrix.d].every(Number.isFinite)) return null;
+    // The renderer uses round joins by default; SVG's default miter limit is four.
+    // A local square also covers square caps, and transforms conservatively under shear.
+    const join = el.getAttribute('stroke-linejoin');
+    const radius = width / 2 * (join === null || join === 'miter' ? 4 : 1);
+    const x = radius * (Math.abs(matrix.a) + Math.abs(matrix.c));
+    const y = radius * (Math.abs(matrix.b) + Math.abs(matrix.d));
+    const painted = box(bounds.left - x, bounds.top - y, bounds.right + x, bounds.bottom + y);
+    return finiteBox(painted) ? painted : null;
+  } catch { return null; }
+}
+
 /**
  * Keep a validated companion's viewport and disconnected overflow separate.
  * Native group bounds let us skip covered/offscreen parts without visiting their
@@ -157,17 +176,19 @@ function figureBoxes(el: Element, rect: Box, clip: Box, data: Scan): Box[] | nul
   const bounds = figureBounds(el);
   if (!bounds) return null;
   const overflow: Box[] = [];
+  const known = new Set<string>();
+  const keyOf = (bounds: Box) => `${bounds.left}:${bounds.top}:${bounds.right}:${bounds.bottom}`;
   const covers = (outer: Box, inner: Box) => outer.left <= inner.left && outer.right >= inner.right && outer.top <= inner.top && outer.bottom >= inner.bottom;
   const uncovered = (bounds: Box): Box | null => {
     const visible = intersection(bounds, clip);
     if (empty(visible) || covers(rect, visible)) return null;
-    for (const previous of overflow) {
-      if (!spend(data.budget)) { data.complete = false; return null; }
-      if (covers(previous, visible)) return null;
-    }
-    return visible;
+    if (!spend(data.budget)) { data.complete = false; return null; }
+    // Exact duplicates are common across parts. A hash lookup keeps distinct
+    // overflow shapes linear instead of comparing each with every prior box.
+    return known.has(keyOf(visible)) ? null : visible;
   };
-  if (!uncovered(bounds)) return overflow;
+  // A zero-area geometry box can still have a visible stroke. Refine it before pruning.
+  if (!empty(bounds) && !uncovered(bounds)) return overflow;
   const pending: Node[] = el.firstChild ? [el.firstChild] : [];
   try {
     while (pending.length && data.complete) {
@@ -182,16 +203,21 @@ function figureBoxes(el: Element, rect: Box, clip: Box, data: Scan): Box[] | nul
       if (child.tagName.toUpperCase() === 'DEFS') continue;
       const bounds = child.getBoundingClientRect();
       if (!finiteBox(bounds)) return null;
-      const visible = uncovered(bounds);
-      if (!visible || !data.complete) continue;
       if (child.firstChild) {
+        if (!empty(bounds) && !uncovered(bounds)) continue;
         if (!spend(data.budget)) { data.complete = false; break; }
         const style = getComputedStyle(child);
         if (style.display !== 'none' && Number(style.opacity) !== 0 && style.contentVisibility !== 'hidden') pending.push(child.firstChild);
       } else {
+        if (child.getAttribute('stroke') && !spend(data.budget)) { data.complete = false; break; }
+        const painted = strokedBounds(child, bounds);
+        if (!painted) { data.complete = false; break; }
+        const visible = uncovered(painted);
+        if (!visible || !data.complete) continue;
         // Reserve the SVG viewport too; addObstacle applies the same global cap.
         if (data.obstacles.length + overflow.length + 1 >= MAX_RECTS) { data.complete = false; break; }
         overflow.push(visible);
+        known.add(keyOf(visible));
       }
     }
   } catch { return null; }
