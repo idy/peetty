@@ -379,9 +379,9 @@ export class SoundPlayer {
         const response = await fetch(src, { credentials: 'omit', referrerPolicy: 'no-referrer', signal: controller.signal });
         const bytes = await readAudio(response, controller.signal);
         if (controller.signal.aborted) return;
-        preflightWav(bytes, context.sampleRate);
+        const pcm = preflightWav(bytes, context.sampleRate);
         let buffer: AudioBuffer;
-        try { buffer = await context.decodeAudioData(bytes); }
+        try { buffer = await context.decodeAudioData(pcm); }
         catch { throw new InvalidAudio('Invalid audio'); }
         if (controller.signal.aborted || context !== this.context) return;
         if (!Number.isFinite(buffer.duration) || buffer.duration <= 0 || buffer.duration > MAX_SECONDS) throw new InvalidAudio('Invalid audio duration');

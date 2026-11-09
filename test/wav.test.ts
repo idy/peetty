@@ -153,24 +153,62 @@ describe('bounded integer PCM WAV preflight', () => {
     rejects(set32(fakeSmallContainer, 4, 38)); // Native must never discover the unvalidated trailing audio.
   });
 
-  it('rejects incomplete trailing chunk headers and missing or nonzero padding', () => {
+  it('rejects incomplete trailing chunk headers and missing padding', () => {
     for (let size = 1; size < 8; size++) rejects(riff(fmt(), chunk('data', new Uint8Array(2)), new Uint8Array(size)));
     rejects(riff(fmt({ bits: 8 }), chunk('data', new Uint8Array(1), false)));
     rejects(riff(chunk('JUNK', new Uint8Array(1), false), fmt(), chunk('data', new Uint8Array(2))));
-    const padded = wav({ bits: 8 }); new Uint8Array(padded)[padded.byteLength - 1] = 255; rejects(padded);
   });
 
-  it('rejects unknown chunks, nested audio lists, and malformed INFO subchunks', () => {
-    for (const id of ['fact', 'ds64', 'smpl', 'RIFF', 'WAVE']) {
+  it('normalizes insignificant padding and PCM format extensions', () => {
+    const padded = wav({ bits: 8 });
+    new Uint8Array(padded)[padded.byteLength - 1] = 255;
+    assert.deepEqual(preflightWav(padded, 48_000), wav({ bits: 8 }));
+    assert.deepEqual(preflightWav(riff(fmt({ extended: true }), chunk('data', new Uint8Array(2))), 48_000), wav());
+  });
+
+  it('accepts standard broadcast and cue metadata while preserving the PCM bytes', () => {
+    const pcm = new Uint8Array([1, 2, 3, 4]);
+    const bext = new Uint8Array(602);
+    new TextEncoder().encodeInto('Peetty editor export', bext);
+    const cue = new Uint8Array(28);
+    const view = new DataView(cue.buffer);
+    view.setUint32(0, 1, true);
+    view.setUint32(4, 7, true);
+    cue.set(new TextEncoder().encode('data'), 12);
+    view.setUint32(24, 1, true);
+    const expected = riff(fmt(), chunk('data', pcm));
+    const metadata = [chunk('bext', bext), chunk('cue ', cue)];
+    for (const input of [riff(...metadata, fmt(), chunk('data', pcm)),
+      riff(fmt(), ...metadata, chunk('data', pcm)), riff(fmt(), chunk('data', pcm), ...metadata)]) {
+      const original = input.slice(0);
+      assert.deepEqual(preflightWav(input, 48_000), expected);
+      assert.deepEqual(input, original, 'normalization does not modify the source');
+    }
+  });
+
+  it('strips all bounded ancillary chunks instead of exposing them to native parsers', () => {
+    for (const id of ['fact', 'smpl', 'bext', 'cue ', 'iXML', 'axml', 'id3 ', 'PEAK', 'inst', 'abcd']) {
+      const payload = new Uint8Array(64).fill(255); // Includes forged counts and timestamps.
+      const input = riff(fmt(), chunk(id, payload), chunk('data', new Uint8Array(2)));
+      assert.deepEqual(preflightWav(input, 48_000), wav(), id);
+    }
+    for (const list of [new Uint8Array(3), new TextEncoder().encode('adtl'),
+      new Uint8Array([...new TextEncoder().encode('INFO'), ...chunk('data', new Uint8Array(2))]),
+      new Uint8Array([...new TextEncoder().encode('INFO'), ...new Uint8Array(set32(chunk('INAM', new Uint8Array(2)).buffer, 4, 100))])]) {
+      assert.deepEqual(preflightWav(riff(fmt(), chunk('LIST', list), chunk('data', new Uint8Array(2))), 48_000), wav());
+    }
+  });
+
+  it('rejects alternative audio containers and out-of-bounds metadata payloads', () => {
+    for (const id of ['ds64', 'slnt', 'RIFF', 'RIFX', 'RF64', 'WAVE']) {
       rejects(riff(fmt(), chunk(id, new Uint8Array(4)), chunk('data', new Uint8Array(2))));
     }
-    for (const list of [new Uint8Array(3), new TextEncoder().encode('wavl'),
-      new Uint8Array([...new TextEncoder().encode('INFO'), ...chunk('data', new Uint8Array(2))]),
-      new Uint8Array([...new TextEncoder().encode('INFO'), ...chunk('INAM', new Uint8Array(1), false)]),
-      new Uint8Array([...new TextEncoder().encode('INFO'), 0]),
-      new Uint8Array([...new TextEncoder().encode('INFO'), ...new Uint8Array(set32(chunk('INAM', new Uint8Array(2)).buffer, 4, 100))])]) {
-      rejects(riff(fmt(), chunk('LIST', list), chunk('data', new Uint8Array(2))));
+    rejects(riff(fmt(), chunk('LIST', new TextEncoder().encode('wavl')), chunk('data', new Uint8Array(2))));
+    for (const id of ['bext', 'cue ', 'LIST']) {
+      const input = riff(fmt(), chunk(id, new Uint8Array(16)), chunk('data', new Uint8Array(2)));
+      rejects(set32(input, 40, 0xffff_ffff));
     }
+    rejects(riff(fmt(), chunk('fact', new Uint8Array(4)), chunk('data', new Uint8Array(80_002))));
   });
 
   it('rejects unsupported channel counts, rates, bit depths, and inconsistent byte rates/alignment', () => {

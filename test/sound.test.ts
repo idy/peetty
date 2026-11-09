@@ -473,6 +473,28 @@ describe('SoundPlayer cue selection, synthesis, and resource ownership', () => {
 });
 
 describe('SoundPlayer bounded file playback', () => {
+  it('passes only canonical PCM to the decoder when WAV files include editor metadata', async (t) => {
+    const h = install(t, 'running');
+    const pcm = wav(4);
+    new Uint8Array(pcm, 44).set([1, 2, 3, 4, 5, 6, 7, 8]);
+    const metadata = new Uint8Array(8 + 602 + 8 + 28).fill(255);
+    const view = new DataView(metadata.buffer);
+    metadata.set(new TextEncoder().encode('bext'), 0);
+    view.setUint32(4, 602, true);
+    metadata.set(new TextEncoder().encode('cue '), 610);
+    view.setUint32(614, 28, true);
+    const source = new Uint8Array(pcm.byteLength + metadata.byteLength);
+    source.set(new Uint8Array(pcm, 0, 12));
+    source.set(metadata, 12);
+    source.set(new Uint8Array(pcm, 12), 12 + metadata.byteLength);
+    new DataView(source.buffer).setUint32(4, source.length - 8, true);
+    h.fetch.mock.mockImplementation(async () => new Response(source));
+    const player = h.player(); player.setFigure(figure({ src: '/editor.wav' })); player.unlock(); player.play('idle'); await flush();
+    assert.equal(h.context().decoded.length, 1);
+    assert.deepEqual(h.context().decoded[0], pcm, 'native decoding never sees metadata counts or timestamps');
+    assert.equal(h.context().sources.length, 1);
+  });
+
   it('omits credentials/referrers, decodes once, applies effective file gain and rate, and reuses its cache', async (t) => {
     const h = install(t, 'running');
     const player = h.player({ enabled: true, volume: 0.5 });
