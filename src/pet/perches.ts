@@ -125,17 +125,15 @@ function hostOf(node: Node): Element | null {
   return root.nodeType === FRAGMENT ? (root as ShadowRoot).host ?? null : null;
 }
 
-/** A companion's validated SVG is one graphic, not thousands of separate obstacles. */
-function figureBox(el: Element, rect: Box): Box | null {
-  if (el.tagName.toUpperCase() !== 'SVG' || hostOf(el)?.tagName.toUpperCase() !== 'PEETTY-COMPANION') return null;
+/** Native paint bounds, including overflow and the figure's screen transform. */
+function figureBounds(el: Element): Box | null {
   const svg = el as SVGGraphicsElement;
-  if (typeof svg.getBBox !== 'function' || typeof svg.getScreenCTM !== 'function' || !finiteBox(rect)) return null;
+  if (typeof svg.getBBox !== 'function' || typeof svg.getScreenCTM !== 'function') return null;
   try {
     const shape = svg.getBBox();
     const matrix = svg.getScreenCTM();
     if (!matrix || ![shape.x, shape.y, shape.width, shape.height, matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f].every(Number.isFinite) || shape.width < 0 || shape.height < 0) return null;
-    let { left, top, right, bottom } = rect;
-    // Include overflow-visible poses and mirrored figures, not only the SVG viewport.
+    let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
     for (const x of [shape.x, shape.x + shape.width]) for (const y of [shape.y, shape.y + shape.height]) {
       const px = matrix.a * x + matrix.c * y + matrix.e;
       const py = matrix.b * x + matrix.d * y + matrix.f;
@@ -145,6 +143,59 @@ function figureBox(el: Element, rect: Box): Box | null {
     }
     return box(left, top, right, bottom);
   } catch { return null; }
+}
+
+/**
+ * Keep a validated companion's viewport and disconnected overflow separate.
+ * Native group bounds let us skip covered/offscreen parts without visiting their
+ * shapes. A group spanning a gap must be refined down to its leaves, even within
+ * one part; getBoundingClientRect includes their bone, spring and mirror transforms.
+ */
+function figureBoxes(el: Element, rect: Box, clip: Box, data: Scan): Box[] | null {
+  if (el.tagName.toUpperCase() !== 'SVG' || hostOf(el)?.tagName.toUpperCase() !== 'PEETTY-COMPANION' || !finiteBox(rect)) return null;
+  if (!spend(data.budget, 2)) { data.complete = false; return null; }
+  const bounds = figureBounds(el);
+  if (!bounds) return null;
+  const overflow: Box[] = [];
+  const covers = (outer: Box, inner: Box) => outer.left <= inner.left && outer.right >= inner.right && outer.top <= inner.top && outer.bottom >= inner.bottom;
+  const uncovered = (bounds: Box): Box | null => {
+    const visible = intersection(bounds, clip);
+    if (empty(visible) || covers(rect, visible)) return null;
+    for (const previous of overflow) {
+      if (!spend(data.budget)) { data.complete = false; return null; }
+      if (covers(previous, visible)) return null;
+    }
+    return visible;
+  };
+  if (!uncovered(bounds)) return overflow;
+  const pending: Node[] = el.firstChild ? [el.firstChild] : [];
+  try {
+    while (pending.length && data.complete) {
+      // Charge this extra traversal and its native geometry read to collection's
+      // shared work budget. Queue siblings lazily, including huge child lists.
+      if (!spend(data.budget, 2)) { data.complete = false; break; }
+      const node = pending.pop()!;
+      if (node.nextSibling) pending.push(node.nextSibling);
+      if (node.nodeType !== Node.ELEMENT_NODE) continue;
+      const child = node as Element;
+      // Clip paths and gradients in the renderer's defs do not paint by themselves.
+      if (child.tagName.toUpperCase() === 'DEFS') continue;
+      const bounds = child.getBoundingClientRect();
+      if (!finiteBox(bounds)) return null;
+      const visible = uncovered(bounds);
+      if (!visible || !data.complete) continue;
+      if (child.firstChild) {
+        if (!spend(data.budget)) { data.complete = false; break; }
+        const style = getComputedStyle(child);
+        if (style.display !== 'none' && Number(style.opacity) !== 0 && style.contentVisibility !== 'hidden') pending.push(child.firstChild);
+      } else {
+        // Reserve the SVG viewport too; addObstacle applies the same global cap.
+        if (data.obstacles.length + overflow.length + 1 >= MAX_RECTS) { data.complete = false; break; }
+        overflow.push(visible);
+      }
+    }
+  } catch { return null; }
+  return overflow;
 }
 
 /** The topmost page element at a point, including open shadow trees. */
@@ -419,11 +470,13 @@ function scan(opts: PerchOptions): Scan {
     // below its containing block. A contents box is never positioned.
     const position = style.display === 'contents' ? 'static' : style.position;
     const own = position === 'fixed' ? context.fixed : position === 'absolute' ? context.absolute : context.flow;
-    const graphic = visible && avoid && style.overflowX === 'visible' && style.overflowY === 'visible' ? figureBox(el, rect) : null;
-    if (visible && (avoid || el.matches(INTERACTIVE) || MEDIA_TAGS.has(el.tagName.toUpperCase()))) addObstacle(graphic ?? rect, el, avoid, own);
-    // Native SVG bounds cover the whole figure, including overflowing geometry.
-    // Pruning this known graphic keeps both rectangle and traversal budgets bounded.
-    if (graphic) continue;
+    const graphic = visible && avoid && style.overflowX === 'visible' && style.overflowY === 'visible' ? figureBoxes(el, rect, own, result) : null;
+    if (!result.complete) break;
+    if (visible && (avoid || el.matches(INTERACTIVE) || MEDIA_TAGS.has(el.tagName.toUpperCase()))) addObstacle(rect, el, avoid, own);
+    if (graphic) {
+      for (const bounds of graphic) addObstacle(bounds, el, avoid, own);
+      continue;
+    }
     if (!avoid && opacity >= MIN_OPACITY && rect.width > 0 && rect.top >= own.top && rect.top < own.bottom && carries(el, style, rect)) {
       const list = el.getAttribute('data-peetty') === 'perch' ? preferred : ordinary;
       if (list.length < MAX_CANDIDATES) list.push(el);

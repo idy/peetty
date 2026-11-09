@@ -352,6 +352,37 @@ describe('setup drafts and credential replacement', () => {
 });
 
 describe('Escape focus lifecycle', () => {
+  for (const target of ['host form', 'same shadow root'] as const) {
+    it(`preserves ${target} focus when destroying an unfocused open chat`, async (t) => {
+      const { panel, frame, window, parentRoot } = await mountPanel(t, MODEL);
+      panel.close();
+      const opener = window.document.createElement('button');
+      window.document.body.append(opener); opener.focus();
+      panel.open(false);
+      const input = parentRoot.ownerDocument.createElement('input');
+      (target === 'host form' ? parentRoot.ownerDocument.body : parentRoot).append(input);
+      input.value = 'keep this selection'; input.focus(); input.setSelectionRange(2, 8);
+      assert.equal(panel.isOpen, true);
+      assert.ok(parentRoot.activeElement !== frame, 'the chat has relinquished focus');
+      panel.destroy();
+      const active = target === 'host form' ? parentRoot.ownerDocument.activeElement : parentRoot.activeElement;
+      assert.ok(active === input, 'destroy must leave the focused host input in place');
+      assert.deepEqual([input.selectionStart, input.selectionEnd], [2, 8]);
+    });
+  }
+
+  it('restores the opener when the destroyed chat still has focus', async (t) => {
+    const { panel, query, window, parentRoot, frame } = await mountPanel(t, MODEL);
+    panel.close();
+    const opener = window.document.createElement('button');
+    window.document.body.append(opener); opener.focus();
+    panel.open(false);
+    query('[name="message"]').focus();
+    assert.equal(parentRoot.activeElement, frame);
+    panel.destroy();
+    assert.equal(window.document.activeElement, opener);
+  });
+
   for (const ending of ['release', 'destroy', 'blur', 'fresh press', 'normal close', 'reopen']) {
     it(`retains child focus until ${ending} without leaving host key guards`, async (t) => {
       const events: string[] = [];

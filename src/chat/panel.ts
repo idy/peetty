@@ -536,7 +536,7 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     },
     destroy() {
       if (disposed) return;
-      const focused = visible || !!releaseEscapePress;
+      const focused = options.root.activeElement === frame;
       disposed = true; configuration++;
       releaseEscapePress?.(false);
       if (focused) restoreParentFocus();
