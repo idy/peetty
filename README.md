@@ -138,7 +138,7 @@ npm login --scope=@idy --auth-type=legacy --registry=https://npm.pkg.github.com
 npm install @idy/peetty
 ```
 
-Release workflow: after the intended version is on the repository, push a matching tag such as `v0.1.0`. The package workflow checks that the tag matches `package.json`, runs the checks, tests and build, then publishes to GitHub Packages using `GITHUB_TOKEN`. Publishing a new version and changing the package's visibility are separate GitHub operations.
+Release workflow: after the intended version is on the repository, push a matching tag such as `v0.1.0`. The package workflow checks that the tag matches `package.json`, runs the checks, tests and build, then publishes to GitHub Packages using `GITHUB_TOKEN` and reads the exact version back from the registry to verify publication. Publishing a new version and changing the package's visibility are separate GitHub operations.
 
 ## Development
 
