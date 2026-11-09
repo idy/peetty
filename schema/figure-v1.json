@@ -109,7 +109,7 @@
     "soundCue": {
       "type": "object",
       "properties": {
-        "src": { "type": "string", "minLength": 1, "maxLength": 2048, "description": "HTTP(S) URL or relative audio path; resolved against the figure JSON URL, or the document for inline figures. Credentials and other URL schemes are rejected." },
+        "src": { "type": "string", "minLength": 1, "maxLength": 2048, "description": "HTTP(S) URL or relative path to uncompressed integer PCM WAV audio; resolved against the figure JSON URL, or the document for inline figures. File contents are bounded before decoding. Credentials and other URL schemes are rejected." },
         "notes": { "type": "array", "minItems": 1, "maxItems": 8, "items": { "type": "number", "minimum": 80, "maximum": 4000 } },
         "duration": { "type": "number", "minimum": 0.03, "maximum": 1, "default": 0.08, "description": "Seconds per note. The complete sequence must fit within 5 seconds." },
         "waveform": { "enum": ["sine", "triangle", "square"], "default": "sine" },

@@ -49,7 +49,7 @@ export type SoundEvent = (typeof SOUND_EVENTS)[number];
 
 /** One short sound: an audio file or a sequence of synthesized frequencies. */
 export interface SoundCue {
-  /** HTTP(S) URL or relative path (relative to the figure JSON, or document for inline figures). */
+  /** HTTP(S) URL or relative path to bounded uncompressed WAV audio. Relative to the figure JSON, or document for inline figures. */
   src?: string;
   /** 1–8 frequencies in Hz, each 80–4000. Use either notes or src. */
   notes?: number[];

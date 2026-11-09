@@ -9,7 +9,24 @@ const buffer = (duration = 0.4, numberOfChannels = 2, sampleRate = 48_000) => {
   const length = Math.round(duration * sampleRate);
   return { duration: length / sampleRate, length, numberOfChannels, sampleRate } as AudioBuffer;
 };
-const audioResponse = () => new Response(new Uint8Array([1, 2, 3]));
+function wav(frames = 1, channels = 1, sampleRate = 8_000): ArrayBuffer {
+  const bytes = new ArrayBuffer(44 + frames * channels * 2);
+  const view = new DataView(bytes);
+  for (const [offset, tag] of [[0, 'RIFF'], [8, 'WAVE'], [12, 'fmt '], [36, 'data']] as const) {
+    new Uint8Array(bytes, offset, 4).set(new TextEncoder().encode(tag));
+  }
+  view.setUint32(4, bytes.byteLength - 8, true);
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, channels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * channels * 2, true);
+  view.setUint16(32, channels * 2, true);
+  view.setUint16(34, 16, true);
+  view.setUint32(40, frames * channels * 2, true);
+  return bytes;
+}
+const audioResponse = () => new Response(wav());
 const notes = (hz = 440): SoundCue => ({ notes: [hz] });
 const figure = (cue: SoundCue = notes()): FigureSounds => ({ events: { idle: [cue] } });
 async function flush(): Promise<void> {
@@ -54,6 +71,7 @@ interface Environment {
 class FakeContext extends EventTarget {
   state: 'suspended' | 'running' | 'closed';
   destination = {};
+  sampleRate = 48_000;
   gains: FakeGain[] = [];
   oscillators: FakeOscillator[] = [];
   sources: FakeBufferSource[] = [];
@@ -464,7 +482,7 @@ describe('SoundPlayer bounded file playback', () => {
     assert.equal(h.requests[0]!.options?.credentials, 'omit');
     assert.equal(h.requests[0]!.options?.referrerPolicy, 'no-referrer');
     assert.equal(h.requests[0]!.options?.redirect ?? 'follow', 'follow', 'normal audio redirects remain allowed');
-    assert.equal(context.decoded[0]!.byteLength, 3);
+    assert.equal(context.decoded[0]!.byteLength, 46);
     assert.equal(peak(context.gains[0]!), 0.5 * 0.3 * 0.4 * 0.12);
     assert.deepEqual(context.sources[0]!.starts, [[0, 0, 0.4]]);
     assert.deepEqual(context.sources[0]!.stops, [0.2]);
@@ -641,6 +659,48 @@ describe('SoundPlayer bounded file playback', () => {
     assert.equal(h.context().sources.length, 0);
   });
 
+  for (const failure of ['overlong', 'mp3', 'ogg', 'flac', 'compressed-wav', 'riff-size', 'data-size', 'source-rate', 'byte-rate'] as const) {
+    it(`rejects ${failure} before native decoding and backs off until corrected media can retry`, async (t) => {
+      const h = install(t, 'running');
+      let bytes = wav();
+      const view = new DataView(bytes);
+      if (failure === 'overlong') bytes = wav(40_001);
+      if (failure === 'mp3' || failure === 'ogg' || failure === 'flac') {
+        new Uint8Array(bytes).set(new TextEncoder().encode({ mp3: 'ID3', ogg: 'OggS', flac: 'fLaC' }[failure]));
+      }
+      if (failure === 'compressed-wav') view.setUint16(20, 0x55, true);
+      if (failure === 'riff-size') view.setUint32(4, 36, true);
+      if (failure === 'data-size') view.setUint32(40, 0xffff_ffff, true);
+      if (failure === 'source-rate') { view.setUint32(24, 1, true); view.setUint32(28, 2, true); }
+      if (failure === 'byte-rate') view.setUint32(28, 0xffff_ffff, true);
+      h.fetch.mock.mockImplementation(async () => new Response(bytes));
+      const player = h.player(); player.setFigure(figure({ src: '/rejected.wav' })); player.unlock(); player.play('idle'); await flush();
+      h.env.now = 700; player.play('idle'); await flush();
+      assert.equal(h.fetch.mock.callCount(), 1, 'preflight failures use deterministic negative backoff');
+      assert.equal(h.context().decoded.length, 0, 'the native decoder never receives rejected input');
+      assert.equal(h.context().sources.length, 0);
+      h.fetch.mock.mockImplementation(async () => audioResponse());
+      h.env.now = 30_001; player.play('idle'); await flush();
+      assert.equal(h.fetch.mock.callCount(), 2);
+      assert.equal(h.context().decoded.length, 1);
+      assert.equal(h.context().sources.length, 1, 'valid media recovers after a rejected file');
+    });
+  }
+
+  it('checks the destination resampling PCM budget before native decoding', async (t) => {
+    const h = install(t, 'running');
+    h.fetch.mock.mockImplementation(async () => new Response(wav(40_000, 2)));
+    const player = h.player(); player.setFigure(figure({ src: '/resampled.wav' })); player.unlock();
+    h.context().sampleRate = 384_000; // Five seconds of stereo would require 15,360,000 decoded bytes.
+    player.play('idle'); await flush();
+    assert.equal(h.context().decoded.length, 0);
+    assert.equal(h.context().sources.length, 0);
+    h.context().sampleRate = 48_000;
+    h.env.now = 30_001; player.play('idle'); await flush();
+    assert.equal(h.context().decoded.length, 1, 'the same bounded source fits at a normal context rate');
+    assert.equal(h.context().sources.length, 1);
+  });
+
   it('silently handles fetch/decode failures and rejects decoded audio longer than five seconds', async (t) => {
     const h = install(t, 'running');
     const player = h.player(); player.unlock();
@@ -782,16 +842,26 @@ describe('SoundPlayer bounded file playback', () => {
     assert.equal(h.context().sources.length, 6);
   });
 
-  it('plays valid audio larger than the PCM cache budget without retaining it', async (t) => {
-    const h = install(t, 'running');
-    h.env.decode = async () => buffer(5, 8, 96_000); // 15,360,000 decoded bytes, but still a valid five-second cue.
-    const player = h.player(); player.setFigure(figure({ src: '/uncached.ogg' })); player.unlock(); player.play('idle'); await flush();
-    h.env.now = 700; player.play('idle'); await flush();
-    assert.equal(h.fetch.mock.callCount(), 2);
-    assert.equal(h.context().decoded.length, 2);
-    assert.equal(h.context().sources.length, 2);
-    assert.ok(h.context().sources.every((source) => source.stops[0] === source.starts[0]![0]! + 5));
-  });
+  for (const failure of ['pcm-size', 'channel-count', 'empty', 'nonfinite-length', 'nonfinite-duration'] as const) {
+    it(`rejects a native decode with invalid ${failure} and applies deterministic backoff`, async (t) => {
+      const h = install(t, 'running');
+      h.env.decode = async () => {
+        if (failure === 'pcm-size') return buffer(5, 2, 384_000); // 15,360,000 decoded bytes.
+        if (failure === 'channel-count') return buffer(0.4, 3);
+        if (failure === 'empty') return buffer(0);
+        if (failure === 'nonfinite-length') return { ...buffer(), length: NaN } as AudioBuffer;
+        return { ...buffer(), duration: NaN } as AudioBuffer;
+      };
+      const player = h.player(); player.setFigure(figure({ src: '/invalid-decoded.wav' })); player.unlock(); player.play('idle'); await flush();
+      h.env.now = 700; player.play('idle'); await flush();
+      assert.equal(h.fetch.mock.callCount(), 1);
+      assert.equal(h.context().decoded.length, 1, 'post-decode validation still defends against unexpected native output');
+      assert.equal(h.context().sources.length, 0);
+      h.env.decode = undefined;
+      h.env.now = 30_001; player.play('idle'); await flush();
+      assert.equal(h.context().sources.length, 1, 'a later valid decode recovers after the backoff');
+    });
+  }
 
   it('bounds the decoded cache to 24 entries and refreshes recently used entries', async (t) => {
     const h = install(t, 'running');

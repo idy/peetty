@@ -143,7 +143,6 @@ export class Peetty {
   /** Enables/mutes action sounds or changes their master volume (0–1). */
   setSound(sound: boolean | PeettySoundOptions): void {
     this.sounds.setOptions(sound);
-    this.sounds.unlock();
     this.syncSoundButton();
   }
 

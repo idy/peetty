@@ -149,6 +149,29 @@ describe('companion action sounds', () => {
     assert.equal(play.mock.callCount(), 1);
   });
 
+  it('keeps programmatic sound enabling silent until a trusted activation', async (t) => {
+    let contexts = 0;
+    class AudioContextStub extends EventTarget {
+      state: AudioContextState = 'running';
+      constructor() { super(); contexts++; }
+      async resume() { this.state = 'running'; }
+      async suspend() { this.state = 'suspended'; }
+      async close() { this.state = 'closed'; }
+    }
+    t.after(stubGlobals({ AudioContext: AudioContextStub }));
+    const { dom, pet, state } = await mountPet(t);
+    stand(state);
+    pet.setSound(true);
+    pet.setSound({ volume: 0.5 });
+    pet.play('wave');
+    assert.equal(pet.soundEnabled, true);
+    assert.equal(contexts, 0, 'settings must not create a context even when autoplay would permit it');
+    const gesture = new Event('click');
+    Object.defineProperty(gesture, 'isTrusted', { value: true });
+    dom.window.dispatchEvent(gesture);
+    assert.equal(contexts, 1, 'the first trusted activation initializes audio');
+  });
+
   it('emits state-entry, wake, drag and landing events without repeating a pose', async (t) => {
     const { dom, pet, state } = await mountPet(t);
     stand(state);
@@ -215,7 +238,7 @@ describe('companion action sounds', () => {
     t.after(stubGlobals({ AudioContext: AudioContextStub }));
     const { dom, pet, state } = await mountPet(t, { sound: { enabled: true, volume: 0.4 } });
     stand(state);
-    pet.setSound(true);
+    (pet as unknown as { sounds: SoundPlayer }).sounds.unlock();
     const stop = mock.method(SoundPlayer.prototype, 'stop');
     pet.hide();
     assert.ok(stop.mock.callCount() >= 1);

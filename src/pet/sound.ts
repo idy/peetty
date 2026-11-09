@@ -1,6 +1,7 @@
 import { soundSource } from '../figure/sources.ts';
 import type { FigureSounds, SoundCue, SoundEvent } from '../figure/types.ts';
 import { clamp } from '../math.ts';
+import { InvalidAudio, MAX_AUDIO_BYTES as MAX_BYTES, MAX_AUDIO_SECONDS as MAX_SECONDS, MAX_PCM_BYTES, preflightWav } from './wav.ts';
 
 export interface PeettySoundOptions {
   enabled?: boolean;
@@ -8,10 +9,8 @@ export interface PeettySoundOptions {
 }
 
 const HEADROOM = 0.12;
-const MAX_SECONDS = 5;
-const MAX_BYTES = 2 * 1024 * 1024;
 const MAX_CACHE = 24;
-const MAX_CACHE_BYTES = 8 * 1024 * 1024;
+const MAX_CACHE_BYTES = MAX_PCM_BYTES;
 const MAX_OPERATIONS = 4;
 const MAX_FAILURES = 24;
 const FAILURE_TTL_MS = 30_000;
@@ -32,8 +31,6 @@ interface Download {
 function level(value: number | undefined, fallback: number): number {
   return value === undefined || !Number.isFinite(value) ? fallback : clamp(value, 0, 1);
 }
-
-class InvalidAudio extends Error {}
 
 function pcmBytes(buffer: AudioBuffer): number {
   return buffer.length * buffer.numberOfChannels * 4;
@@ -382,11 +379,14 @@ export class SoundPlayer {
         const response = await fetch(src, { credentials: 'omit', referrerPolicy: 'no-referrer', signal: controller.signal });
         const bytes = await readAudio(response, controller.signal);
         if (controller.signal.aborted) return;
+        preflightWav(bytes, context.sampleRate);
         let buffer: AudioBuffer;
         try { buffer = await context.decodeAudioData(bytes); }
         catch { throw new InvalidAudio('Invalid audio'); }
         if (controller.signal.aborted || context !== this.context) return;
         if (!Number.isFinite(buffer.duration) || buffer.duration <= 0 || buffer.duration > MAX_SECONDS) throw new InvalidAudio('Invalid audio duration');
+        if (!Number.isSafeInteger(buffer.length) || buffer.length <= 0 || (buffer.numberOfChannels !== 1 && buffer.numberOfChannels !== 2)
+          || pcmBytes(buffer) > MAX_PCM_BYTES) throw new InvalidAudio('Invalid decoded PCM');
         this.cacheBuffer(src, buffer);
         return buffer;
       } catch (error) {
