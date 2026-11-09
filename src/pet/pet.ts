@@ -114,6 +114,7 @@ export class Peetty {
   private chatPanel: ChatPanel | null = null;
   private chatLoading: Promise<ChatPanel | null> | null = null;
   private chatOperation = 0;
+  private modelOperation = 0;
   private chatVisible = false;
   private chatWorking = false;
   private chatSpeaking = false;
@@ -149,6 +150,7 @@ export class Peetty {
   destroy(): void {
     this.finishChatAction(new Error('Companion action interrupted by removal.'));
     this.chatOperation++;
+    this.modelOperation++;
     this.chatPanel?.destroy();
     this.chatPanel = null;
     this.chatLoading = null;
@@ -243,8 +245,13 @@ export class Peetty {
   /** Replaces the injected model and aborts an unfinished reply. Credentials stay in memory. */
   async setModel(model: PeettyModelOptions): Promise<void> {
     const next = normalizeModelOptions(model);
+    const generation = this.generation;
+    const operation = ++this.modelOperation;
+    const current = () => generation === this.generation && operation === this.modelOperation;
     const panel = this.chatPanel ?? (this.chatLoading ? await this.chatLoading : null);
+    if (!current()) return;
     await panel?.setModel(next);
+    if (!current()) return;
     this.options = { ...this.options, model: next };
   }
 
@@ -291,6 +298,7 @@ export class Peetty {
     }
     const panel = await this.chatLoading;
     if (!panel || generation !== this.generation || operation !== this.chatOperation) return;
+    const opening = !this.chatVisible;
     this.chatVisible = true;
     this.menuPinned = false;
     clearTimeout(this.menuTimer);
@@ -304,7 +312,7 @@ export class Peetty {
       this.overlay.host.style.visibility = 'visible';
       if (this.mode === 'paused') this.overlay.pet.classList.add('gone');
     }
-    if (this.mode === 'ground') this.setAction('sit', 30);
+    if (opening && this.mode === 'ground' && !this.actionCompletion) this.setAction('sit', 30);
     panel.open(settings);
   }
 
@@ -318,6 +326,7 @@ export class Peetty {
     if (signal?.aborted) throw new DOMException('Action stopped.', 'AbortError');
     if (this.hidden || this.mode === 'paused') throw new Error('The companion is not currently visible.');
     if (this.mode !== 'ground' || this.actionCompletion) throw new Error('The companion is moving; try again once she lands.');
+    clearTimeout(this.greetTimer);
     const duration = action === 'sleep' ? 20000 : 3500;
     if (action === 'move') {
       if (!this.leap()) throw new Error('No other safe spot is available.');
@@ -892,7 +901,7 @@ export class Peetty {
     this.action = 'idle';
     this.until = this.clock / 1000 + (strength > 0.85 ? 1.8 : rand(0.6, 1.4));
     if (perch.input) this.until = this.clock / 1000 + 0.5;
-    if (this.options.greet !== false && this.lastGreet === -Infinity && this.figure) {
+    if (this.options.greet !== false && !this.chatVisible && !this.actionCompletion && this.lastGreet === -Infinity && this.figure) {
       this.lastGreet = this.clock;
       this.scheduleGreeting(700);
     }

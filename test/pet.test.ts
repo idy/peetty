@@ -7,7 +7,7 @@ import { PRESETS } from '../src/presets.ts';
 import { floor, limits, type Perch, type PerchOptions } from '../src/pet/perches.ts';
 import { planJump, weighted } from '../src/pet/physics.ts';
 import type { Overlay } from '../src/pet/ui.ts';
-import type { CompanionAction } from '../src/chat/types.ts';
+import type { CompanionAction, PeettyModelOptions } from '../src/chat/types.ts';
 import { deferred, ElementStub, installPetDOM, pointer } from './helpers/pet-dom.ts';
 
 /** Inspect controller state while driving its public methods, events and frame loop. */
@@ -62,6 +62,20 @@ function stand(state: Controller, x = 300) {
   state.x = x;
   state.land(perch, 0.2);
   return perch;
+}
+
+function attachChatPanel(pet: Peetty, setModel: (model: PeettyModelOptions) => Promise<void> = async () => {}) {
+  const panel = {
+    isOpen: false,
+    open() { this.isOpen = true; },
+    close() { this.isOpen = false; },
+    setModel,
+    destroy() { this.isOpen = false; },
+  };
+  const host = pet as unknown as { chatPanel: typeof panel; chatLoading: Promise<typeof panel> };
+  host.chatPanel = panel;
+  host.chatLoading = Promise.resolve(panel);
+  return panel;
 }
 
 describe('mount and figure request ownership', () => {
@@ -869,6 +883,61 @@ describe('multiple companions and physical chat actions', () => {
     assert.deepEqual(completed, ['wave', 'sit', 'lie']);
   });
 
+  for (const action of ['wave', 'sleep'] as const) {
+    it(`preserves a running ${action} tool when chat is reopened`, async (t) => {
+      const { dom, pet, state } = await mountPet(t);
+      stand(state);
+      attachChatPanel(pet);
+      await pet.openChat();
+      let completed = false;
+      const pending = state.performChatAction(action).then(() => { completed = true; });
+      await pet.openChat();
+      await pet.configure();
+      dom.frame(50);
+      await Promise.resolve();
+      assert.equal(state.view.motion.current, action);
+      assert.equal(completed, false);
+      for (let i = 0; i < 500 && !completed; i++) { dom.frame(50); await Promise.resolve(); }
+      await pending;
+      assert.equal(completed, true);
+    });
+  }
+
+  for (const action of ['wave', 'idle'] as const) {
+    it(`does not schedule a landing greeting over a ${action} tool when chat opened in midair`, async (t) => {
+      const { dom, pet, state } = await mountPet(t, { greet: true });
+      assert.equal(state.mode, 'fall');
+      attachChatPanel(pet);
+      await pet.openChat();
+      stand(state);
+      assert.equal(dom.timers.size, 0);
+      let completed = false;
+      const pending = state.performChatAction(action).then(() => { completed = true; });
+      for (let i = 0; i < 16; i++) { dom.frame(50); await Promise.resolve(); }
+      assert.equal(state.view.motion.current, action);
+      assert.equal(state.overlay.bubble.textContent, '');
+      for (let i = 0; i < 80 && !completed; i++) { dom.frame(50); await Promise.resolve(); }
+      await pending;
+      assert.equal(completed, true);
+    });
+  }
+
+  it('cancels an already queued greeting before a chat action begins', async (t) => {
+    const { dom, state } = await mountPet(t, { greet: true });
+    stand(state);
+    assert.equal(dom.timers.size, 1);
+    state.chatVisible = true;
+    let completed = false;
+    const pending = state.performChatAction('idle').then(() => { completed = true; });
+    assert.equal(dom.timers.size, 0);
+    for (let i = 0; i < 16; i++) { dom.frame(50); await Promise.resolve(); }
+    assert.equal(state.view.motion.current, 'idle');
+    assert.equal(state.overlay.bubble.textContent, '');
+    for (let i = 0; i < 80 && !completed; i++) { dom.frame(50); await Promise.resolve(); }
+    await pending;
+    assert.equal(completed, true);
+  });
+
   it('keeps an idle tool from being interrupted by the nearby-pointer greeting', async (t) => {
     const { dom, pet, state } = await mountPet(t);
     stand(state);
@@ -959,6 +1028,40 @@ describe('chat entry points and SDK model injection', () => {
     assert.equal(network.mock.callCount(), 0);
   });
 
+  for (const phase of ['loading', 'applying'] as const) {
+    it(`discards a model replacement waiting for chat ${phase} after destruction`, async (t) => {
+      const { pet } = await mountPet(t);
+      const loading = deferred<null>();
+      const applying = deferred<void>();
+      if (phase === 'loading') (pet as unknown as { chatLoading: Promise<null> }).chatLoading = loading.promise;
+      else attachChatPanel(pet, () => applying.promise);
+      const old = pet.setModel({ id: 'stale', baseUrl: 'https://stale.example', apiKey: 'stale-key' });
+      pet.destroy();
+      const fresh = { id: 'fresh', baseUrl: 'https://fresh.example', apiKey: 'fresh-key' };
+      await pet.setModel(fresh);
+      loading.resolve(null);
+      applying.resolve();
+      await old;
+      await pet.mount();
+      assert.deepEqual((pet as unknown as { options: { model: PeettyModelOptions } }).options.model, fresh);
+      assert.equal(pet.mounted, true);
+    });
+  }
+
+  it('keeps the latest model when earlier panel updates finish out of order', async (t) => {
+    const { pet } = await mountPet(t);
+    const first = deferred<void>();
+    const second = deferred<void>();
+    attachChatPanel(pet, (model) => model.id === 'first' ? first.promise : second.promise);
+    const old = pet.setModel({ id: 'first', baseUrl: 'https://first.example', apiKey: 'first-key' });
+    const fresh = pet.setModel({ id: 'second', baseUrl: 'https://second.example', apiKey: 'second-key' });
+    second.resolve();
+    await fresh;
+    first.resolve();
+    await old;
+    assert.equal((pet as unknown as { options: { model: PeettyModelOptions } }).options.model.id, 'second');
+  });
+
   it('opens chat once on a double tap and cancels the delayed greeting', async (t) => {
     const { dom, pet, state } = await mountPet(t);
     stand(state);
@@ -975,10 +1078,7 @@ describe('chat entry points and SDK model injection', () => {
   it('cancels queued hover and tap work when chat opens', async (t) => {
     const { dom, pet, state } = await mountPet(t);
     stand(state);
-    const panel = { isOpen: false, open() { this.isOpen = true; }, close() { this.isOpen = false; }, async setModel() {}, destroy() {} };
-    const host = pet as unknown as { chatPanel: typeof panel; chatLoading: Promise<typeof panel> };
-    host.chatPanel = panel;
-    host.chatLoading = Promise.resolve(panel);
+    const panel = attachChatPanel(pet);
     state.overlay.pet.dispatchEvent(new Event('pointerover'));
     state.overlay.pet.dispatchEvent(pointer('pointerdown', 1));
     dom.window.dispatchEvent(pointer('pointerup', 1));

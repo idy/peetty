@@ -59,6 +59,9 @@ export function abortable<T>(promise: PromiseLike<T>, signal: AbortSignal): Prom
   });
 }
 
+// A configured endpoint must not redirect secrets or conversation bodies to another server.
+const endpointFetch: typeof fetch = (input, init) => fetch(input, { ...init, redirect: 'error' });
+
 function statusError(status: number): string {
   if (status === 401 || status === 403) return 'The endpoint rejected access. Check your API key.';
   if (status === 404) return 'The endpoint or model was not found.';
@@ -79,7 +82,7 @@ export async function fetchModelList(baseUrl: string, apiKey?: string, signal?: 
     const headers = new Headers(extraHeaders);
     headers.set('Accept', 'application/json');
     if (key && !headers.has('Authorization')) headers.set('Authorization', `Bearer ${key}`);
-    const response = await abortable(fetch(`${base}/models`, {
+    const response = await abortable(endpointFetch(`${base}/models`, {
       headers,
       signal: controller.signal,
       credentials: 'omit',
@@ -381,7 +384,7 @@ export class ChatRuntime {
         streamFn: async (requestModel, context, options) => {
           if (!this.live(run) || ++run.requests > MAX_REQUESTS) throw aborted();
           return stream(requestModel, context, {
-            ...options, apiKey: key || 'peetty-keyless', headers: requestHeaders,
+            ...options, apiKey: key || 'peetty-keyless', headers: requestHeaders, fetch: endpointFetch,
             maxRetries: 0, timeoutMs: timeout, maxTokens: 1_200, cacheRetention: 'none',
           });
         },
