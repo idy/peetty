@@ -125,6 +125,28 @@ function hostOf(node: Node): Element | null {
   return root.nodeType === FRAGMENT ? (root as ShadowRoot).host ?? null : null;
 }
 
+/** A companion's validated SVG is one graphic, not thousands of separate obstacles. */
+function figureBox(el: Element, rect: Box): Box | null {
+  if (el.tagName.toUpperCase() !== 'SVG' || hostOf(el)?.tagName.toUpperCase() !== 'PEETTY-COMPANION') return null;
+  const svg = el as SVGGraphicsElement;
+  if (typeof svg.getBBox !== 'function' || typeof svg.getScreenCTM !== 'function' || !finiteBox(rect)) return null;
+  try {
+    const shape = svg.getBBox();
+    const matrix = svg.getScreenCTM();
+    if (!matrix || ![shape.x, shape.y, shape.width, shape.height, matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f].every(Number.isFinite) || shape.width < 0 || shape.height < 0) return null;
+    let { left, top, right, bottom } = rect;
+    // Include overflow-visible poses and mirrored figures, not only the SVG viewport.
+    for (const x of [shape.x, shape.x + shape.width]) for (const y of [shape.y, shape.y + shape.height]) {
+      const px = matrix.a * x + matrix.c * y + matrix.e;
+      const py = matrix.b * x + matrix.d * y + matrix.f;
+      if (!Number.isFinite(px) || !Number.isFinite(py)) return null;
+      left = Math.min(left, px); right = Math.max(right, px);
+      top = Math.min(top, py); bottom = Math.max(bottom, py);
+    }
+    return box(left, top, right, bottom);
+  } catch { return null; }
+}
+
 /** The topmost page element at a point, including open shadow trees. */
 export function topAt(x: number, y: number, host: Element): Element | null {
   return hitAt(x, y, host, { left: HIT_BUDGET });
@@ -397,7 +419,11 @@ function scan(opts: PerchOptions): Scan {
     // below its containing block. A contents box is never positioned.
     const position = style.display === 'contents' ? 'static' : style.position;
     const own = position === 'fixed' ? context.fixed : position === 'absolute' ? context.absolute : context.flow;
-    if (visible && (avoid || el.matches(INTERACTIVE) || MEDIA_TAGS.has(el.tagName.toUpperCase()))) addObstacle(rect, el, avoid, own);
+    const graphic = visible && avoid && style.overflowX === 'visible' && style.overflowY === 'visible' ? figureBox(el, rect) : null;
+    if (visible && (avoid || el.matches(INTERACTIVE) || MEDIA_TAGS.has(el.tagName.toUpperCase()))) addObstacle(graphic ?? rect, el, avoid, own);
+    // Native SVG bounds cover the whole figure, including overflowing geometry.
+    // Pruning this known graphic keeps both rectangle and traversal budgets bounded.
+    if (graphic) continue;
     if (!avoid && opacity >= MIN_OPACITY && rect.width > 0 && rect.top >= own.top && rect.top < own.bottom && carries(el, style, rect)) {
       const list = el.getAttribute('data-peetty') === 'perch' ? preferred : ordinary;
       if (list.length < MAX_CANDIDATES) list.push(el);

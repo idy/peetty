@@ -402,6 +402,68 @@ describe('safe viewport floor', () => {
   });
 });
 
+describe('bounded companion graphics', () => {
+  function figure(bounds: Rect, shape = { x: 0, y: 0, width: bounds.width, height: bounds.height }, flip = false) {
+    // The real host is pointer-transparent outside its painted figure.
+    const host = element('peetty-companion', empty());
+    const shadow = new TestShadow(host); host.shadowRoot = shadow;
+    const pet = new TestElement('DIV', bounds); pet.setAttribute('data-peetty', 'avoid'); shadow.append(pet);
+    const svg = element('svg', bounds, pet);
+    Object.assign(svg, {
+      getBBox: () => shape,
+      getScreenCTM: () => ({ a: flip ? -1 : 1, b: 0, c: 0, d: 1, e: flip ? bounds.right : bounds.left, f: bounds.top }),
+    });
+    return { svg, pet };
+  }
+
+  it('keeps clear space usable beside several figures with thousands of visible parts', () => {
+    for (let n = 0; n < 3; n++) {
+      const { svg } = figure(rect(n * 130, 580, 100, 120));
+      for (let i = 0; i < 2500; i++) element('path', svg.bounds, svg);
+    }
+    const found = floor(fixture.opts);
+    assert.ok(found, 'one graphic must not exhaust the shared rectangle or traversal budget');
+    assert.ok(found.left > 410 && found.right <= 750);
+    assert.ok(fixture.styleReads < 50, `bounded style reads: ${fixture.styleReads}`);
+    assert.ok(fixture.geometryReads < 50, `bounded geometry reads: ${fixture.geometryReads}`);
+  });
+
+  it('includes overflow-visible SVG geometry outside the declared viewport', () => {
+    const { svg } = figure(rect(0, 580, 100, 120), { x: 0, y: 0, width: 230, height: 120 });
+    element('path', rect(0, 580, 230, 120), svg);
+    const found = floor(fixture.opts);
+    assert.ok(found);
+    assert.ok(found.left > 280, `painted geometry extends the blocked span: ${found.left}`);
+  });
+
+  it('transforms the whole geometry when the figure is mirrored', () => {
+    const { svg } = figure(rect(500, 580, 100, 120), { x: 0, y: 0, width: 200, height: 120 }, true);
+    element('path', rect(400, 580, 200, 120), svg);
+    const found = floor(fixture.opts);
+    assert.ok(found);
+    assert.ok(found.right < 350, `mirrored overflow stays blocked: ${found.right}`);
+  });
+
+  it('falls back to normal descendant scanning if native SVG bounds fail', () => {
+    const { svg } = figure(rect(0, 580, 100, 120));
+    Object.assign(svg, { getBBox() { throw new Error('No native geometry'); } });
+    element('path', rect(0, 580, 230, 120), svg);
+    const found = floor(fixture.opts);
+    assert.ok(found);
+    assert.ok(found.left > 280);
+  });
+
+  it('does not prune arbitrary avoided page SVG content as a companion graphic', () => {
+    const avoid = element('section', rect(0, 580, 100, 120)); avoid.setAttribute('data-peetty', 'avoid');
+    const svg = element('svg', rect(0, 580, 100, 120), avoid);
+    Object.assign(svg, { getBBox: () => ({ x: 0, y: 0, width: 100, height: 120 }), getScreenCTM: () => ({ a: 1, b: 0, c: 0, d: 1, e: 0, f: 580 }) });
+    element('button', rect(0, 580, 250, 120), svg);
+    const found = floor(fixture.opts);
+    assert.ok(found);
+    assert.ok(found.left > 300);
+  });
+});
+
 describe('the viewport bottom', () => {
   const catchAll = { el: null, left: 50, right: 750, y: 700, input: false, preferred: false, clear: false, offset: [50, 750] };
 

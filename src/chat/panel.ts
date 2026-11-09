@@ -10,11 +10,9 @@ const STYLE = `
 .peetty-chat {
   --pc-bg: #fffefa; --pc-ink: #302d40; --pc-muted: #6c6679; --pc-line: #e8e3ee;
   --pc-accent: #6753b8; --pc-soft: #f2edf9; --pc-input: #ffffff; --pc-error: #a33345;
-  position: fixed; right: max(20px, env(safe-area-inset-right)); bottom: max(20px, env(safe-area-inset-bottom));
-  width: min(390px, calc(100vw - 32px)); height: min(610px, calc(100dvh - 40px));
+  width: 100%; height: 100%;
   display: flex; flex-direction: column; box-sizing: border-box; pointer-events: auto;
   background: var(--pc-bg); color: var(--pc-ink); border-radius: 16px;
-  box-shadow: 0 12px 50px rgb(32 22 55 / .22), 0 2px 8px rgb(32 22 55 / .08);
   font: 400 14px/1.55 system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
   overflow: hidden; isolation: isolate; text-align: left; color-scheme: light;
 }
@@ -82,10 +80,7 @@ const STYLE = `
 @media (prefers-color-scheme: dark) {
   .peetty-chat { --pc-bg: #24212e; --pc-ink: #f0edf6; --pc-muted: #b8b0c6; --pc-line: #4a4259; --pc-accent: #bda9ef; --pc-button: #7055b4; --pc-soft: #393044; --pc-input: #2d2837; --pc-error: #ffacb9; color-scheme: dark; }
 }
-@media (max-width: 480px) {
-  .peetty-chat { right: 12px; bottom: max(12px, env(safe-area-inset-bottom)); width: calc(100vw - 24px); height: min(610px, calc(100dvh - 24px)); }
-  .pc-header { padding: 12px 14px; } .pc-setup { padding: 22px 18px; } .pc-input, .pc-compose-row textarea { font-size: 16px !important; }
-}
+.pc-mobile .pc-header { padding: 12px 14px; } .pc-mobile .pc-setup { padding: 22px 18px; } .pc-mobile .pc-input, .pc-mobile .pc-compose-row textarea { font-size: 16px !important; }
 @media (prefers-reduced-motion: no-preference) {
   .peetty-chat { animation: pc-enter .2s cubic-bezier(.16, 1, .3, 1); }
   @keyframes pc-enter { from { transform: translateY(9px); opacity: .4; } to { transform: none; opacity: 1; } }
@@ -96,6 +91,7 @@ export interface ChatPanel {
   readonly isOpen: boolean;
   open: (settings?: boolean) => void;
   close: () => void;
+  focus?: () => void;
   setModel: (model: PeettyModelOptions) => Promise<void>;
   setLanguage: (language: Language) => void;
   destroy: () => void;
@@ -114,8 +110,39 @@ interface PanelOptions {
 export async function createChatPanel(options: PanelOptions): Promise<ChatPanel> {
   let t = COPY[options.language];
   let name = options.chat?.name ?? t.companion;
-  const style = document.createElement('style');
-  style.textContent = `${STYLE}\n${MARKDOWN_STYLE}`;
+  const parentDocument = options.root.ownerDocument;
+  const parentWindow = parentDocument.defaultView!;
+  const style = parentDocument.createElement('style');
+  style.textContent = `
+    .pc-frame { position: fixed; right: max(20px, env(safe-area-inset-right)); bottom: max(20px, env(safe-area-inset-bottom));
+      width: min(390px, calc(100vw - 32px)); height: min(610px, calc(100dvh - 40px));
+      border: 0; border-radius: 16px; box-shadow: 0 12px 50px rgb(32 22 55 / .22), 0 2px 8px rgb(32 22 55 / .08);
+      display: block; pointer-events: auto; color-scheme: light dark; }
+    .pc-frame[hidden] { display: none !important; }
+    .pc-frame[data-releasing] { opacity: 0; pointer-events: none; }
+    @media (max-width: 480px) { .pc-frame { right: 12px; bottom: max(12px, env(safe-area-inset-bottom));
+      width: calc(100vw - 24px); height: min(610px, calc(100dvh - 24px)); } }
+    ${MARKDOWN_STYLE}`;
+  // The initial same-origin about:blank document requires no HTML string sinks.
+  // This isolates event paths, not credentials, from a trusted same-origin host.
+  const frame = parentDocument.createElement('iframe');
+  frame.className = 'pc-frame';
+  frame.title = t.chat;
+  frame.lang = options.language;
+  frame.setAttribute('data-peetty', 'avoid');
+  frame.hidden = true;
+  options.root.append(style, frame);
+  if (!frame.contentDocument) await new Promise<void>((resolve) => frame.addEventListener('load', () => resolve(), { once: true }));
+  const document = frame.contentDocument!;
+  document.documentElement.style.cssText = 'height:100%;overflow:hidden;background:transparent';
+  document.body.style.cssText = 'margin:0;height:100%;overflow:hidden;background:transparent';
+  const host = document.createElement('div');
+  host.style.cssText = 'display:block;height:100%';
+  document.body.append(host);
+  const root = host.attachShadow({ mode: 'open' });
+  const innerStyle = document.createElement('style');
+  innerStyle.textContent = `${STYLE}\n${MARKDOWN_STYLE}`;
+
   const panel = document.createElement('section');
   panel.className = 'peetty-chat';
   panel.setAttribute('data-peetty', 'avoid');
@@ -123,6 +150,10 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
   panel.setAttribute('aria-label', t.chat);
   panel.setAttribute('lang', options.language);
   panel.hidden = true;
+  const mobile = parentWindow.matchMedia('(max-width: 480px)');
+  const resize = () => panel.classList.toggle('pc-mobile', mobile.matches);
+  mobile.addEventListener('change', resize);
+  resize();
   const view = buildChatView(panel, () => t);
   const find = <T extends HTMLElement>(selector: string) => panel.querySelector<T>(selector)!;
   const setup = find<HTMLFormElement>('.pc-setup');
@@ -134,7 +165,10 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
   const effort = find<HTMLSelectElement>('[name="effort"]');
   const tools = find<HTMLInputElement>('[name="tools"]');
   let keyEdited = false;
-  let releaseEscapePress: (() => void) | undefined;
+  let releaseEscapePress: ((restore?: boolean) => void) | undefined;
+  let visible = false;
+  let canceledTurn = false;
+  let configuration = 0;
   const remember = find<HTMLInputElement>('[name="remember"]');
   // A host-supplied connection is ephemeral until the user opts in to saving its key.
   if (options.model) remember.checked = false;
@@ -227,7 +261,7 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     settings.title = show ? t.back : t.settings;
     if (entering) fillSettings();
     render();
-    if (!panel.hidden && (entering || !show)) (show ? url : input).focus();
+    if (visible && (entering || !show)) (show ? url : input).focus();
   }
   function createEntry(entry: ChatEntry) {
     const element = document.createElement('div');
@@ -238,7 +272,7 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     author.textContent = entry.role === 'user' ? t.you : name;
     const text = document.createElement('div');
     text.className = 'pc-text';
-    if (entry.role === 'action') element.append(icon('spark'), text);
+    if (entry.role === 'action') element.append(icon('spark', document), text);
     else element.append(author, text);
     const item = { element, text, author, rendered: undefined as string | undefined };
     nodes.set(entry.id, item);
@@ -278,9 +312,10 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     const speaking = runtime.busy && !!last?.text && runtime.entries[runtime.entries.length - 1]?.role === 'assistant';
     options.onState(runtime.busy, speaking);
     if (wasBusy && !runtime.busy) {
-      find('.pc-announcement').textContent = last?.text ?? '';
+      const announce = visible && !canceledTurn && !runtime.error;
+      find('.pc-announcement').textContent = announce ? last?.text ?? '' : '';
       if (runtime.error) showRuntimeError(runtime.error);
-      else { showError(); if (last?.text) options.onReply(last.text, target => renderMarkdownBubble(target, last.text)); }
+      else { showError(); if (announce && last?.text) options.onReply(last.text, target => renderMarkdownBubble(target, last.text)); }
     }
     wasBusy = runtime.busy;
     if (runtime.error && !shownError) showRuntimeError(runtime.error);
@@ -298,10 +333,10 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     const headers = matching?.headers ? { ...matching.headers } : undefined;
     if (replacement && headers) {
       for (const name of Object.keys(headers)) {
-        if (/^(authorization|x-api-key|api-key)$/i.test(name)) delete headers[name];
+        if (/^(authorization|x-api-key|api-key|cf-aig-authorization)$/i.test(name)) delete headers[name];
       }
     }
-    return { typedKey, headers, getApiKey: !replacement && !typedKey ? matching?.getApiKey : undefined };
+    return { typedKey, headers, matching, getApiKey: !replacement ? matching?.getApiKey : undefined };
   }
   function manualModel() { model.hidden = false; model.required = true; models.hidden = true; model.focus(); }
   async function discover() {
@@ -314,10 +349,10 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     const timeout = setTimeout(() => controller.abort(), 20000);
     try {
       const baseUrl = normalizeBaseUrl(url.value);
-      const { typedKey, headers, getApiKey } = connectionAuth(baseUrl);
-      const apiKey = typedKey || (getApiKey
-        ? await abortable(Promise.resolve().then(() => getApiKey()), controller.signal)
-        : undefined);
+      const { typedKey, headers, getApiKey, matching } = connectionAuth(baseUrl);
+      const apiKey = getApiKey
+        ? await abortable(Promise.resolve().then(() => getApiKey.call(matching)), controller.signal)
+        : typedKey || undefined;
       if (disposed || controller !== discovery || controller.signal.aborted) return;
       const list = await fetchModelList(baseUrl, apiKey, controller.signal, headers);
       if (disposed || controller !== discovery || controller.signal.aborted) return;
@@ -372,6 +407,7 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
   models.addEventListener('change', () => { model.value = models.value; });
   setup.addEventListener('submit', (event) => {
     event.preventDefault();
+    const revision = ++configuration;
     void (async () => {
       try {
         const baseUrl = normalizeBaseUrl(url.value);
@@ -379,18 +415,21 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
         if (!id) { showError(() => t.invalid); return; }
         const { typedKey, headers, getApiKey } = connectionAuth(baseUrl);
         cancelDiscovery();
+        canceledTurn = true;
         await runtime.configure({ baseUrl, id, tools: tools.checked, ...(effort.value ? { effort: effort.value as PeettyReasoningEffort } : {}), ...(typedKey ? { apiKey: typedKey } : {}), ...(getApiKey ? { getApiKey } : {}), ...(headers ? { headers } : {}) }, remember.checked);
-        if (disposed) return;
+        if (disposed || revision !== configuration) return;
         showError(); setSettings(false);
-      } catch { if (!disposed) showError(() => t.invalid); }
+      } catch { if (!disposed && revision === configuration) showError(() => t.invalid); }
     })();
   });
   function send() {
-    if (runtime.busy) { runtime.stop(); return; }
+    if (runtime.busy) { canceledTurn = true; runtime.stop(); return; }
     const text = input.value.trim();
     if (!text || !runtime.model) return;
     input.value = ''; input.style.height = '';
     showError();
+    canceledTurn = false;
+    find('.pc-announcement').textContent = '';
     void runtime.send(text);
     render(); content.scrollTop = content.scrollHeight; input.focus();
   }
@@ -401,66 +440,109 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
   find('.pc-cancel').addEventListener('click', () => { confirmation.hidden = true; render(); });
   find('.pc-clear-now').addEventListener('click', () => { confirmation.hidden = true; showError(); void runtime.clear().then(render); });
   settings.addEventListener('click', () => { showError(); cancelDiscovery(); setSettings(!settingsOpen || !runtime.model); });
-  const close = () => {
-    cancelDiscovery(); panel.hidden = true; runtime.stop(); options.onClose();
+  function focusCurrent() {
+    if (!visible || disposed) return;
+    const form = settingsOpen ? setup : composer;
+    const active = root.activeElement;
+    const target = active && form.contains(active) ? active as HTMLElement : settingsOpen ? url : input;
+    frame.focus();
+    target.focus();
+  }
+  function restoreParentFocus() {
     if (returnFocus?.isConnected) returnFocus.focus();
-  };
-  find('.pc-close').addEventListener('click', close);
-  function containEscapePress() {
-    releaseEscapePress?.();
-    const release = () => {
-      for (const type of ['keydown', 'keypress', 'keyup'] as const) window.removeEventListener(type, capture, true);
-      window.removeEventListener('blur', release);
-      releaseEscapePress = undefined;
-    };
-    const capture = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      // A fresh press after a missed release belongs to the host again.
-      if (event.type === 'keydown' && !event.repeat) { release(); return; }
-      event.preventDefault();
-      event.stopPropagation();
-      if (event.type === 'keyup') release();
-    };
-    for (const type of ['keydown', 'keypress', 'keyup'] as const) window.addEventListener(type, capture, true);
-    window.addEventListener('blur', release, { once: true });
-    releaseEscapePress = release;
   }
+  function close(deferFocus = false) {
+    releaseEscapePress?.(false);
+    cancelDiscovery(); visible = false; canceledTurn = true;
+    find('.pc-announcement').textContent = '';
+    runtime.stop();
+    if (deferFocus) {
+      // Keep the child browsing context focused through the consumed key's release.
+      frame.setAttribute('data-releasing', '');
+      const childWindow = document.defaultView!;
+      const release = (restore = true) => {
+        childWindow.removeEventListener('keyup', keyup, true);
+        childWindow.removeEventListener('keydown', freshPress, true);
+        childWindow.removeEventListener('blur', blur);
+        parentWindow.removeEventListener('blur', blur);
+        releaseEscapePress = undefined;
+        frame.removeAttribute('data-releasing');
+        frame.hidden = true;
+        panel.hidden = true;
+        if (restore && !disposed) restoreParentFocus();
+      };
+      const keyup = (event: KeyboardEvent) => {
+        if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); release(); }
+      };
+      const freshPress = (event: KeyboardEvent) => {
+        if (!event.repeat) release();
+        else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); }
+      };
+      const blur = () => release();
+      childWindow.addEventListener('keyup', keyup, true);
+      childWindow.addEventListener('keydown', freshPress, true);
+      childWindow.addEventListener('blur', blur);
+      parentWindow.addEventListener('blur', blur);
+      releaseEscapePress = release;
+    } else {
+      panel.hidden = true; frame.hidden = true; restoreParentFocus();
+    }
+    options.onClose();
+  }
+  find('.pc-close').addEventListener('click', () => close());
   panel.addEventListener('keydown', (event) => {
-    if (event.key !== 'Escape') return;
-    event.preventDefault(); event.stopPropagation();
-    containEscapePress(); close();
+    if (event.key !== 'Escape' || !visible) return;
+    event.preventDefault(); event.stopPropagation(); close(true);
   });
-  // Keep composer key events out of the host site's keyboard shortcuts.
-  for (const type of ['keydown', 'keyup', 'keypress'] as const) {
-    panel.addEventListener(type, (event) => event.stopPropagation());
-  }
-  options.root.append(style, panel);
+  root.append(innerStyle, panel);
   try { await runtime.initialize(); }
-  catch (error) { runtime.destroy(); panel.remove(); style.remove(); throw error; }
+  catch (error) { runtime.destroy(); mobile.removeEventListener('change', resize); frame.remove(); style.remove(); throw error; }
   if (disposed) return { isOpen: false, open() {}, close() {}, async setModel() {}, setLanguage() {}, destroy() {} };
   refreshCopy();
   return {
-    get isOpen() { return !panel.hidden; },
+    get isOpen() { return visible; },
     open(showSettings = false) {
-      const active = options.root.activeElement ?? document.activeElement;
-      if (panel.hidden && active instanceof HTMLElement && !panel.contains(active)) returnFocus = active;
+      if (disposed) return;
+      const active = options.root.activeElement ?? parentDocument.activeElement;
+      if (!visible && !releaseEscapePress && active instanceof parentWindow.HTMLElement && active !== frame) returnFocus = active;
+      releaseEscapePress?.(false);
+      const opening = !visible;
+      visible = true; frame.hidden = false;
       panel.hidden = false;
+      if (opening) frame.focus();
       showError();
       setSettings(showSettings || !runtime.model);
+      if (opening) focusCurrent();
     },
-    close,
+    close: () => close(),
+    focus: focusCurrent,
     setLanguage(language) {
       if (disposed) return;
       if (language !== 'en' && language !== 'zh') throw new TypeError('Unsupported interface language.');
       t = COPY[language];
+      frame.title = t.chat;
+      frame.lang = language;
       panel.setAttribute('lang', language);
       refreshCopy();
     },
     async setModel(next) {
+      if (disposed) return;
+      const revision = ++configuration;
       cancelDiscovery();
-      await runtime.setModel(next);
-      if (!disposed) { remember.checked = false; showError(); setSettings(false); }
+      const replacement = runtime.setModel(next);
+      if (!runtime.busy) canceledTurn = true;
+      await replacement;
+      if (!disposed && revision === configuration) { remember.checked = false; showError(); setSettings(false); }
     },
-    destroy() { disposed = true; releaseEscapePress?.(); cancelDiscovery(); runtime.destroy(); panel.remove(); style.remove(); },
+    destroy() {
+      if (disposed) return;
+      const focused = visible || !!releaseEscapePress;
+      disposed = true; configuration++;
+      releaseEscapePress?.(false);
+      if (focused) restoreParentFocus();
+      visible = false; cancelDiscovery(); runtime.destroy();
+      mobile.removeEventListener('change', resize);
+      frame.remove(); style.remove();
+    },
   };
 }

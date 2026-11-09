@@ -40,6 +40,7 @@ interface Run {
   unsubscribe?: () => void;
   assistantId?: string;
   inputId?: string;
+  credentialsKnown: boolean;
   requests: number;
   actions: number;
 }
@@ -60,7 +61,7 @@ export function abortable<T>(promise: PromiseLike<T>, signal: AbortSignal): Prom
 }
 
 // A configured endpoint must not redirect secrets or conversation bodies to another server.
-const endpointFetch: typeof fetch = (input, init) => fetch(input, { ...init, redirect: 'error', referrerPolicy: 'no-referrer' });
+const endpointFetch: typeof fetch = (input, init) => fetch(input, { ...init, redirect: 'error', referrerPolicy: 'no-referrer', credentials: 'omit' });
 
 function statusError(status: number): string {
   if (status === 401 || status === 403) return 'The endpoint rejected access. Check your API key.';
@@ -352,7 +353,7 @@ export class ChatRuntime {
       this.changed();
       return;
     }
-    const run: Run = { controller: new AbortController(), requests: 0, actions: 0 };
+    const run: Run = { controller: new AbortController(), credentialsKnown: false, requests: 0, actions: 0 };
     this.replyId = undefined;
     this.active = run;
     this.currentError = null;
@@ -375,6 +376,7 @@ export class ChatRuntime {
         return;
       }
       const messagesBeforeInput = this.history.length;
+      run.credentialsKnown = !selected.getApiKey;
       run.inputId = this.append('user', text).id;
       this.changed();
       let key: string;
@@ -387,6 +389,7 @@ export class ChatRuntime {
       if (!this.live(run)) return;
       if (key) this.secrets.add(key);
       this.history = this.history.map((entry) => ({ ...entry, text: this.redact(entry.text) }));
+      run.credentialsKnown = true;
       const [{ Agent }, { createModels, createProvider }, { openAICompletionsApi }] = await abortable(Promise.all([
         import('@earendil-works/pi-agent-core'),
         import('@earendil-works/pi-ai/models'),
@@ -450,12 +453,21 @@ export class ChatRuntime {
       run.unsubscribe?.();
       if (this.active === run) {
         this.active = undefined;
+        this.discardUnresolvedInput(run);
         this.history = boundedEntries(this.history);
         const saving = run.inputId ? this.saveHistory() : Promise.resolve();
         this.changed();
         await saving;
       }
     }
+  }
+
+  private discardUnresolvedInput(run: Run): void {
+    // A callback's secret cannot be redacted before it is returned. Never persist
+    // an optimistic input from a turn canceled or rejected while it was unknown.
+    if (run.credentialsKnown || !run.inputId) return;
+    this.history = this.history.filter((entry) => entry.id !== run.inputId);
+    delete run.inputId;
   }
 
   private stopRun(): boolean {
@@ -465,6 +477,7 @@ export class ChatRuntime {
     run.controller.abort();
     run.agent?.abort();
     run.unsubscribe?.();
+    this.discardUnresolvedInput(run);
     this.history = boundedEntries(this.history);
     // A canceled initialization/refresh has no local changes. Saving its old UI
     // snapshot after the load adopts a new epoch could otherwise undo a peer clear.

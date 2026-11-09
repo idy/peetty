@@ -17,8 +17,9 @@ async function mountPanel(t: TestContext, model: PeettyModelOptions | undefined,
   onReply?: (text: string, render?: (target: HTMLElement) => void) => void;
   onState?: (busy: boolean, speaking: boolean) => void;
   rejectHTML?: boolean;
+  beforeMount?: (window: Window) => void;
 } = {}) {
-  const window = new Window({ url: 'https://host.example/' });
+  const window = new Window({ url: 'https://host.example/', settings: { enableIframePageLoading: true } });
   const document = window.document as unknown as Document;
   const restore = stubGlobals({ window, document, location: window.location, HTMLElement: window.HTMLElement });
   let panel: ChatPanel | undefined;
@@ -33,18 +34,37 @@ async function mountPanel(t: TestContext, model: PeettyModelOptions | undefined,
   });
   if (options.rejectHTML) {
     const patched = new Set<object>();
-    for (const start of [window.HTMLElement.prototype, window.SVGElement.prototype]) {
+    const reject = () => { htmlWrites++; throw new TypeError('TrustedHTML required.'); };
+    const patch = (start: object, name: string, setter = false) => {
       let prototype: object | null = start;
-      while (prototype && !Object.getOwnPropertyDescriptor(prototype, 'innerHTML')?.set) prototype = Object.getPrototypeOf(prototype) as object | null;
-      assert.ok(prototype, 'the DOM fixture exposes the HTML setter');
-      if (patched.has(prototype)) continue;
-      patched.add(prototype);
-      const descriptor = Object.getOwnPropertyDescriptor(prototype, 'innerHTML')!;
+      while (prototype && !Object.getOwnPropertyDescriptor(prototype, name)) prototype = Object.getPrototypeOf(prototype) as object | null;
+      assert.ok(prototype, `the DOM fixture exposes ${name}`);
+      const descriptor = Object.getOwnPropertyDescriptor(prototype, name)!;
       const target = prototype;
-      Object.defineProperty(target, 'innerHTML', { ...descriptor, set() { htmlWrites++; throw new TypeError('TrustedHTML required.'); } });
-      restoreSinks.push(() => Object.defineProperty(target, 'innerHTML', descriptor));
-    }
+      if (patched.has(target) && name === 'innerHTML') return;
+      if (name === 'innerHTML') patched.add(target);
+      Object.defineProperty(target, name, setter ? { ...descriptor, set: reject } : { ...descriptor, value: reject });
+      restoreSinks.push(() => Object.defineProperty(target, name, descriptor));
+    };
+    const protect = (doc: Document) => {
+      patch(doc.createElement('div'), 'innerHTML', true);
+      patch(doc.createElementNS('http://www.w3.org/2000/svg', 'svg'), 'innerHTML', true);
+      patch(doc.createElement('iframe'), 'srcdoc', true);
+      patch(doc, 'write');
+      if ('writeln' in doc) patch(doc, 'writeln');
+    };
+    protect(document);
+    // Intercept the first child-document access, before the panel constructs its UI.
+    const descriptor = Object.getOwnPropertyDescriptor(window.HTMLIFrameElement.prototype, 'contentDocument')!;
+    const protectedDocuments = new Set<Document>();
+    Object.defineProperty(window.HTMLIFrameElement.prototype, 'contentDocument', { ...descriptor, get() {
+      const doc = descriptor.get!.call(this) as Document | null;
+      if (doc && !protectedDocuments.has(doc)) { protectedDocuments.add(doc); protect(doc); }
+      return doc;
+    } });
+    restoreSinks.push(() => Object.defineProperty(window.HTMLIFrameElement.prototype, 'contentDocument', descriptor));
   }
+  options.beforeMount?.(window);
   const host = document.createElement('div');
   document.body.append(host);
   const root = host.attachShadow({ mode: 'open' });
@@ -53,8 +73,10 @@ async function mountPanel(t: TestContext, model: PeettyModelOptions | undefined,
     onAction() {}, onReply: options.onReply ?? (() => {}), onState: options.onState ?? (() => {}), onClose() {},
   });
   panel.open(true);
-  const query = <T extends HTMLElement>(selector: string) => root.querySelector<T>(selector)!;
-  return { panel, root, window, query, htmlWrites: () => htmlWrites };
+  const frame = root.querySelector('iframe')!;
+  const uiRoot = frame.contentDocument!.body.firstElementChild!.shadowRoot!;
+  const query = <T extends HTMLElement>(selector: string) => uiRoot.querySelector<T>(selector)!;
+  return { panel, root: uiRoot, parentRoot: root, frame, window, query, htmlWrites: () => htmlWrites };
 }
 
 describe('chat panel credential ownership', () => {
@@ -161,7 +183,7 @@ describe('effort and formatted replies', () => {
     const completed = deferred<void>();
     let bubble: HTMLElement;
     let announced = 0;
-    const { panel, query, root, window } = await mountPanel(t, MODEL, {
+    const { panel, query, parentRoot: root, window } = await mountPanel(t, MODEL, {
       rejectHTML: true,
       onReply: (_text, render) => { assert.ok(render); render(bubble); announced++; completed.resolve(); },
     });
@@ -229,7 +251,7 @@ describe('setup drafts and credential replacement', () => {
     let lookups = 0;
     const { query, window } = await mountPanel(t, {
       ...MODEL, apiKey: 'fixture-original-key', getApiKey: () => { lookups++; return 'fixture-callback-key'; },
-      headers: { Authorization: 'Bearer fixture-expired', 'x-api-key': 'fixture-expired', 'api-key': 'fixture-expired', 'x-route': 'retained' },
+      headers: { Authorization: 'Bearer fixture-expired', 'x-api-key': 'fixture-expired', 'api-key': 'fixture-expired', 'Cf-Aig-Authorization': 'Bearer fixture-expired', 'x-route': 'retained' },
     }, { onReply: () => reply.resolve() });
     const requests: Request[] = [];
     t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -249,6 +271,7 @@ describe('setup drafts and credential replacement', () => {
       assert.equal(request.headers.get('authorization'), 'Bearer fixture-new-key');
       assert.equal(request.headers.get('x-api-key'), null);
       assert.equal(request.headers.get('api-key'), null);
+      assert.equal(request.headers.get('cf-aig-authorization'), null);
       assert.equal(request.headers.get('x-route'), 'retained');
     }
     assert.equal(lookups, 0);
@@ -257,7 +280,7 @@ describe('setup drafts and credential replacement', () => {
   it('does not revive SDK auth or its callback after the user explicitly clears the key', async (t) => {
     let lookups = 0;
     const { query, window } = await mountPanel(t, {
-      ...MODEL, getApiKey: () => { lookups++; return 'fixture-callback'; }, headers: { Authorization: 'Bearer fixture-expired' },
+      ...MODEL, getApiKey: () => { lookups++; return 'fixture-callback'; }, headers: { Authorization: 'Bearer fixture-expired', 'cf-aig-authorization': 'Bearer fixture-expired' },
     });
     const keys: (string | null)[] = [];
     const configure = t.mock.method(ChatRuntime.prototype, 'configure');
@@ -275,6 +298,31 @@ describe('setup drafts and credential replacement', () => {
     const saved = configure.mock.calls[0]!.arguments[0];
     assert.equal(saved.getApiKey, undefined);
     assert.equal(saved.headers?.authorization, undefined);
+    assert.equal(saved.headers?.['cf-aig-authorization'], undefined);
+  });
+
+  it('prefers an untouched SDK callback during discovery and preserves it when saving other settings', async (t) => {
+    let lookups = 0;
+    const getApiKey = function(this: PeettyModelOptions) {
+      assert.equal(this.apiKey, 'fixture-fallback', 'discovery keeps the model callback context');
+      lookups++; return 'fixture-fresh-key';
+    };
+    const { query } = await mountPanel(t, { ...MODEL, apiKey: 'fixture-fallback', getApiKey });
+    const configure = t.mock.method(ChatRuntime.prototype, 'configure');
+    const auth: (string | null)[] = [];
+    t.mock.method(globalThis, 'fetch', async (_input: RequestInfo | URL, init?: RequestInit) => {
+      auth.push(new Headers(init?.headers).get('authorization'));
+      return Response.json({ data: [{ id: MODEL.id }] });
+    });
+    query<HTMLButtonElement>('.pc-load').click(); await flush();
+    assert.deepEqual(auth, ['Bearer fixture-fresh-key']);
+    query<HTMLSelectElement>('[name="effort"]').value = 'high';
+    query<HTMLFormElement>('.pc-setup').requestSubmit(); await flush();
+    const saved = configure.mock.calls[0]!.arguments[0];
+    assert.equal(saved.getApiKey, getApiKey);
+    assert.equal(saved.apiKey, 'fixture-fallback');
+    assert.equal(saved.effort, 'high');
+    assert.equal(lookups, 1);
   });
 
   it('saves the plain-text option and chats with an endpoint rejecting tools', { timeout: 10000 }, async (t) => {
@@ -303,46 +351,42 @@ describe('setup drafts and credential replacement', () => {
   });
 });
 
-describe('Escape ownership after focus returns to the host', () => {
-  it('contains the consumed press through repeat, keypress and release, then allows host Escape again', async (t) => {
-    const { panel, query, window } = await mountPanel(t, MODEL);
-    panel.close();
-    const button = window.document.createElement('button'); window.document.body.append(button); button.focus();
-    panel.open(false);
-    const events: string[] = [];
-    for (const type of ['keydown', 'keypress', 'keyup']) window.document.addEventListener(type, () => events.push(type));
-    const fire = (target: HTMLElement, type: string, key: string, repeat = false) => {
-      const event = new window.KeyboardEvent(type, { key, repeat, bubbles: true, composed: true, cancelable: true });
-      target.dispatchEvent(event as unknown as Event); return event;
-    };
-    const target = button as unknown as HTMLElement;
-    assert.equal(fire(query('[name="message"]'), 'keydown', 'Escape').defaultPrevented, true);
-    assert.equal(panel.isOpen, false);
-    assert.equal(window.document.activeElement, button);
-    assert.equal(fire(target, 'keydown', 'Escape', true).defaultPrevented, true);
-    fire(target, 'keypress', 'Escape');
-    assert.equal(fire(target, 'keyup', 'j').defaultPrevented, false);
-    assert.deepEqual(events, ['keyup']); events.length = 0;
-    fire(target, 'keyup', 'Escape');
-    assert.deepEqual(events, []);
-    assert.equal(fire(target, 'keydown', 'Escape').defaultPrevented, false);
-    assert.deepEqual(events, ['keydown']);
-  });
-
-  for (const ending of ['destroy', 'blur', 'fresh press']) {
-    it(`releases the temporary boundary on ${ending}`, async (t) => {
-      const { panel, query, window } = await mountPanel(t, MODEL);
+describe('Escape focus lifecycle', () => {
+  for (const ending of ['release', 'destroy', 'blur', 'fresh press', 'normal close', 'reopen']) {
+    it(`retains child focus until ${ending} without leaving host key guards`, async (t) => {
+      const events: string[] = [];
+      const { panel, query, frame, window } = await mountPanel(t, MODEL, { beforeMount(window) {
+        for (const target of [window, window.document]) for (const type of ['keydown', 'keypress', 'keyup']) {
+          target.addEventListener(type, () => events.push(type), true);
+        }
+      } });
       panel.close();
-      const button = window.document.createElement('button'); window.document.body.append(button); button.focus(); panel.open(false);
-      const escaped = new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, composed: true });
-      query('[name="message"]').dispatchEvent(escaped as unknown as Event);
-      let reached = 0;
-      window.document.addEventListener('keyup', () => reached++);
+      const button = window.document.createElement('button'); window.document.body.append(button); button.focus();
+      panel.open(false);
+      const input = query('[name="message"]');
+      const child = input.ownerDocument.defaultView!;
+      const fire = (type: string, key = 'Escape', repeat = false) => {
+        const event = new child.KeyboardEvent(type, { key, repeat, bubbles: true, composed: true, cancelable: true });
+        input.dispatchEvent(event); return event;
+      };
+      assert.equal(fire('keydown').defaultPrevented, true);
+      assert.equal(panel.isOpen, false);
+      assert.equal(frame.hidden, false, 'the browsing context remains rendered until release');
+      assert.notEqual(window.document.activeElement, button);
+      assert.equal(fire('keydown', 'Escape', true).defaultPrevented, true);
+      fire('keypress');
+      assert.equal(fire('keyup', 'j').defaultPrevented, false);
+      assert.deepEqual(events, []);
       if (ending === 'destroy') panel.destroy();
-      else if (ending === 'blur') window.dispatchEvent(new window.Event('blur'));
-      else button.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, composed: true, repeat: false }));
+      else if (ending === 'blur') child.dispatchEvent(new child.Event('blur'));
+      else if (ending === 'fresh press') fire('keydown', 'j');
+      else if (ending === 'normal close') panel.close();
+      else if (ending === 'reopen') { panel.open(false); fire('keyup'); assert.equal(panel.isOpen, true); panel.close(); }
+      else assert.equal(fire('keyup').defaultPrevented, true);
+      if (ending !== 'destroy') assert.equal(frame.hidden, true);
+      assert.equal(window.document.activeElement, button);
       button.dispatchEvent(new window.KeyboardEvent('keyup', { key: 'Escape', bubbles: true, composed: true }));
-      assert.equal(reached, 1);
+      assert.deepEqual(events, ['keyup', 'keyup']);
     });
   }
 });
@@ -391,13 +435,52 @@ describe('chat panel DOM and keyboard boundaries', () => {
     assert.equal(htmlWrites(), 0);
   });
 
+  it('applies mobile form styling from the parent viewport and cleans up the frame on destroy', async (t) => {
+    const { panel, query, frame, window, parentRoot } = await mountPanel(t, MODEL);
+    window.happyDOM.setWindowSize({ width: 1000, height: 800 });
+    assert.equal(query('.peetty-chat').classList.contains('pc-mobile'), false);
+    window.happyDOM.setWindowSize({ width: 375, height: 812 });
+    assert.equal(query('.peetty-chat').classList.contains('pc-mobile'), true);
+    window.happyDOM.setWindowSize({ width: 1000, height: 800 });
+    assert.equal(query('.peetty-chat').classList.contains('pc-mobile'), false);
+    panel.destroy();
+    assert.equal(frame.isConnected, false);
+    assert.equal(parentRoot.querySelector('style'), null);
+    window.happyDOM.setWindowSize({ width: 375, height: 812 });
+  });
+
+  it('focuses the current form without resetting drafts or reopening, and localizes the frame title', async (t) => {
+    const { panel, query, root, frame, window } = await mountPanel(t, MODEL);
+    assert.equal(frame.hasAttribute('src'), false);
+    assert.equal(frame.hasAttribute('srcdoc'), false);
+    assert.equal(frame.contentDocument?.URL, 'about:blank');
+    assert.equal(frame.title, 'Chat with Peetty');
+    const key = query<HTMLInputElement>('[name="key"]');
+    key.value = 'draft'; key.focus(); key.setSelectionRange(1, 3);
+    const button = window.document.createElement('button'); window.document.body.append(button); button.focus();
+    panel.focus?.();
+    assert.equal(root.activeElement, key);
+    assert.deepEqual([key.selectionStart, key.selectionEnd], [1, 3]);
+    panel.setLanguage('zh');
+    assert.equal(frame.title, '和 Peetty 聊天');
+    panel.close(); button.focus(); panel.focus?.();
+    assert.equal(panel.isOpen, false);
+    assert.equal(window.document.activeElement, button);
+    panel.open(true);
+    assert.equal(root.activeElement, key);
+    assert.equal(key.value, 'draft');
+  });
+
   it('contains keydown, keypress and keyup without disabling ordinary host shortcuts', async (t) => {
-    const { panel, query, window } = await mountPanel(t, MODEL);
     const hostEvents: string[] = [];
-    for (const type of ['keydown', 'keypress', 'keyup']) {
-      window.document.addEventListener(type, () => hostEvents.push(type));
-      window.addEventListener(type, () => hostEvents.push(type));
-    }
+    const { panel, query, window } = await mountPanel(t, MODEL, { beforeMount(window) {
+      for (const type of ['keydown', 'keypress', 'keyup', 'pointerdown', 'pointerup', 'click']) {
+        for (const target of [window.document, window]) {
+          target.addEventListener(type, () => hostEvents.push(type), true);
+          target.addEventListener(type, () => hostEvents.push(type));
+        }
+      }
+    } });
     const dispatch = (target: HTMLElement) => {
       for (const type of ['keydown', 'keypress', 'keyup']) {
         const event = new window.KeyboardEvent(type, { key: 'j', code: 'KeyJ', bubbles: true, composed: true, cancelable: true });
@@ -407,6 +490,7 @@ describe('chat panel DOM and keyboard boundaries', () => {
     };
     dispatch(query<HTMLInputElement>('[name="url"]'));
     dispatch(query<HTMLInputElement>('[name="key"]'));
+    for (const type of ['pointerdown', 'pointerup', 'click']) query('[name="key"]').dispatchEvent(new window.MouseEvent(type, { bubbles: true, composed: true }) as unknown as Event);
     panel.open(false);
     dispatch(query<HTMLTextAreaElement>('[name="message"]'));
     assert.deepEqual(hostEvents, []);
@@ -522,6 +606,49 @@ describe('chat panel live language changes', () => {
 });
 
 describe('chat panel turn ownership', () => {
+  for (const interruption of ['stop', 'close', 'setModel', 'configure', 'destroy']) {
+    it(`keeps partial transcript without announcing after ${interruption}, then permits a successful turn`, { timeout: 10000 }, async (t) => {
+      const partial = deferred<void>();
+      const complete = deferred<void>();
+      const spoken: string[] = [];
+      const { panel, query, window } = await mountPanel(t, MODEL, {
+        onReply(text) { spoken.push(text); complete.resolve(); },
+        onState(busy, speaking) { if (busy && speaking) partial.resolve(); },
+      });
+      let calls = 0;
+      t.mock.method(globalThis, 'fetch', async (_url: RequestInfo | URL, init?: RequestInit) => {
+        if (++calls > 1) return textReply('A complete reply');
+        const chunk = { id: 'partial', object: 'chat.completion.chunk', created: 1, model: MODEL.id,
+          choices: [{ index: 0, delta: { role: 'assistant', content: 'A partial reply' }, finish_reason: null }] };
+        return new Response(new ReadableStream({ start(controller) {
+          controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(chunk)}\n\n`));
+          init?.signal?.addEventListener('abort', () => controller.close(), { once: true });
+        } }), { headers: { 'Content-Type': 'text/event-stream' } });
+      });
+      const send = () => {
+        const input = query<HTMLTextAreaElement>('[name="message"]');
+        input.value = 'hello'; input.dispatchEvent(new window.Event('input', { bubbles: true }) as unknown as Event);
+        query<HTMLFormElement>('.pc-composer').requestSubmit();
+      };
+      panel.open(false); send(); await partial.promise;
+      const announcement = query('.pc-announcement');
+      const transcript = query('.pc-messages');
+      if (interruption === 'stop') query<HTMLButtonElement>('.pc-submit').click();
+      else if (interruption === 'close') panel.close();
+      else if (interruption === 'setModel') await panel.setModel({ ...MODEL, id: 'replacement' });
+      else if (interruption === 'configure') { panel.open(true); query<HTMLFormElement>('.pc-setup').requestSubmit(); }
+      else panel.destroy();
+      await flush();
+      assert.deepEqual(spoken, []);
+      assert.equal(announcement.textContent, '');
+      if (interruption === 'destroy') return;
+      assert.match(transcript.textContent ?? '', /A partial reply/);
+      panel.open(false); send(); await complete.promise;
+      assert.deepEqual(spoken, ['A complete reply']);
+      assert.equal(query('.pc-announcement').textContent, 'A complete reply');
+    });
+  }
+
   it('does not announce a peer reply refreshed during a silent turn', { timeout: 10000 }, async (t) => {
     installChatIndexedDB(t);
     const spoken: string[] = [];

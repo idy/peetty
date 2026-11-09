@@ -67,11 +67,11 @@ async function mountPet(t: Parameters<typeof installPetDOM>[0], options: Constru
 }
 
 /** Use a bubbling shadow DOM for keyboard boundaries; geometry stays in the controller harness. */
-async function mountKeyboardPet(t: Parameters<typeof installPetDOM>[0]) {
+async function mountKeyboardPet(t: Parameters<typeof installPetDOM>[0], options: ConstructorParameters<typeof Peetty>[0] = {}) {
   const dom = installPetDOM(t);
   const window = new BrowserWindow({ url: 'https://host.example/' });
   const restore = stubGlobals({ window, document: window.document, Element: window.Element });
-  const pet = new Peetty({ greet: false });
+  const pet = new Peetty({ greet: false, ...options });
   dom.cleanup(() => { pet.destroy(); window.close(); restore(); });
   const state = controller(pet);
   mock.method(state, 'scan', () => []);
@@ -1480,6 +1480,77 @@ describe('in-place interface language', () => {
   });
 });
 
+describe('chat pose ownership', () => {
+  for (const source of ['open', 'think', 'talk', 'reply', 'ground', 'cancel'] as const) {
+    for (const manual of [false, true]) {
+      it(`closes ${source} with ${manual ? 'an identical caller replacement preserved' : 'the chat pose reset'}`, async (t) => {
+        let callbacks: Parameters<typeof import('../src/chat/panel.ts').createChatPanel>[0] | undefined;
+        const IsolatedPeetty = await petWithChatLoader(async () => ({
+          createChatPanel: async (options) => { callbacks = options; return chatPanelStub(); },
+        }));
+        const dom = installPetDOM(t);
+        const pet = new IsolatedPeetty({ greet: false });
+        dom.cleanup(() => pet.destroy());
+        await pet.mount();
+        const state = controller(pet);
+        stand(state);
+        await pet.openChat();
+        assert.ok(callbacks);
+        if (source === 'think' || source === 'talk') callbacks.onState(true, source === 'talk');
+        if (source === 'reply') {
+          pet.play('idle');
+          callbacks.onReply('Short reply');
+        }
+        if (source === 'ground') {
+          state.until = -1;
+          dom.frame(16);
+        }
+        if (source === 'cancel') {
+          const abort = new AbortController();
+          const pending = state.performChatAction('sit', abort.signal);
+          const rejected = assert.rejects(pending, { name: 'AbortError' });
+          if (manual) pet.play('sit');
+          abort.abort();
+          await rejected;
+        } else if (manual) pet.play(state.action as Parameters<Peetty['play']>[0]);
+        const action = state.action;
+        const until = state.until;
+        pet.closeChat();
+        assert.equal(state.action, manual ? action : 'idle');
+        if (manual) assert.equal(state.until, until, 'closing preserves the caller deadline');
+      });
+    }
+  }
+
+  it('preserves a public say deadline when chat closes', async (t) => {
+    const { pet, state } = await mountPet(t);
+    stand(state);
+    attachChatPanel(pet);
+    await pet.openChat();
+    pet.play('idle');
+    pet.say('Caller message', 1.2);
+    const until = state.until;
+    pet.closeChat();
+    assert.equal(state.action, 'talk');
+    assert.equal(state.until, until);
+  });
+
+  it('keeps a completed sit tool caller-independent when chat closes', async (t) => {
+    const { pet, state } = await mountPet(t);
+    stand(state);
+    attachChatPanel(pet);
+    await pet.openChat();
+    const pending = state.performChatAction('sit');
+    state.clock += 3500;
+    state.updateChatAction();
+    await pending;
+    const until = state.until;
+    pet.closeChat();
+    assert.equal(state.action, 'sit');
+    assert.equal(state.until, until);
+  });
+});
+
 describe('chat entry points and SDK model injection', () => {
   it('uses the lazy reply renderer for a short bubble and invalidates its measured size', async (t) => {
     let reply: ((text: string, render?: (target: HTMLElement) => void) => void) | undefined;
@@ -1648,6 +1719,20 @@ describe('chat entry points and SDK model injection', () => {
     assert.equal(network.mock.callCount(), 0);
   });
 
+  it('greets and preserves the touch menu on every disabled-chat tap', async (t) => {
+    const { dom, pet, state } = await mountPet(t, { chat: false });
+    stand(state);
+    const play = mock.method(state.view.motion, 'play');
+    for (let i = 0; i < 3; i++) {
+      state.overlay.pet.dispatchEvent(Object.assign(pointer('pointerdown', i), { pointerType: 'touch' }));
+      dom.window.dispatchEvent(Object.assign(pointer('pointerup', i), { pointerType: 'touch' }));
+      assert.equal(state.overlay.menu.classList.contains('show'), true);
+      assert.equal(play.mock.calls.filter((call) => call.arguments[0] === 'wave').length, i + 1);
+      dom.frame(50);
+    }
+    assert.equal((pet as unknown as { chatLoading: unknown }).chatLoading, null);
+  });
+
   it('opens chat once on a double tap and cancels the delayed greeting', async (t) => {
     const { dom, pet, state } = await mountPet(t);
     stand(state);
@@ -1761,6 +1846,89 @@ describe('chat entry points and SDK model injection', () => {
 });
 
 describe('companion and menu keyboard boundaries', () => {
+  for (const key of ['ContextMenu', 'F10']) {
+    it(`focuses the first visible enabled local action with ${key} when chat is disabled`, async (t) => {
+      const { state, window } = await mountKeyboardPet(t, { chat: false });
+      const greet = state.overlay.menu.querySelector<HTMLButtonElement>('[data-action="greet"]')!;
+      greet.disabled = true;
+      state.overlay.pet.focus();
+      state.overlay.pet.dispatchEvent(new window.KeyboardEvent('keydown', {
+        key, shiftKey: key === 'F10', bubbles: true, composed: true, cancelable: true,
+      }));
+      assert.equal(state.overlay.host.shadowRoot!.activeElement, state.overlay.menu.querySelector('[data-action="move"]'));
+      state.overlay.host.shadowRoot!.activeElement!.dispatchEvent(new window.KeyboardEvent('keydown', {
+        key: 'Escape', bubbles: true, composed: true, cancelable: true,
+      }));
+      assert.equal(state.overlay.menu.classList.contains('show'), false);
+      assert.equal(state.overlay.host.shadowRoot!.activeElement, state.overlay.pet);
+    });
+  }
+
+  for (const cleanup of ['release', 'fresh press', 'blur', 'destroy'] as const) {
+    it(`contains Hide's Enter after focus leaves and clears ownership on ${cleanup}`, async (t) => {
+      const { pet, state, window } = await mountKeyboardPet(t);
+      const host = mock.fn();
+      for (const type of ['keydown', 'keypress', 'keyup']) window.document.addEventListener(type, host);
+      const button = state.overlay.menu.querySelector<HTMLButtonElement>('[data-action="hide"]')!;
+      state.overlay.menu.classList.add('show');
+      button.focus();
+      const down = new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, composed: true, cancelable: true });
+      button.dispatchEvent(down);
+      assert.equal(down.defaultPrevented, false, 'Hide retains its native default activation');
+      button.click();
+      button.blur();
+      for (const type of ['keydown', 'keypress']) {
+        const event = new window.KeyboardEvent(type, { key: 'Enter', repeat: true, bubbles: true, composed: true, cancelable: true });
+        window.document.body.dispatchEvent(event);
+        assert.equal(event.defaultPrevented, true);
+      }
+      const unrelated = new window.KeyboardEvent('keyup', { key: 'k', bubbles: true, cancelable: true });
+      window.document.body.dispatchEvent(unrelated);
+      assert.equal(unrelated.defaultPrevented, false);
+      assert.equal(host.mock.callCount(), 1);
+      if (cleanup === 'release') {
+        const up = new window.KeyboardEvent('keyup', { key: 'Enter', bubbles: true, cancelable: true });
+        window.document.body.dispatchEvent(up);
+        assert.equal(up.defaultPrevented, true);
+      } else if (cleanup === 'blur') window.dispatchEvent(new window.Event('blur'));
+      else if (cleanup === 'destroy') pet.destroy();
+      for (const type of ['keydown', 'keypress', 'keyup']) {
+        const event = new window.KeyboardEvent(type, { key: 'Enter', bubbles: true, cancelable: true });
+        window.document.body.dispatchEvent(event);
+        assert.equal(event.defaultPrevented, false, 'the next host press remains native');
+      }
+      assert.equal(host.mock.callCount(), 4);
+    });
+  }
+
+  for (const focusablePanel of [false, true]) {
+    it(`removes a parked pet from tab order and accessibility with ${focusablePanel ? 'focusable' : 'legacy'} chat`, async (t) => {
+      const { pet, state } = await mountKeyboardPet(t);
+      stand(state);
+      const panel = attachChatPanel(pet);
+      const focus = mock.fn();
+      if (focusablePanel) Object.assign(panel, { focus });
+      const open = mock.method(panel, 'open');
+      await pet.openChat();
+      state.overlay.pet.focus();
+      (pet as unknown as { park(): void }).park();
+      assert.equal(state.overlay.host.style.visibility, 'visible');
+      assert.equal(state.overlay.pet.getAttribute('tabindex'), '-1');
+      assert.equal(state.overlay.pet.getAttribute('aria-hidden'), 'true');
+      assert.notEqual(state.overlay.host.shadowRoot!.activeElement, state.overlay.pet);
+      assert.equal(focus.mock.callCount(), focusablePanel ? 1 : 0);
+      assert.equal(open.mock.callCount(), 1, 'parking never reopens the panel or resets setup');
+      await pet.openChat();
+      assert.equal(state.overlay.pet.getAttribute('aria-hidden'), 'true');
+      const perch = floor(state.perchOptions)!;
+      mock.method(state, 'scan', () => [perch]);
+      (pet as unknown as { enter(): void }).enter();
+      assert.equal(state.overlay.pet.getAttribute('tabindex'), '0');
+      assert.equal(state.overlay.pet.getAttribute('aria-hidden'), null);
+      assert.equal(state.overlay.pet.classList.contains('gone'), false);
+    });
+  }
+
   for (const key of ['Enter', ' '] as const) {
     it(`contains every phase of ${JSON.stringify(key)} activation without duplicating chat`, async (t) => {
       const { pet, state, window } = await mountKeyboardPet(t);

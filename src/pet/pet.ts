@@ -96,6 +96,7 @@ export class Peetty {
   private scanned = -Infinity;
   private action: Action = 'idle';
   private actionVersion = 0;
+  private chatPoseVersion: number | null = null;
   private until = 0;
   private walkTo = 0;
   private jump: { from: [number, number]; plan: Jump; t: number; target: Perch; targetOrigin: [number, number]; hang: boolean; fright?: boolean } | null = null;
@@ -158,6 +159,7 @@ export class Peetty {
     this.chatLoading = null;
     this.chatVisible = this.chatWorking = this.chatSpeaking = false;
     this.chatGestureUntil = 0;
+    this.chatPoseVersion = null;
     this.menuPinned = false;
     this.lastTap = null;
     this.generation++;
@@ -299,7 +301,9 @@ export class Peetty {
           },
           onReply: (text, render) => {
             if (generation !== this.generation || text.length > 180) return;
+            const previousVersion = this.actionVersion;
             this.say(text, 6);
+            if (this.actionVersion !== previousVersion) this.chatPoseVersion = this.actionVersion;
             if (render && this.overlay && this.mode !== 'paused') {
               render(this.overlay.bubble);
               this.overlay.invalidate(this.overlay.bubble);
@@ -312,7 +316,7 @@ export class Peetty {
             this.chatSpeaking = speaking;
             if (this.chatVisible && busy && this.mode === 'ground' && this.perch?.clear && this.clock >= this.chatGestureUntil) {
               const action = speaking ? 'talk' : 'think';
-              if (this.action !== action) this.setAction(action, 15);
+              if (this.action !== action) this.setChatPose(action, 15);
             }
           },
           onClose: () => this.chatClosed(),
@@ -342,9 +346,9 @@ export class Peetty {
     this.overlay?.pet.setAttribute('aria-expanded', 'true');
     if (this.overlay) {
       this.overlay.host.style.visibility = 'visible';
-      if (this.mode === 'paused') this.overlay.pet.classList.add('gone');
+      if (this.mode === 'paused') this.setPetVisible(false);
     }
-    if (opening && this.mode === 'ground' && this.perch?.clear && !this.actionCompletion) this.setAction('sit', 30);
+    if (opening && this.mode === 'ground' && this.perch?.clear && !this.actionCompletion) this.setChatPose('sit', 30);
     panel.open(settings);
   }
 
@@ -352,7 +356,8 @@ export class Peetty {
     this.chatVisible = this.chatWorking = this.chatSpeaking = false;
     if (this.options.chat === false) this.overlay?.pet.removeAttribute('aria-expanded');
     else this.overlay?.pet.setAttribute('aria-expanded', 'false');
-    if (this.mode === 'ground' && (this.action === 'think' || this.action === 'talk' || this.action === 'sit')) this.setAction('idle', 2);
+    if (this.mode === 'ground' && this.chatPoseVersion === this.actionVersion) this.setAction('idle', 2);
+    this.chatPoseVersion = null;
   }
 
   private async performChatAction(action: CompanionAction, signal?: AbortSignal): Promise<string> {
@@ -377,7 +382,8 @@ export class Peetty {
         // user actions (even another identical pose) keep their animation ownership.
         if (action !== 'move' && !this.hidden && this.mode === 'ground' && this.actionVersion === pending.actionVersion) {
           const chat = this.chatVisible && this.perch?.clear;
-          this.setAction(chat ? this.chatWorking ? this.chatSpeaking ? 'talk' : 'think' : 'sit' : 'idle', chat ? 15 : 2);
+          if (chat) this.setChatPose(this.chatWorking ? this.chatSpeaking ? 'talk' : 'think' : 'sit', 15);
+          else this.setAction('idle', 2);
         }
       };
       const pending: ActionCompletion = {
@@ -526,7 +532,7 @@ export class Peetty {
     if (!pool.length) return this.park();
     const target = pickOne(pool);
     this.overlay!.host.style.visibility = 'visible';
-    this.overlay!.pet.classList.remove('gone');
+    this.setPetVisible(true);
     this.x = rand(target.left, target.right);
     this.y = Math.min(target.y - 40, this.view!.height * 0.6);
     this.vx = 0;
@@ -550,9 +556,27 @@ export class Peetty {
     menu.classList.remove('show');
     bubble.classList.remove('show');
     // A faded figure takes no pointer events; the next retry hides the overlay if she cannot come back.
-    if (fade || this.chatVisible) pet.classList.add('gone');
+    this.setPetVisible(false);
     host.style.visibility = this.chatVisible || fade ? 'visible' : 'hidden';
     this.retryAt = this.clock + SCAN_INTERVAL;
+  }
+
+  private setPetVisible(visible: boolean) {
+    const pet = this.overlay!.pet;
+    if (visible) {
+      pet.classList.remove('gone');
+      pet.setAttribute('tabindex', '0');
+      pet.removeAttribute('aria-hidden');
+    } else {
+      const focused = (pet.getRootNode() as Document | ShadowRoot).activeElement === pet;
+      if (focused) {
+        pet.blur();
+        if (this.chatVisible) this.chatPanel?.focus?.();
+      }
+      pet.setAttribute('tabindex', '-1');
+      pet.setAttribute('aria-hidden', 'true');
+      pet.classList.add('gone');
+    }
   }
 
   private readonly listeners: [EventTarget, string, EventListener, AddEventListenerOptions | undefined][] = [];
@@ -601,6 +625,17 @@ export class Peetty {
       if (e.type === 'keydown') consumedKeys.add(e.key);
       else if (e.type === 'keyup') consumedKeys.delete(e.key);
     };
+    // A native button can hide the overlay on keydown. Its remaining press still
+    // belongs to us even if the browser sends it to the page after focus moves.
+    for (const type of ['keydown', 'keypress', 'keyup']) {
+      on(window, type, (e: KeyboardEvent) => {
+        if (type === 'keydown' && !e.repeat) consumedKeys.delete(e.key);
+        if (!consumedKeys.has(e.key)) return;
+        const path = e.composedPath();
+        if (!path.includes(pet) && !path.includes(menu)) containKey(e);
+      }, { capture: true });
+    }
+    on(window, 'blur', () => consumedKeys.clear());
     for (const target of [pet, menu]) {
       on(target, 'keydown', (e: KeyboardEvent) => {
         const activation = activationKey(e.key);
@@ -614,7 +649,10 @@ export class Peetty {
         if (target === pet && activation) activateCompanion();
         else if (context) {
           this.menuPinned = true; menu.classList.add('show');
-          menu.querySelector<HTMLButtonElement>('button')?.focus();
+          [...menu.querySelectorAll<HTMLButtonElement>('button')].find((button) => {
+            const style = getComputedStyle(button);
+            return !button.hidden && !button.disabled && style.display !== 'none' && style.visibility !== 'hidden';
+          })?.focus();
         } else if (escape) {
           this.menuPinned = false; menu.classList.remove('show'); pet.focus();
         }
@@ -735,7 +773,7 @@ export class Peetty {
       // Let the frame's completion check finish an owned pose before choosing another.
       if (live.clear && this.actionCompletion?.action !== 'move' && this.actionCompletion?.actionVersion === this.actionVersion) return;
       if (!live.clear) this.leaveEdge();
-      else if (this.chatVisible) this.setAction(this.chatWorking ? this.chatSpeaking ? 'talk' : 'think' : 'sit', 15);
+      else if (this.chatVisible) this.setChatPose(this.chatWorking ? this.chatSpeaking ? 'talk' : 'think' : 'sit', 15);
       else this.decide();
     }
 
@@ -926,6 +964,11 @@ export class Peetty {
     this.setAction('walk', Math.abs(end - this.x) / this.pace + 0.5);
   }
 
+  private setChatPose(action: Action, seconds: number) {
+    this.setAction(action, seconds);
+    this.chatPoseVersion = this.actionVersion;
+  }
+
   private setAction(action: Action, seconds: number) {
     this.actionVersion++;
     this.action = action;
@@ -1095,7 +1138,7 @@ export class Peetty {
     } else if (!cancelled) {
       if (this.options.chat === false) {
         if (e.pointerType === 'touch') { this.menuPinned = true; this.overlay!.menu.classList.add('show'); }
-        else this.greet();
+        this.greet();
         return;
       }
       const now = performance.now();

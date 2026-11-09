@@ -17,7 +17,7 @@ const ICONS = {
 export type IconName = keyof typeof ICONS;
 
 /** Build SVG nodes directly: no HTML parser, Trusted Types policy, or string sinks. */
-export function icon(name: IconName): SVGSVGElement {
+export function icon(name: IconName, document: Document = globalThis.document): SVGSVGElement {
   const svg = document.createElementNS(SVG, 'svg');
   const attrs = {
     viewBox: '0 0 24 24', width: '20', height: '20', fill: 'none', stroke: 'currentColor',
@@ -34,12 +34,13 @@ export function icon(name: IconName): SVGSVGElement {
 
 export function setIcon(button: HTMLElement, name: IconName): void {
   if (button.dataset.pcIcon === name) return;
-  button.replaceChildren(icon(name));
+  button.replaceChildren(icon(name, button.ownerDocument));
   button.dataset.pcIcon = name;
 }
 
 /** Static shell with text/attribute bindings; retranslation never touches form values. */
 export function buildChatView(panel: HTMLElement, copy: () => ChatCopy): { translate: () => void } {
+  const document = panel.ownerDocument;
   const bindings: (() => void)[] = [];
   const text = (key: TextKey) => {
     const node = document.createTextNode('');
@@ -73,7 +74,7 @@ export function buildChatView(panel: HTMLElement, copy: () => ChatCopy): { trans
   const field = (key: TextKey, input: HTMLElement) => el('label', 'pc-field', {}, el('span', '', {}, text(key)), input);
 
   const header = el('header', 'pc-header', {},
-    el('div', 'pc-mark', {}, icon('spark')),
+    el('div', 'pc-mark', {}, icon('spark', document)),
     el('div', 'pc-heading', {}, el('h2', 'pc-name'), el('div', 'pc-status')),
     iconButton('pc-icon pc-settings', 'settings', 'settings'),
     iconButton('pc-icon pc-close', 'close', 'close'),
@@ -107,7 +108,7 @@ export function buildChatView(panel: HTMLElement, copy: () => ChatCopy): { trans
     el('p', 'pc-note', {}, text('actionsHint')),
     el('label', 'pc-check', {}, el('input', '', { name: 'remember', type: 'checkbox', checked: true }), el('span', '', {}, text('remember'))),
     el('p', 'pc-note', {}, text('keyNote')),
-    el('button', 'pc-primary', { type: 'submit' }, text('connect'), icon('send')),
+    el('button', 'pc-primary', { type: 'submit' }, text('connect'), icon('send', document)),
     privacy,
   );
   const input = attr(labelled(el('textarea', '', { name: 'message', rows: 1, maxlength: 8000 }), 'placeholder'), 'placeholder', 'placeholder');

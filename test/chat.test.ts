@@ -544,7 +544,7 @@ describe('Pi chat streaming and actions', () => {
     runtime.destroy();
   });
 
-  it('overrides referrer and redirect policies on preconstructed provider Requests', async (t) => {
+  it('overrides ambient credentials, referrer and redirect policies on preconstructed provider Requests', async (t) => {
     const requests: Request[] = [];
     t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
       requests.push(new Request(input, init));
@@ -552,9 +552,9 @@ describe('Pi chat streaming and actions', () => {
     });
     const runtime = new ChatRuntime({ model: MODEL, _testing: { storage: new MemoryChatStorage(), streamFn: async (_model, _context, options) => {
       const request = new Request(`${MODEL.baseUrl}/chat/completions`, {
-        method: 'POST', body: '{}', referrer: 'https://host.example/private/page?secret=value', referrerPolicy: 'unsafe-url', redirect: 'follow',
+        method: 'POST', body: '{}', referrer: 'https://host.example/private/page?secret=value', referrerPolicy: 'unsafe-url', redirect: 'follow', credentials: 'include',
       });
-      await options!.fetch!(request, { referrerPolicy: 'unsafe-url', redirect: 'follow' });
+      await options!.fetch!(request, { referrerPolicy: 'unsafe-url', redirect: 'follow', credentials: 'include' });
       return finished(assistant('Transport succeeded'));
     } } });
     await runtime.send('Test transport');
@@ -562,6 +562,7 @@ describe('Pi chat streaming and actions', () => {
     assert.equal(requests.length, 1);
     assert.equal(requests[0]!.referrerPolicy, 'no-referrer');
     assert.equal(requests[0]!.redirect, 'error');
+    assert.equal(requests[0]!.credentials, 'omit');
     runtime.destroy();
   });
 
@@ -832,6 +833,67 @@ describe('shared history runtime ownership', () => {
     await runtime.send('local-after-clear');
     assert.ok(!JSON.stringify(contexts[2]).includes('local-first'));
     assert.equal(storage.histories.length, 0);
+    runtime.destroy();
+  });
+});
+
+describe('credential lookup persistence boundaries', () => {
+  for (const ending of ['stop', 'destroy', 'configure', 'setModel', 'clear', 'timeout', 'reject'] as const) {
+    it(`never persists an unresolved callback credential on ${ending}`, async (t) => {
+      const secret = 'fresh-callback-credential';
+      const credential = deferred<string>();
+      const storage = new MemoryChatStorage({ entries: [entry('user', 'previous safe input')] });
+      let resolving = false;
+      let requests = 0;
+      const runtime = new ChatRuntime({
+        model: { id: MODEL.id, baseUrl: MODEL.baseUrl, getApiKey: async () => {
+          resolving = true;
+          const key = await credential.promise;
+          if (ending === 'reject') throw new Error(secret);
+          return key;
+        } },
+        _testing: { storage, timeoutMs: ending === 'timeout' ? 15 : 10000, streamFn: () => { requests++; return finished(assistant('never reached')); } },
+      });
+      t.after(() => runtime.destroy());
+      const pending = runtime.send(`Do not store ${secret}`);
+      await until(() => resolving);
+      assert.equal(storage.histories.length, 0);
+      if (ending === 'stop') runtime.stop();
+      else if (ending === 'destroy') runtime.destroy();
+      else if (ending === 'configure') await runtime.configure({ id: 'new-model', baseUrl: 'https://new.example/v1' }, false);
+      else if (ending === 'setModel') await runtime.setModel({ id: 'new-model', baseUrl: 'https://new.example/v1' });
+      else if (ending === 'clear') await runtime.clear();
+      else if (ending === 'reject') credential.resolve(secret);
+      await pending;
+      credential.resolve(secret);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(requests, 0);
+      assert.equal(JSON.stringify(storage.histories).includes(secret), false);
+      assert.equal(JSON.stringify(storage.state.entries).includes(secret), false);
+      assert.equal(runtime.entries.some(value => value.text.includes(secret)), false);
+      assert.deepEqual(storage.state.entries.map(value => value.text), ending === 'clear' ? [] : ['previous safe input']);
+      assert.ok(!runtime.error?.includes(secret));
+    });
+  }
+
+  it('redacts a resolved callback credential before saving the input or sending model context', async () => {
+    const credential = deferred<string>();
+    const secret = 'fresh-callback-credential';
+    const storage = new MemoryChatStorage();
+    let resolving = false;
+    let context = '';
+    const runtime = new ChatRuntime({
+      model: { id: MODEL.id, baseUrl: MODEL.baseUrl, getApiKey: () => { resolving = true; return credential.promise; } },
+      _testing: { storage, streamFn: (_model, messages) => { context = JSON.stringify(messages); return finished(assistant('Safe response')); } },
+    });
+    const pending = runtime.send(`Use ${secret}`);
+    await until(() => resolving);
+    assert.equal(storage.histories.length, 0);
+    credential.resolve(secret);
+    await pending;
+    assert.deepEqual(storage.state.entries.map(value => value.text), ['Use [redacted]', 'Safe response']);
+    assert.equal(context.includes(secret), false);
+    assert.equal(JSON.stringify(storage.histories).includes(secret), false);
     runtime.destroy();
   });
 });
