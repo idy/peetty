@@ -624,6 +624,45 @@ describe('bounded companion graphics', () => {
     });
   }
 
+  it('reclaims a cheap nested batch before indexing an earlier disjoint batch', () => {
+    const first = figure(rect(650, 580, 100, 120), { x: -500, y: 0, width: 600, height: 120 });
+    for (let i = 0; i < 1000; i++) element('ellipse', rect(150, 600 + i * 0.04, 0.1, 0.02), first.svg);
+    const second = figure(rect(0, 580, 100, 120), { x: 0, y: 0, width: 310, height: 120 });
+    for (let i = 0; i < 1000; i++) {
+      const inset = i / 100;
+      element('ellipse', rect(250 + inset, 610 + inset / 4, 60 - inset * 2, 60 - inset / 2), second.svg);
+    }
+    for (let i = 0; i < 45; i++) element('button', rect(i * 10, 100, 4, 4));
+    const found = floor(fixture.opts);
+    assert.ok(found, 'cheap reclaim must happen before optional indexing spends the remaining budget');
+    assert.ok(found.left > 360 && found.left < 370);
+    assert.ok(found.right > 590 && found.right < 600);
+  });
+
+  for (const later of ['buttons', 'text', 'figure'] as const) {
+    it(`compacts an earlier fitting figure when later ${later} need obstacle slots`, () => {
+      const { svg } = figure(rect(650, 580, 100, 120), { x: -500, y: 0, width: 600, height: 120 });
+      for (let i = 0; i < 2046; i++) {
+        const inset = i / 100;
+        element('ellipse', rect(150 + inset, 610 + inset / 4, 60 - inset * 2, 60 - inset / 2), svg);
+      }
+      if (later === 'buttons') {
+        element('button', rect(300, 650, 20, 20));
+        element('button', rect(400, 650, 20, 20));
+      } else if (later === 'text') {
+        fixture.document.body.append(new TestText('later text', [rect(300, 650, 20, 20), rect(400, 650, 20, 20)]));
+      } else {
+        const other = figure(rect(0, 580, 100, 120));
+        element('path', other.svg.bounds, other.svg);
+      }
+      const found = floor(fixture.opts);
+      assert.ok(found, 'previously retained nested boxes must leave room for later obstacles');
+      const left = later === 'figure' ? 260 : 470;
+      assert.ok(found.left > left && found.left < left + 10, 'later page obstacles remain protected');
+      assert.ok(found.right > 590 && found.right < 600);
+    });
+  }
+
   it('does not mistake separated vertical coverage for a fully covered rectangle', () => {
     const { svg } = figure(rect(650, 580, 100, 120), { x: -550, y: 0, width: 650, height: 120 });
     element('path', rect(100, 600, 200, 10), svg);

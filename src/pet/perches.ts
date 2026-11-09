@@ -201,15 +201,36 @@ function paddedBounds(bounds: Box, padding: PaintPadding | undefined): Box {
   return box(bounds.left - x, bounds.top - y, bounds.right + x, bounds.bottom + y);
 }
 
+/** A single enclosing box is a common, linear-time way to reclaim nested paint. */
+function enclosingFigureBox(bounds: Box[], data: Scan): Box[] | null {
+  if (!bounds.length) return [];
+  let outer = bounds[0]!;
+  for (const rect of bounds) {
+    if (!spend(data.budget)) { data.complete = false; return null; }
+    if (rect.width * rect.height > outer.width * outer.height) outer = rect;
+  }
+  for (const rect of bounds) {
+    if (!spend(data.budget)) { data.complete = false; return null; }
+    if (outer.left > rect.left || outer.right < rect.right || outer.top > rect.top || outer.bottom < rect.bottom) return null;
+  }
+  return [outer];
+}
+
 /**
  * Sweep left edges and track the furthest painted right edge along y. A range
  * minimum query detects coverage by earlier boxes, including nested boxes, in
  * O(log n) work without filling the gaps between disconnected shapes.
  */
-function coalesceFigureBoxes(bounds: Box[], data: Scan): Box[] {
+function coalesceFigureBoxes(bounds: Box[], data: Scan, capacity = MAX_RECTS - data.obstacles.length - 1, force = false): Box[] {
   // Reserve one slot for the SVG viewport. Fitting overflow needs no optional
-  // sorting or coverage index, leaving the work budget for placement checks.
-  if (data.obstacles.length + bounds.length + 1 <= MAX_RECTS) return bounds;
+  // sorting or coverage index, unless later collection explicitly needs space.
+  if (!bounds.length || (!force && bounds.length <= capacity)) return bounds;
+  const enclosing = enclosingFigureBox(bounds, data);
+  if (enclosing) {
+    if (enclosing.length > capacity) data.complete = false;
+    return enclosing;
+  }
+  if (!data.complete) return [];
   const compare = (a: number, b: number) => {
     if (!spend(data.budget)) data.complete = false;
     return a - b;
@@ -256,7 +277,7 @@ function coalesceFigureBoxes(bounds: Box[], data: Scan): Box[] {
     const from = indices.get(rect.top)!, to = indices.get(rect.bottom)!;
     if (!covered(1, 0, size, from, to, rect.right)) {
       if (!data.complete) break;
-      if (data.obstacles.length + result.length + 1 >= MAX_RECTS) { data.complete = false; break; }
+      if (result.length >= capacity) { data.complete = false; break; }
       result.push(rect);
       paint(1, 0, size, from, to, rect.right);
     }
@@ -271,7 +292,7 @@ function coalesceFigureBoxes(bounds: Box[], data: Scan): Box[] {
  * bounds then avoid covered/offscreen geometry reads. Mixed groups are refined
  * to leaves, whose screen rectangles include bone, spring and mirror transforms.
  */
-function figureBoxes(el: Element, rect: Box, clip: Box, data: Scan): Box[] | null {
+function figureBoxes(el: Element, rect: Box, clip: Box, data: Scan, makeRoom: (count: number) => boolean): Box[] | null {
   if (el.tagName.toUpperCase() !== 'SVG' || hostOf(el)?.tagName.toUpperCase() !== 'PEETTY-COMPANION' || !finiteBox(rect)) return null;
   if (!spend(data.budget, 2)) { data.complete = false; return null; }
   const geometry = figureBounds(el);
@@ -323,6 +344,15 @@ function figureBoxes(el: Element, rect: Box, clip: Box, data: Scan): Box[] | nul
       }
     }
   } catch { return null; }
+  if (!data.complete) return overflow;
+  if (data.obstacles.length + overflow.length + 1 > MAX_RECTS) {
+    // Prefer cheap compaction of this figure, then reclaim slots from completed
+    // earlier figures before applying the remaining capacity to this one.
+    const enclosing = enclosingFigureBox(overflow, data);
+    if (!data.complete) return overflow;
+    if (enclosing) { makeRoom(enclosing.length + 1); return enclosing; }
+    makeRoom(overflow.length + 1);
+  }
   return data.complete ? coalesceFigureBoxes(overflow, data) : overflow;
 }
 
@@ -554,12 +584,47 @@ function scan(opts: PerchOptions): Scan {
   let visited = 0;
   // Created on the first text node, one range measures all text of this scan.
   let range: Range | undefined;
-  const addObstacle = (rect: Box, owner: Element | null, avoid: boolean, clip: Box) => {
+  const retainedFigures = new Map<Element, Obstacle[]>();
+  const complexFigures = new Map<Element, Obstacle[]>();
+  const replaceFigure = (members: Obstacle[], compacted: Box[]): boolean => {
+    if (compacted.length >= members.length) return true;
+    if (!spend(result.budget, result.obstacles.length)) { result.complete = false; return false; }
+    const previous = new Set(members);
+    result.obstacles = result.obstacles.filter((entry) => !previous.has(entry));
+    for (const bounds of compacted) result.obstacles.push({ ...members[0]!, box: bounds });
+    return true;
+  };
+  const makeRoom = (count: number): boolean => {
+    if (count > MAX_RECTS) return false;
+    if (result.obstacles.length + count <= MAX_RECTS) return true;
+    // Completed batches advance through these queues once. Reclaim cheap nested
+    // paint before coverage indexing; viewports and page obstacles stay untouched.
+    for (const [owner, members] of retainedFigures) {
+      retainedFigures.delete(owner);
+      if (!spend(result.budget, members.length)) { result.complete = false; return false; }
+      const enclosing = enclosingFigureBox(members.map((entry) => entry.box), result);
+      if (!result.complete) return false;
+      if (!enclosing) { complexFigures.set(owner, members); continue; }
+      if (!replaceFigure(members, enclosing)) return false;
+      if (result.obstacles.length + count <= MAX_RECTS) return true;
+    }
+    for (const [owner, members] of complexFigures) {
+      complexFigures.delete(owner);
+      if (!spend(result.budget, members.length)) { result.complete = false; return false; }
+      const compacted = coalesceFigureBoxes(members.map((entry) => entry.box), result, members.length, true);
+      if (!result.complete || !replaceFigure(members, compacted)) return false;
+      if (result.obstacles.length + count <= MAX_RECTS) return true;
+    }
+    return false;
+  };
+  const addObstacle = (rect: Box, owner: Element | null, avoid: boolean, clip: Box): Obstacle | undefined => {
     if (!finiteBox(rect) || empty(rect)) return;
     const clipped = intersection(rect, clip);
     if (empty(clipped)) return;
-    if (result.obstacles.length >= MAX_RECTS || !spend(result.budget)) { result.complete = false; return; }
-    result.obstacles.push({ box: box(clipped.left - PAD, clipped.top - PAD, clipped.right + PAD, clipped.bottom + PAD), owner, avoid });
+    if (!makeRoom(1) || !spend(result.budget)) { result.complete = false; return; }
+    const entry = { box: box(clipped.left - PAD, clipped.top - PAD, clipped.right + PAD, clipped.bottom + PAD), owner, avoid };
+    result.obstacles.push(entry);
+    return entry;
   };
   while (pending.length && result.complete) {
     const { node, context } = pending.pop()!;
@@ -575,7 +640,7 @@ function scan(opts: PerchOptions): Scan {
       range.selectNodeContents(node);
       if (empty(intersection(range.getBoundingClientRect(), context.flow))) continue;
       const rects = range.getClientRects();
-      if (rects.length > MAX_RECTS - result.obstacles.length) { result.complete = false; break; }
+      if (!makeRoom(rects.length)) { result.complete = false; break; }
       for (const rect of rects) addObstacle(rect, null, false, context.flow);
       continue;
     }
@@ -598,11 +663,17 @@ function scan(opts: PerchOptions): Scan {
     // below its containing block. A contents box is never positioned.
     const position = style.display === 'contents' ? 'static' : style.position;
     const own = position === 'fixed' ? context.fixed : position === 'absolute' ? context.absolute : context.flow;
-    const graphic = visible && avoid && style.overflowX === 'visible' && style.overflowY === 'visible' ? figureBoxes(el, rect, own, result) : null;
+    const graphic = visible && avoid && style.overflowX === 'visible' && style.overflowY === 'visible' ? figureBoxes(el, rect, own, result, makeRoom) : null;
     if (!result.complete) break;
     if (visible && (avoid || el.matches(INTERACTIVE) || MEDIA_TAGS.has(el.tagName.toUpperCase()))) addObstacle(rect, el, avoid, own);
     if (graphic) {
-      for (const bounds of graphic) addObstacle(bounds, el, avoid, own);
+      const members: Obstacle[] = [];
+      for (const bounds of graphic) {
+        const entry = addObstacle(bounds, el, avoid, own);
+        if (entry) members.push(entry);
+        if (!result.complete) break;
+      }
+      if (members.length > 1) retainedFigures.set(el, members);
       continue;
     }
     if (!avoid && opacity >= MIN_OPACITY && rect.width > 0 && rect.top >= own.top && rect.top < own.bottom && carries(el, style, rect)) {
