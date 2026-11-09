@@ -566,6 +566,45 @@ describe('bounded companion graphics', () => {
     assert.ok(found.left > 400, `transformed miter extents remain blocked: ${found.left}`);
   });
 
+  it('retains an on-screen stroke when a nonempty group geometry is entirely below the viewport', () => {
+    const { svg } = figure(rect(650, 580, 100, 120), { x: -500, y: 0, width: 600, height: 160 });
+    const group = part(svg, rect(150, 710, 40, 30));
+    const path = element('path', rect(150, 710, 40, 0), group);
+    path.setAttribute('stroke', '#6753b8'); path.setAttribute('stroke-width', '50'); path.setAttribute('stroke-linejoin', 'round');
+    Object.assign(path, { getScreenCTM: () => ({ a: 1, b: 0, c: 0, d: 1, e: 650, f: 580 }) });
+    element('ellipse', rect(160, 730, 10, 10), group);
+    const found = floor(fixture.opts);
+    assert.ok(found);
+    assert.ok(found.left > 265, `the descendant stroke reaches the floor: ${found.left}`);
+    assert.ok(found.right > 590 && found.right < 600);
+  });
+
+  it('does not prune the whole SVG when offscreen geometry has a stroke reaching the page', () => {
+    const { svg } = figure(rect(650, 580, 100, 120), { x: -500, y: 130, width: 40, height: 30 });
+    const group = part(svg, rect(150, 710, 40, 30));
+    const path = element('path', rect(150, 710, 40, 0), group);
+    path.setAttribute('stroke', '#6753b8'); path.setAttribute('stroke-width', '50'); path.setAttribute('stroke-linejoin', 'round');
+    Object.assign(path, { getScreenCTM: () => ({ a: 1, b: 0, c: 0, d: 1, e: 650, f: 580 }) });
+    element('ellipse', rect(160, 730, 10, 10), group);
+    const found = floor(fixture.opts);
+    assert.ok(found);
+    assert.ok(found.left > 265, `root pruning includes descendant paint: ${found.left}`);
+  });
+
+  for (const outerFirst of [true, false]) {
+    it(`coalesces 2,100 nested overflow boxes with the outer box ${outerFirst ? 'first' : 'last'}`, () => {
+      const { svg } = figure(rect(650, 580, 100, 120), { x: -500, y: 0, width: 600, height: 120 });
+      for (let i = 0; i < 2100; i++) {
+        const inset = (outerFirst ? i : 2099 - i) / 100;
+        element('ellipse', rect(150 + inset, 610 + inset / 4, 60 - inset * 2, 60 - inset / 2), svg);
+      }
+      const found = floor(fixture.opts);
+      assert.ok(found, 'nested geometry must not consume separate obstacle slots');
+      assert.ok(found.left > 260 && found.left < 270);
+      assert.ok(found.right > 590 && found.right < 600);
+    });
+  }
+
   it('leaves usable floor beside 300 distinct overflow shapes without quadratic collection work', () => {
     const { svg } = figure(rect(650, 580, 100, 120), { x: -550, y: 0, width: 650, height: 120 });
     for (let i = 0; i < 300; i++) element('ellipse', rect(100 + i, 610, 0.1, 0.1), svg);
@@ -575,11 +614,28 @@ describe('bounded companion graphics', () => {
     assert.ok(fixture.geometryReads < 400, `collection visits each shape once: ${fixture.geometryReads}`);
   });
 
+  it('does not mistake separated vertical coverage for a fully covered rectangle', () => {
+    const { svg } = figure(rect(650, 580, 100, 120), { x: -550, y: 0, width: 650, height: 120 });
+    element('path', rect(100, 600, 200, 10), svg);
+    element('path', rect(110, 620, 190, 10), svg);
+    element('path', rect(120, 600, 130, 100), svg);
+    const found = floor({ ...fixture.opts, width: 20, height: 20, anchor: [10, 20] });
+    assert.ok(found);
+    assert.ok(found.left > 260 && found.left < 270, `paint in the vertical gap stays protected: ${found.left}`);
+  });
+
+  it('bounds descendant stroke metadata work on an oversized companion subtree', () => {
+    const { svg } = figure(rect(650, 580, 100, 120), { x: -500, y: 0, width: 600, height: 120 });
+    for (let i = 0; i < 50_000; i++) element('path', rect(150, 610, 1, 1), svg);
+    assert.equal(floor(fixture.opts), null, 'an incomplete metadata walk cannot certify clear floor');
+    assert.ok(fixture.geometryReads < 100, `metadata traversal is bounded before native geometry reads: ${fixture.geometryReads}`);
+  });
+
   it('bounds extra collection work when a companion has too many disconnected overflow shapes', () => {
     const { svg } = figure(rect(0, 580, 100, 120), { x: 0, y: 0, width: 800, height: 120 });
     for (let i = 0; i < 10_000; i++) element('path', rect(110 + (i % 600), 600 + Math.floor(i / 600), 0.1, 0.1), svg);
     assert.equal(floor(fixture.opts), null, 'an incomplete overflow collection cannot certify clear floor');
-    assert.ok(fixture.geometryReads < 2100, `the rectangle cap bounds linear collection: ${fixture.geometryReads}`);
+    assert.ok(fixture.geometryReads < 10_100, `geometry collection stays linear before coalescing: ${fixture.geometryReads}`);
   });
 
   it('falls back to normal descendant scanning if native SVG bounds fail', () => {
