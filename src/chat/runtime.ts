@@ -60,7 +60,7 @@ export function abortable<T>(promise: PromiseLike<T>, signal: AbortSignal): Prom
 }
 
 // A configured endpoint must not redirect secrets or conversation bodies to another server.
-const endpointFetch: typeof fetch = (input, init) => fetch(input, { ...init, redirect: 'error' });
+const endpointFetch: typeof fetch = (input, init) => fetch(input, { ...init, redirect: 'error', referrerPolicy: 'no-referrer' });
 
 function statusError(status: number): string {
   if (status === 401 || status === 403) return 'The endpoint rejected access. Check your API key.';
@@ -227,6 +227,7 @@ export class ChatRuntime {
     if (!save || this.destroyed || revision !== this.revision) return;
     const connection: StoredConnection = {
       id: chosen.id, baseUrl: chosen.baseUrl,
+      ...(chosen.tools !== undefined ? { tools: chosen.tools } : {}),
       ...(save.rememberKey && chosen.apiKey && !chosen.getApiKey ? { apiKey: chosen.apiKey } : {}),
     };
     await this.persist(() => this.storage.saveConnection(connection));
@@ -286,10 +287,11 @@ export class ChatRuntime {
     return messages;
   }
 
-  private systemPrompt(): string {
+  private systemPrompt(tools: boolean): string {
     const name = this.redact(this.options.chat?.name?.trim() || 'Peetty').slice(0, 100);
     const personality = this.redact(this.options.chat?.personality?.trim() || 'Be warm, curious, concise, and considerate.').slice(0, 4_000);
-    return `You are ${name}, a small browser companion. ${personality}\nReply in the user's language. Use companion_action for a requested physical action when useful. You may wave, sit, lie down, sleep, move, or return to idle. Do not claim an action succeeded unless the tool confirms it. You have no page contents, browsing, or long-term memory. Never ask for or reveal API keys. Keep replies brief.`;
+    const actions = tools ? ' Use companion_action for a requested physical action when useful. You may wave, sit, lie down, sleep, move, or return to idle. Do not claim an action succeeded unless the tool confirms it.' : '';
+    return `You are ${name}, a small browser companion. ${personality}\nReply in the user's language.${actions} You have no page contents, browsing, or long-term memory. Never ask for or reveal API keys. Keep replies brief.`;
   }
 
   private tool(run: Run): AgentTool {
@@ -409,8 +411,9 @@ export class ChatRuntime {
       const recent = this.context(model);
       // The newly appended user input is passed to prompt rather than installed twice.
       if (this.history.length > messagesBeforeInput && recent.at(-1)?.role === 'user') recent.pop();
+      const tools = selected.tools !== false;
       const agent = new Agent({
-        initialState: { model, systemPrompt: this.systemPrompt(), messages: recent, tools: [this.tool(run)], thinkingLevel: 'off' },
+        initialState: { model, systemPrompt: this.systemPrompt(tools), messages: recent, tools: tools ? [this.tool(run)] : [], thinkingLevel: 'off' },
         toolExecution: 'sequential', identity: { attribution: null },
         streamFn: async (requestModel, context, options) => {
           if (!this.live(run) || ++run.requests > MAX_REQUESTS) throw aborted();

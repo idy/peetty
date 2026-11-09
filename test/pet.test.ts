@@ -50,6 +50,7 @@ interface Controller {
   chatSpeaking: boolean;
   chatGestureUntil: number;
   performChatAction: (action: CompanionAction, signal?: AbortSignal) => Promise<string>;
+  updateChatAction: () => void;
 }
 const controller = (pet: Peetty) => pet as unknown as Controller;
 const response = (figure: Figure) => ({ ok: true, json: async () => figure }) as Response;
@@ -1168,6 +1169,42 @@ describe('multiple companions and physical chat actions', () => {
     });
   }
 
+  for (const replacement of ['play', 'nap'] as const) {
+    for (const elapsed of [10000, 20000, 20050]) {
+      it(`rejects a sleep tool replaced by ${replacement} at ${elapsed}ms without changing the replacement`, async (t) => {
+        const { pet, state } = await mountPet(t);
+        stand(state);
+        const started = state.clock;
+        const rejected = assert.rejects(state.performChatAction('sleep'), /interrupted/);
+        if (replacement === 'play') {
+          state.clock += 10000;
+          pet.play('sleep');
+        } else {
+          const nap = [...state.overlay.menu.children].find((button) => button.getAttribute('data-action') === 'nap');
+          assert.ok(nap);
+          nap.dispatchEvent(new Event('click'));
+          assert.equal(state.until, (started + 20000) / 1000, 'the replacement has the identical pose and deadline');
+        }
+        const deadline = state.until;
+        state.clock = started + elapsed;
+        state.updateChatAction();
+        await rejected;
+        assert.equal(state.action, 'sleep');
+        assert.equal(state.view.motion.current, 'sleep');
+        assert.equal(state.until, deadline);
+      });
+    }
+  }
+
+  it('completes an owned sleep tool when a frame passes its deadline', async (t) => {
+    const { dom, state } = await mountPet(t);
+    stand(state);
+    const pending = state.performChatAction('sleep');
+    state.clock += 19990;
+    dom.frame(50);
+    assert.equal(await pending, 'Finished sleep.');
+  });
+
   for (const replacement of ['drag', 'fall', 'landing'] as const) {
     it(`does not overwrite ${replacement} when an earlier idle tool is aborted`, async (t) => {
       const { dom, state } = await mountPet(t);
@@ -1560,6 +1597,25 @@ describe('chat entry points and SDK model injection', () => {
     assert.equal(network.mock.callCount(), 0);
   });
 
+  it('greets on both quick pointer clicks without initializing disabled chat', async (t) => {
+    const { dom, pet, state } = await mountPet(t, { chat: false });
+    stand(state);
+    const open = mock.method(pet, 'openChat', async () => {});
+    const play = mock.method(state.view.motion, 'play');
+    const network = mock.method(globalThis, 'fetch', async () => { throw new Error('unexpected network'); });
+    for (let i = 0; i < 2; i++) {
+      state.overlay.pet.dispatchEvent(pointer('pointerdown', 1));
+      dom.window.dispatchEvent(pointer('pointerup', 1));
+      assert.equal(state.press, null);
+      assert.equal(state.action, 'wave');
+      assert.equal(play.mock.calls.filter((call) => call.arguments[0] === 'wave').length, i + 1);
+      if (!i) dom.frame(100);
+    }
+    assert.equal(open.mock.callCount(), 0);
+    assert.equal((pet as unknown as { chatLoading: unknown }).chatLoading, null);
+    assert.equal(network.mock.callCount(), 0);
+  });
+
   it('opens chat once on a double tap and cancels the delayed greeting', async (t) => {
     const { dom, pet, state } = await mountPet(t);
     stand(state);
@@ -1589,18 +1645,20 @@ describe('chat entry points and SDK model injection', () => {
     assert.equal(dom.timers.size, 0);
   });
 
-  it('opens a pinned right-click menu and keeps the page context menu untouched elsewhere', async (t) => {
-    const { dom, state } = await mountPet(t);
-    stand(state);
-    const event = new Event('contextmenu', { cancelable: true });
+  it('contains companion context menus while preserving host context menus elsewhere', async (t) => {
+    const { state, window } = await mountKeyboardPet(t);
+    const host = mock.fn();
+    window.document.addEventListener('contextmenu', host);
+    const event = new window.MouseEvent('contextmenu', { bubbles: true, composed: true, cancelable: true });
     state.overlay.pet.dispatchEvent(event);
     assert.equal(event.defaultPrevented, true);
-    state.overlay.pet.dispatchEvent(new Event('pointerout'));
-    dom.frame(1000);
+    assert.equal(host.mock.callCount(), 0, 'the host custom menu does not receive the companion event');
+    state.overlay.pet.dispatchEvent(new window.Event('pointerout'));
     assert.equal(state.overlay.menu.classList.contains('show'), true);
-    const outside = new Event('contextmenu', { cancelable: true });
-    dom.window.dispatchEvent(outside);
+    const outside = new window.MouseEvent('contextmenu', { bubbles: true, composed: true, cancelable: true });
+    window.document.body.dispatchEvent(outside);
     assert.equal(outside.defaultPrevented, false);
+    assert.equal(host.mock.callCount(), 1);
   });
 
   it('restores hover access after dragging dismisses a pinned menu', async (t) => {

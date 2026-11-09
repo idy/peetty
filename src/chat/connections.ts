@@ -18,6 +18,7 @@ export function normalizeModelOptions(model: PeettyModelOptions): PeettyModelOpt
     if (!id || id.length > 200 || /[\r\n]/.test(id)) throw new Error();
     if (model.apiKey !== undefined && typeof model.apiKey !== 'string') throw new Error();
     if (model.getApiKey !== undefined && typeof model.getApiKey !== 'function') throw new Error();
+    if (model.tools !== undefined && typeof model.tools !== 'boolean') throw new Error();
     let headers: Record<string, string> | undefined;
     const suppliedHeaders = model.headers;
     if (suppliedHeaders !== undefined) {
@@ -34,6 +35,7 @@ export function normalizeModelOptions(model: PeettyModelOptions): PeettyModelOpt
       ...(model.apiKey !== undefined ? { apiKey: model.apiKey.trim() } : {}),
       ...(model.getApiKey ? { getApiKey: model.getApiKey } : {}),
       ...(headers ? { headers } : {}),
+      ...(model.tools !== undefined ? { tools: model.tools } : {}),
     };
   } catch { throw new Error('Enter a valid API base URL and model ID.'); }
 }

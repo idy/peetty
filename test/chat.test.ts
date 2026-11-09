@@ -85,6 +85,8 @@ describe('OpenAI-compatible endpoint setup', () => {
     assert.equal(requests[0]![0], 'https://model.example/v1/models');
     assert.equal(new Headers(requests[0]![1]?.headers).get('Authorization'), 'Bearer setup-key');
     assert.equal(requests[0]![1]?.credentials, 'omit');
+    assert.equal(requests[0]![1]?.referrerPolicy, 'no-referrer');
+    assert.equal(requests[0]![1]?.redirect, 'error');
     await fetchModelList('https://model.example/v1');
     assert.equal(new Headers(requests[1]![1]?.headers).get('Authorization'), null);
   });
@@ -141,6 +143,32 @@ describe('local persistence and credential ownership', () => {
     const other = new BrowserChatStore('other-pet');
     assert.deepEqual(await other.load(), { entries: [] });
     second.close(); other.close();
+  });
+
+  it('persists explicit tool preferences, restores them, and keeps SDK replacements ephemeral', async (t) => {
+    installChatIndexedDB(t);
+    for (const tools of [false, true]) {
+      const namespace = `tools-${tools}`;
+      const runtime = new ChatRuntime({ _testing: { storage: new BrowserChatStore(namespace) } });
+      await runtime.configure({ ...MODEL, tools }, false);
+      runtime.destroy();
+      const restored = new ChatRuntime({ _testing: { storage: new BrowserChatStore(namespace) } });
+      await restored.initialize();
+      assert.deepEqual(restored.model, { id: MODEL.id, baseUrl: MODEL.baseUrl, tools });
+      await restored.setModel({ ...MODEL, tools: !tools });
+      assert.equal(restored.model?.tools, !tools);
+      restored.destroy();
+      const saved = new BrowserChatStore(namespace);
+      assert.deepEqual((await saved.load()).connection, { id: MODEL.id, baseUrl: MODEL.baseUrl, tools });
+      saved.close();
+    }
+  });
+
+  it('rejects malformed restored tool flags rather than enabling tools through coercion', async () => {
+    const runtime = new ChatRuntime({ _testing: { storage: new MemoryChatStorage({ connection: { ...MODEL, tools: 'false' as unknown as boolean }, entries: [] }) } });
+    await runtime.initialize();
+    assert.equal(runtime.model, undefined);
+    runtime.destroy();
   });
 
   it('flushes already queued history before closing IndexedDB', async (t) => {
@@ -456,6 +484,53 @@ describe('Pi chat streaming and actions', () => {
     await runtime.send(`My key is ${MODEL.apiKey}`);
     for (const value of [runtime.entries, contexts, storage.histories]) assert.ok(!JSON.stringify(value).includes(MODEL.apiKey!));
     assert.match(runtime.entries.at(-1)!.text, /\[redacted\]/);
+    runtime.destroy();
+  });
+
+  it('overrides referrer and redirect policies on preconstructed provider Requests', async (t) => {
+    const requests: Request[] = [];
+    t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push(new Request(input, init));
+      return new Response('fixture');
+    });
+    const runtime = new ChatRuntime({ model: MODEL, _testing: { storage: new MemoryChatStorage(), streamFn: async (_model, _context, options) => {
+      const request = new Request(`${MODEL.baseUrl}/chat/completions`, {
+        method: 'POST', body: '{}', referrer: 'https://host.example/private/page?secret=value', referrerPolicy: 'unsafe-url', redirect: 'follow',
+      });
+      await options!.fetch!(request, { referrerPolicy: 'unsafe-url', redirect: 'follow' });
+      return finished(assistant('Transport succeeded'));
+    } } });
+    await runtime.send('Test transport');
+    assert.equal(runtime.error, null);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0]!.referrerPolicy, 'no-referrer');
+    assert.equal(requests[0]!.redirect, 'error');
+    runtime.destroy();
+  });
+
+  it('chats through the actual adapter with tools disabled and omits unsupported tool fields', async (t) => {
+    const requests: Record<string, unknown>[] = [];
+    t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
+      const request = new Request(input, init);
+      assert.equal(request.referrerPolicy, 'no-referrer');
+      assert.equal(request.redirect, 'error');
+      const body = JSON.parse(await request.text()) as Record<string, unknown>;
+      requests.push(body);
+      if ('tools' in body || 'tool_choice' in body) return Response.json({ error: 'Tools unsupported' }, { status: 400 });
+      const chunk = { id: 'text-only', object: 'chat.completion.chunk', created: 1, model: MODEL.id, choices: [{ index: 0, delta: { content: 'Text-only reply' }, finish_reason: null }] };
+      const done = { ...chunk, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] };
+      return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: ${JSON.stringify(done)}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } });
+    });
+    const runtime = new ChatRuntime({ model: { ...MODEL, tools: false }, _testing: { storage: new MemoryChatStorage() } });
+    await runtime.send('Hello text-only model');
+    assert.equal(runtime.error, null);
+    assert.equal(runtime.entries.at(-1)?.text, 'Text-only reply');
+    assert.equal(requests.length, 1);
+    assert.equal('tools' in requests[0]!, false);
+    assert.equal('tool_choice' in requests[0]!, false);
+    const system = (requests[0]!.messages as { role: string; content: string }[]).find((message) => message.role === 'system');
+    assert.ok(system);
+    assert.doesNotMatch(system.content, /companion_action|tool confirms|You may wave/);
     runtime.destroy();
   });
 

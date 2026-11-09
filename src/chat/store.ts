@@ -5,6 +5,7 @@ export interface StoredConnection {
   id: string;
   baseUrl: string;
   apiKey?: string;
+  tools?: boolean;
 }
 
 export interface StoredChat {
@@ -52,9 +53,11 @@ function connectionFrom(value: unknown): StoredConnection | undefined {
   if (!value || typeof value !== 'object') return;
   const connection = value as Partial<StoredConnection>;
   if (typeof connection.id !== 'string' || !connection.id.trim() || typeof connection.baseUrl !== 'string') return;
+  if (connection.tools !== undefined && typeof connection.tools !== 'boolean') return;
   return {
     id: connection.id.slice(0, 200), baseUrl: connection.baseUrl,
     ...(typeof connection.apiKey === 'string' && connection.apiKey ? { apiKey: connection.apiKey } : {}),
+    ...(connection.tools !== undefined ? { tools: connection.tools } : {}),
   };
 }
 

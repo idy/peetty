@@ -5,6 +5,8 @@ export interface PeettyModelOptions {
   apiKey?: string;
   getApiKey?: () => string | Promise<string>;
   headers?: Record<string, string>;
+  /** Enable companion action tools. Defaults to true. */
+  tools?: boolean;
 }
 
 export interface PeettyChatOptions {

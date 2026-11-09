@@ -96,6 +96,8 @@ export function buildChatView(panel: HTMLElement, copy: () => ChatCopy): { trans
     el('div', 'pc-discover', {}, el('button', 'pc-small pc-load', { type: 'button' }), button('pc-link pc-manual', 'manual')),
     el('label', 'pc-field pc-model-field', {}, el('span', '', {}, text('model')),
       el('input', 'pc-input', { name: 'model', placeholder: 'model-id', required: true, autocomplete: 'off', spellcheck: 'false' }), modelSelect),
+    el('label', 'pc-check', {}, el('input', '', { name: 'tools', type: 'checkbox', checked: true }), el('span', '', {}, text('allowActions'))),
+    el('p', 'pc-note', {}, text('actionsHint')),
     el('label', 'pc-check', {}, el('input', '', { name: 'remember', type: 'checkbox', checked: true }), el('span', '', {}, text('remember'))),
     el('p', 'pc-note', {}, text('keyNote')),
     el('button', 'pc-primary', { type: 'submit' }, text('connect'), icon('send')),

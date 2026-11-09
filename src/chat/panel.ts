@@ -128,6 +128,9 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
   const key = find<HTMLInputElement>('[name="key"]');
   const model = find<HTMLInputElement>('[name="model"]');
   const models = find<HTMLSelectElement>('.pc-models');
+  const tools = find<HTMLInputElement>('[name="tools"]');
+  let keyEdited = false;
+  let releaseEscapePress: (() => void) | undefined;
   const remember = find<HTMLInputElement>('[name="remember"]');
   // A host-supplied connection is ephemeral until the user opts in to saving its key.
   if (options.model) remember.checked = false;
@@ -197,16 +200,19 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     const current = runtime.model;
     url.value = current?.baseUrl ?? '';
     key.value = current?.apiKey ?? '';
+    keyEdited = false;
     key.type = 'password';
     find('.pc-show-key').textContent = t.show;
     key.placeholder = current?.getApiKey ? t.keyProvided : t.optional;
     model.value = current?.id ?? '';
+    tools.checked = current?.tools !== false;
     model.hidden = false;
     model.required = true;
     models.hidden = true;
     updateLocalHint();
   }
   function setSettings(show: boolean) {
+    const entering = show && !settingsOpen;
     settingsOpen = show;
     setup.hidden = !show;
     composer.hidden = show;
@@ -214,9 +220,9 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     setIcon(settings, show ? 'back' : 'settings');
     settings.setAttribute('aria-label', show ? t.back : t.settings);
     settings.title = show ? t.back : t.settings;
-    if (show) fillSettings();
+    if (entering) fillSettings();
     render();
-    if (!panel.hidden) (show ? url : input).focus();
+    if (!panel.hidden && (entering || !show)) (show ? url : input).focus();
   }
   function createEntry(entry: ChatEntry) {
     const element = document.createElement('div');
@@ -275,6 +281,19 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
   function sameEndpoint(): boolean {
     try { return normalizeBaseUrl(url.value) === runtime.model?.baseUrl; } catch { return false; }
   }
+  function connectionAuth(baseUrl: string) {
+    const current = runtime.model;
+    const matching = current?.baseUrl === baseUrl ? current : undefined;
+    const typedKey = key.value.trim();
+    const replacement = keyEdited || typedKey !== (matching?.apiKey ?? '');
+    const headers = matching?.headers ? { ...matching.headers } : undefined;
+    if (replacement && headers) {
+      for (const name of Object.keys(headers)) {
+        if (/^(authorization|x-api-key|api-key)$/i.test(name)) delete headers[name];
+      }
+    }
+    return { typedKey, headers, getApiKey: !replacement && !typedKey ? matching?.getApiKey : undefined };
+  }
   function manualModel() { model.hidden = false; model.required = true; models.hidden = true; model.focus(); }
   async function discover() {
     cancelDiscovery();
@@ -286,14 +305,12 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     const timeout = setTimeout(() => controller.abort(), 20000);
     try {
       const baseUrl = normalizeBaseUrl(url.value);
-      const current = runtime.model;
-      const matching = baseUrl === current?.baseUrl ? current : undefined;
-      const typedKey = key.value.trim();
-      const apiKey = typedKey || (matching?.getApiKey
-        ? await abortable(Promise.resolve().then(() => matching.getApiKey!()), controller.signal)
+      const { typedKey, headers, getApiKey } = connectionAuth(baseUrl);
+      const apiKey = typedKey || (getApiKey
+        ? await abortable(Promise.resolve().then(() => getApiKey()), controller.signal)
         : undefined);
       if (disposed || controller !== discovery || controller.signal.aborted) return;
-      const list = await fetchModelList(baseUrl, apiKey, controller.signal, matching?.headers);
+      const list = await fetchModelList(baseUrl, apiKey, controller.signal, headers);
       if (disposed || controller !== discovery || controller.signal.aborted) return;
       models.replaceChildren();
       const first = document.createElement('option');
@@ -325,6 +342,7 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     const local = localMagpieConnection(runtime.model);
     url.value = local.baseUrl;
     key.value = local.apiKey ?? '';
+    keyEdited = false;
     key.type = 'password';
     find('.pc-show-key').textContent = t.show;
     model.value = local.id;
@@ -337,7 +355,7 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     if (local.apiKey || local.getApiKey) void discover();
     else key.focus({ preventScroll: true });
   });
-  key.addEventListener('input', cancelDiscovery);
+  key.addEventListener('input', () => { keyEdited = true; cancelDiscovery(); });
   find('.pc-show-key').addEventListener('click', () => { key.type = key.type === 'password' ? 'text' : 'password'; find('.pc-show-key').textContent = key.type === 'password' ? t.show : t.hide; });
   load.addEventListener('click', () => { void discover(); });
   find('.pc-manual').addEventListener('click', () => { cancelDiscovery(); manualModel(); });
@@ -349,11 +367,9 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
         const baseUrl = normalizeBaseUrl(url.value);
         const id = model.value.trim();
         if (!id) { showError(() => t.invalid); return; }
-        const current = runtime.model;
-        const getApiKey = !key.value.trim() && sameEndpoint() ? current?.getApiKey : undefined;
-        const headers = sameEndpoint() ? current?.headers : undefined;
+        const { typedKey, headers, getApiKey } = connectionAuth(baseUrl);
         cancelDiscovery();
-        await runtime.configure({ baseUrl, id, ...(key.value.trim() ? { apiKey: key.value.trim() } : {}), ...(getApiKey ? { getApiKey } : {}), ...(headers ? { headers } : {}) }, remember.checked);
+        await runtime.configure({ baseUrl, id, tools: tools.checked, ...(typedKey ? { apiKey: typedKey } : {}), ...(getApiKey ? { getApiKey } : {}), ...(headers ? { headers } : {}) }, remember.checked);
         if (disposed) return;
         showError(); setSettings(false);
       } catch { if (!disposed) showError(() => t.invalid); }
@@ -380,7 +396,30 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
     if (returnFocus?.isConnected) returnFocus.focus();
   };
   find('.pc-close').addEventListener('click', close);
-  panel.addEventListener('keydown', (event) => { if (event.key === 'Escape') { event.stopPropagation(); close(); } });
+  function containEscapePress() {
+    releaseEscapePress?.();
+    const release = () => {
+      for (const type of ['keydown', 'keypress', 'keyup'] as const) window.removeEventListener(type, capture, true);
+      window.removeEventListener('blur', release);
+      releaseEscapePress = undefined;
+    };
+    const capture = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      // A fresh press after a missed release belongs to the host again.
+      if (event.type === 'keydown' && !event.repeat) { release(); return; }
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.type === 'keyup') release();
+    };
+    for (const type of ['keydown', 'keypress', 'keyup'] as const) window.addEventListener(type, capture, true);
+    window.addEventListener('blur', release, { once: true });
+    releaseEscapePress = release;
+  }
+  panel.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    event.preventDefault(); event.stopPropagation();
+    containEscapePress(); close();
+  });
   // Keep composer key events out of the host site's keyboard shortcuts.
   for (const type of ['keydown', 'keyup', 'keypress'] as const) {
     panel.addEventListener(type, (event) => event.stopPropagation());
@@ -412,6 +451,6 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
       await runtime.setModel(next);
       if (!disposed) { remember.checked = false; showError(); setSettings(false); }
     },
-    destroy() { disposed = true; cancelDiscovery(); runtime.destroy(); panel.remove(); style.remove(); },
+    destroy() { disposed = true; releaseEscapePress?.(); cancelDiscovery(); runtime.destroy(); panel.remove(); style.remove(); },
   };
 }

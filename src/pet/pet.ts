@@ -403,12 +403,10 @@ export class Peetty {
         if (this.perch?.clear) this.finishChatAction();
         else this.finishChatAction(new Error('Companion move interrupted without a clear landing.'));
       }
-    } else if (this.mode !== 'ground') {
+    } else if (this.mode !== 'ground' || this.actionVersion !== pending.actionVersion || this.action !== pending.action) {
       this.finishChatAction(new Error('Companion action interrupted.'));
     } else if (this.clock >= pending.until) {
       this.finishChatAction();
-    } else if (this.action !== pending.action) {
-      this.finishChatAction(new Error('Companion action interrupted.'));
     }
   }
 
@@ -576,6 +574,7 @@ export class Peetty {
     on(pet, 'pointerdown', (e: PointerEvent) => this.onDown(e));
     on(pet, 'contextmenu', (e: MouseEvent) => {
       e.preventDefault();
+      e.stopPropagation();
       clearTimeout(this.menuTimer);
       clearTimeout(this.tapTimer);
       this.lastTap = null;
@@ -725,6 +724,8 @@ export class Peetty {
         this.x += Math.sign(dx) * Math.min(Math.abs(dx), this.pace * dt);
       }
     } else if (now / 1000 > this.until) {
+      // Let the frame's completion check finish an owned pose before choosing another.
+      if (live.clear && this.actionCompletion?.action !== 'move' && this.actionCompletion?.actionVersion === this.actionVersion) return;
       if (!live.clear) this.leaveEdge();
       else if (this.chatVisible) this.setAction(this.chatWorking ? this.chatSpeaking ? 'talk' : 'think' : 'sit', 15);
       else this.decide();
@@ -1084,6 +1085,11 @@ export class Peetty {
       // Let go mid-swing, she keeps flying the way she was thrown; calm until she starts coming down.
       this.startFall();
     } else if (!cancelled) {
+      if (this.options.chat === false) {
+        if (e.pointerType === 'touch') { this.menuPinned = true; this.overlay!.menu.classList.add('show'); }
+        else this.greet();
+        return;
+      }
       const now = performance.now();
       const previous = this.lastTap;
       if (previous && now - previous.at < 420 && Math.hypot(e.clientX - previous.x, e.clientY - previous.y) < 24) {

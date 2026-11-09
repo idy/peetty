@@ -112,6 +112,172 @@ describe('chat panel credential ownership', () => {
   }
 });
 
+function textReply(text: string): Response {
+  const chunk = { id: 'fixture', object: 'chat.completion.chunk', created: 1, model: MODEL.id, choices: [{ index: 0, delta: { role: 'assistant', content: text }, finish_reason: null }] };
+  const done = { ...chunk, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] };
+  return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: ${JSON.stringify(done)}\n\ndata: [DONE]\n\n`, { headers: { 'Content-Type': 'text/event-stream' } });
+}
+
+describe('setup drafts and credential replacement', () => {
+  it('retains a first-time form and discovered selection when opened repeatedly', async (t) => {
+    const { panel, query, window, root } = await mountPanel(t, undefined);
+    const url = query<HTMLInputElement>('[name="url"]');
+    const key = query<HTMLInputElement>('[name="key"]');
+    const model = query<HTMLInputElement>('[name="model"]');
+    url.value = 'https://draft.example/v1';
+    url.dispatchEvent(new window.Event('input', { bubbles: true }) as unknown as Event);
+    key.value = 'fixture-draft-key';
+    model.value = 'draft-model';
+    query<HTMLInputElement>('[name="tools"]').checked = false;
+    query<HTMLInputElement>('[name="remember"]').checked = false;
+    query<HTMLButtonElement>('.pc-show-key').click();
+    key.focus(); key.setSelectionRange(1, 5);
+    panel.open(); panel.open(true);
+    assert.equal(root.activeElement, key);
+    assert.deepEqual([key.selectionStart, key.selectionEnd], [1, 5]);
+    query<HTMLButtonElement>('.pc-settings').click();
+    assert.equal(url.value, 'https://draft.example/v1');
+    assert.equal(key.value, 'fixture-draft-key');
+    assert.equal(key.type, 'text');
+    assert.equal(model.value, 'draft-model');
+    assert.equal(query<HTMLInputElement>('[name="tools"]').checked, false);
+    assert.equal(query<HTMLInputElement>('[name="remember"]').checked, false);
+    t.mock.method(globalThis, 'fetch', async () => Response.json({ data: [{ id: 'one' }, { id: 'two' }] }));
+    query<HTMLButtonElement>('.pc-load').click(); await flush();
+    const models = query<HTMLSelectElement>('.pc-models');
+    models.value = 'two';
+    models.dispatchEvent(new window.Event('change', { bubbles: true }) as unknown as Event);
+    panel.open(); query<HTMLButtonElement>('.pc-settings').click();
+    assert.equal(models.hidden, false);
+    assert.equal(model.hidden, true);
+    assert.equal(models.value, 'two');
+    assert.equal(model.value, 'two');
+    assert.equal(key.value, 'fixture-draft-key');
+  });
+
+  it('uses a typed replacement key for both discovery and saved chat instead of injected auth headers', { timeout: 10000 }, async (t) => {
+    const reply = deferred<void>();
+    let lookups = 0;
+    const { query, window } = await mountPanel(t, {
+      ...MODEL, apiKey: 'fixture-original-key', getApiKey: () => { lookups++; return 'fixture-callback-key'; },
+      headers: { Authorization: 'Bearer fixture-expired', 'x-api-key': 'fixture-expired', 'api-key': 'fixture-expired', 'x-route': 'retained' },
+    }, { onReply: () => reply.resolve() });
+    const requests: Request[] = [];
+    t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init); requests.push(request);
+      return request.method === 'GET' ? Response.json({ data: [{ id: MODEL.id }] }) : textReply('Repaired connection');
+    });
+    const key = query<HTMLInputElement>('[name="key"]');
+    key.value = 'fixture-new-key';
+    key.dispatchEvent(new window.Event('input', { bubbles: true }) as unknown as Event);
+    query<HTMLButtonElement>('.pc-load').click(); await flush();
+    query<HTMLFormElement>('.pc-setup').requestSubmit(); await flush();
+    const input = query<HTMLTextAreaElement>('[name="message"]');
+    input.value = 'hello'; input.dispatchEvent(new window.Event('input', { bubbles: true }) as unknown as Event);
+    query<HTMLFormElement>('.pc-composer').requestSubmit(); await reply.promise;
+    assert.deepEqual(requests.map(request => request.method), ['GET', 'POST']);
+    for (const request of requests) {
+      assert.equal(request.headers.get('authorization'), 'Bearer fixture-new-key');
+      assert.equal(request.headers.get('x-api-key'), null);
+      assert.equal(request.headers.get('api-key'), null);
+      assert.equal(request.headers.get('x-route'), 'retained');
+    }
+    assert.equal(lookups, 0);
+  });
+
+  it('does not revive SDK auth or its callback after the user explicitly clears the key', async (t) => {
+    let lookups = 0;
+    const { query, window } = await mountPanel(t, {
+      ...MODEL, getApiKey: () => { lookups++; return 'fixture-callback'; }, headers: { Authorization: 'Bearer fixture-expired' },
+    });
+    const keys: (string | null)[] = [];
+    const configure = t.mock.method(ChatRuntime.prototype, 'configure');
+    t.mock.method(globalThis, 'fetch', async (_input: RequestInfo | URL, init?: RequestInit) => {
+      keys.push(new Headers(init?.headers).get('authorization'));
+      return Response.json({ data: [{ id: MODEL.id }] });
+    });
+    const key = query<HTMLInputElement>('[name="key"]');
+    key.value = '';
+    key.dispatchEvent(new window.Event('input', { bubbles: true }) as unknown as Event);
+    query<HTMLButtonElement>('.pc-load').click(); await flush();
+    query<HTMLFormElement>('.pc-setup').requestSubmit(); await flush();
+    assert.deepEqual(keys, [null]);
+    assert.equal(lookups, 0);
+    const saved = configure.mock.calls[0]!.arguments[0];
+    assert.equal(saved.getApiKey, undefined);
+    assert.equal(saved.headers?.authorization, undefined);
+  });
+
+  it('saves the plain-text option and chats with an endpoint rejecting tools', { timeout: 10000 }, async (t) => {
+    const storage = installChatIndexedDB(t);
+    const reply = deferred<void>();
+    const { panel, query, window } = await mountPanel(t, MODEL, { chat: { storageKey: 'plain-text-panel' }, onReply: () => reply.resolve() });
+    const tools = query<HTMLInputElement>('[name="tools"]');
+    assert.equal(tools.checked, true);
+    tools.click();
+    query<HTMLFormElement>('.pc-setup').requestSubmit(); await flush();
+    const connection = storage.databases.get('plain-text-panel:chat')?.get('connection') as PeettyModelOptions;
+    assert.equal(connection.tools, false);
+    t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
+      const body = await request.json() as { tools?: unknown; tool_choice?: unknown };
+      if (body.tools || body.tool_choice) return Response.json({ error: 'tools unsupported' }, { status: 400 });
+      return textReply('Plain text works');
+    });
+    const input = query<HTMLTextAreaElement>('[name="message"]');
+    input.value = 'hello'; input.dispatchEvent(new window.Event('input', { bubbles: true }) as unknown as Event);
+    query<HTMLFormElement>('.pc-composer').requestSubmit(); await reply.promise;
+    assert.match(query('.pc-messages').textContent ?? '', /Plain text works/);
+    panel.open(true);
+    assert.equal(tools.checked, false);
+    assert.equal(query('.pc-error').hidden, true);
+  });
+});
+
+describe('Escape ownership after focus returns to the host', () => {
+  it('contains the consumed press through repeat, keypress and release, then allows host Escape again', async (t) => {
+    const { panel, query, window } = await mountPanel(t, MODEL);
+    panel.close();
+    const button = window.document.createElement('button'); window.document.body.append(button); button.focus();
+    panel.open(false);
+    const events: string[] = [];
+    for (const type of ['keydown', 'keypress', 'keyup']) window.document.addEventListener(type, () => events.push(type));
+    const fire = (target: HTMLElement, type: string, key: string, repeat = false) => {
+      const event = new window.KeyboardEvent(type, { key, repeat, bubbles: true, composed: true, cancelable: true });
+      target.dispatchEvent(event as unknown as Event); return event;
+    };
+    const target = button as unknown as HTMLElement;
+    assert.equal(fire(query('[name="message"]'), 'keydown', 'Escape').defaultPrevented, true);
+    assert.equal(panel.isOpen, false);
+    assert.equal(window.document.activeElement, button);
+    assert.equal(fire(target, 'keydown', 'Escape', true).defaultPrevented, true);
+    fire(target, 'keypress', 'Escape');
+    assert.equal(fire(target, 'keyup', 'j').defaultPrevented, false);
+    assert.deepEqual(events, ['keyup']); events.length = 0;
+    fire(target, 'keyup', 'Escape');
+    assert.deepEqual(events, []);
+    assert.equal(fire(target, 'keydown', 'Escape').defaultPrevented, false);
+    assert.deepEqual(events, ['keydown']);
+  });
+
+  for (const ending of ['destroy', 'blur', 'fresh press']) {
+    it(`releases the temporary boundary on ${ending}`, async (t) => {
+      const { panel, query, window } = await mountPanel(t, MODEL);
+      panel.close();
+      const button = window.document.createElement('button'); window.document.body.append(button); button.focus(); panel.open(false);
+      const escaped = new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, composed: true });
+      query('[name="message"]').dispatchEvent(escaped as unknown as Event);
+      let reached = 0;
+      window.document.addEventListener('keyup', () => reached++);
+      if (ending === 'destroy') panel.destroy();
+      else if (ending === 'blur') window.dispatchEvent(new window.Event('blur'));
+      else button.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, composed: true, repeat: false }));
+      button.dispatchEvent(new window.KeyboardEvent('keyup', { key: 'Escape', bubbles: true, composed: true }));
+      assert.equal(reached, 1);
+    });
+  }
+});
+
 describe('chat panel DOM and keyboard boundaries', () => {
   it('renders setup, icons, actions and replies with HTML string sinks blocked', { timeout: 10000 }, async (t) => {
     const completed = deferred<void>();

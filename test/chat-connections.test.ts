@@ -2,6 +2,20 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { LOCAL_MAGPIE, localMagpieConnection, normalizeModelOptions } from '../src/chat/connections.ts';
 
+describe('model tool preference validation', () => {
+  it('preserves boolean preferences and leaves the default optional', () => {
+    const model = { id: 'model', baseUrl: 'https://api.example' };
+    assert.deepEqual(normalizeModelOptions(model), model);
+    for (const tools of [true, false]) assert.equal(normalizeModelOptions({ ...model, tools }).tools, tools);
+  });
+
+  it('rejects nonboolean preferences without coercion', () => {
+    for (const tools of [null, 0, 1, '', 'false', 'true', {}, [], new Boolean(false)]) {
+      assert.throws(() => normalizeModelOptions({ id: 'model', baseUrl: 'https://api.example', tools: tools as boolean }), /valid API base URL and model ID/);
+    }
+  });
+});
+
 describe('model header validation', () => {
   it('validates and canonicalizes a copied string-valued header record', () => {
     const headers = { Authorization: '  Bearer gateway-secret  ', 'X-Api-Key': ' gateway-key ' };
