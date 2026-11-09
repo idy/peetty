@@ -49,11 +49,15 @@
     syncPlaceholder();
     if (IdySite.language === language) return;
     language = IdySite.language;
-    if (pet) {
-      pet.destroy();
-      start();
-    }
+    pet?.setLanguage(language);
   });
+
+  for (const button of document.querySelectorAll('[data-peetty-chat]')) {
+    button.addEventListener('click', () => {
+      if (!pet) start();
+      if (pet) { pet.show(); void pet.openChat(); }
+    });
+  }
 
   syncPicker();
   syncPlaceholder();

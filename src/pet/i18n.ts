@@ -3,6 +3,10 @@ export type Language = 'en' | 'zh';
 const TEXT = {
   en: {
     greet: 'Say hi',
+    chat: 'Chat',
+    configure: 'Settings',
+    pet: 'Peetty. Double-click to chat; right-click for actions.',
+    chatFailed: 'Chat could not load. Please try again.',
     move: 'Somewhere else',
     nap: 'Take a nap',
     hide: 'Hide',
@@ -12,6 +16,10 @@ const TEXT = {
   },
   zh: {
     greet: '打招呼',
+    chat: '聊天',
+    configure: '配置',
+    pet: 'Peetty。双击聊天，右键打开操作菜单。',
+    chatFailed: '聊天暂时没有加载成功，请再试一次。',
     move: '换个地方',
     nap: '打个盹',
     hide: '先藏起来',

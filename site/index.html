@@ -58,10 +58,10 @@
         <h1 id="hero-title" data-i18n-html="heroTitle">A little anime character,<br>right on your page.</h1>
         <p class="hero-description" data-i18n="heroDescription">Meet your new favorite little anime character. She walks along cards, hops between buttons, waves hello and curls up for a nap—all right on your web page.</p>
         <div class="hero-actions">
-          <a class="button primary" href="#embed" data-i18n="addToPage">Add her to a page</a>
-          <a class="text-link" href="https://github.com/idy/peetty" data-i18n="viewSource">View the source</a>
+          <button class="button primary" type="button" data-peetty-chat data-i18n="chatWithHer">Chat with her</button>
+          <a class="text-link" href="#embed" data-i18n="addToPage">Add her to a page</a>
         </div>
-        <p class="hero-note" data-i18n="heroNote">She is on this page now. Drag her, click her, or hover for a few things to do.</p>
+        <p class="hero-note" data-i18n="heroNote">She is here now. Double-click to chat, right-click for actions, or pick her up. For your first chat, bring an API URL, your key and a model.</p>
       </div>
 
       <div class="playground" aria-labelledby="playground-title">
@@ -135,7 +135,7 @@
         <div><dt data-i18n="edgesTitle">At home on the page.</dt><dd data-i18n="edgesDescription">She stands on the visible top edges of cards, images and buttons, follows them as you scroll, and falls to the next one when an edge disappears.</dd></div>
         <div><dt data-i18n="clearTitle">Out of your way.</dt><dd data-i18n="clearDescription">Text and controls above an edge stay uncovered. She may sit on a field you are not using, but jumps off as soon as you focus it, and stays still while you type.</dd></div>
         <div><dt data-i18n="figuresTitle">Make your own character.</dt><dd data-i18n="figuresDescription">A character is a JSON figure pack: layered vector parts on a standard skeleton, a palette, and expressions. The SDK animates any figure; recolour one by changing its palette.</dd></div>
-        <div class="unavailable-feature"><dt><span data-i18n="chatTitle">Chat and memories.</span> <span class="availability" data-i18n="unavailable">Unavailable</span></dt><dd data-i18n="chatDescription">Chat with your own API key, customize her personality and memories, and bring them with you using import and export.</dd></div>
+        <div><dt data-i18n="chatTitle">A conversation, and a little wave.</dt><dd data-i18n="chatDescription">Connect an OpenAI-compatible API, choose your model, and talk. She can wave, sit down or take a nap in response. Your connection and conversations stay in this browser.</dd></div>
       </dl>
     </section>
 
@@ -147,13 +147,23 @@
       <pre class="code"><code>&lt;script src="https://peetty.idy.dev/sdk/peetty.global.js"
         data-peetty-auto data-figure="shiori" defer&gt;&lt;/script&gt;</code></pre>
       <p class="code-note" data-i18n="embedOptions">Options: data-figure (a character id such as miru or amara, or a figure JSON URL), data-size (height in pixels), data-activity (calm, normal, lively), data-language (en, zh), data-greet="false".</p>
-      <p class="code-note" data-i18n="npmNote">Install from GitHub Packages. Registry authentication is required.</p>
-      <pre class="code"><code>npm install @idy/peetty --registry=https://npm.pkg.github.com</code></pre>
+      <p class="code-note" data-i18n="npmNote">Use GitHub Packages for @idy and sign in there. Other dependencies use your default npm registry.</p>
+      <pre class="code"><code>npm config set @idy:registry https://npm.pkg.github.com</code></pre>
+      <pre class="code"><code>npm login --scope=@idy --auth-type=legacy --registry=https://npm.pkg.github.com</code></pre>
+      <pre class="code"><code>npm install @idy/peetty</code></pre>
       <pre class="code"><code>import { createPeetty } from '@idy/peetty'
 
-const pet = createPeetty({ figure: 'koharu', activity: 'calm' })
+const pet = createPeetty({
+  figure: 'koharu',
+  model: {
+    baseUrl: 'https://your-api.example/v1',
+    id: 'your-model-id',
+    getApiKey: () => yourUserProvidedKey
+  }
+})
 await pet.mount()
-pet.say('Hello!')</code></pre>
+// Optional: open chat immediately.
+await pet.openChat()</code></pre>
     </section>
 
     <section class="questions-section wrap" aria-labelledby="questions-title">

@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
+import { fileURLToPath } from 'node:url';
+import { runInThisContext } from 'node:vm';
 import { afterEach, describe, it, mock } from 'node:test';
+import { build } from 'esbuild';
+import { Window as BrowserWindow } from 'happy-dom';
 import { Peetty } from '../src/pet/pet.ts';
 import { AUTONOMOUS_ACTIONS, type Figure, type RigFigure } from '../src/figure/types.ts';
 import type { FigureView } from '../src/figure/view.ts';
@@ -7,7 +11,10 @@ import { PRESETS } from '../src/presets.ts';
 import { floor, limits, type Perch, type PerchOptions } from '../src/pet/perches.ts';
 import { planJump, weighted } from '../src/pet/physics.ts';
 import type { Overlay } from '../src/pet/ui.ts';
+import type { CompanionAction, PeettyModelOptions } from '../src/chat/types.ts';
+import { languageOf, strings, type Language } from '../src/pet/i18n.ts';
 import { deferred, ElementStub, installPetDOM, pointer } from './helpers/pet-dom.ts';
+import { stubGlobals } from './helpers/stubs.ts';
 
 /** Inspect controller state while driving its public methods, events and frame loop. */
 interface Controller {
@@ -38,6 +45,12 @@ interface Controller {
   place: () => void;
   makeRoom: (field: Element) => void;
   walkOver: (target: number) => void;
+  chatVisible: boolean;
+  chatWorking: boolean;
+  chatSpeaking: boolean;
+  chatGestureUntil: number;
+  performChatAction: (action: CompanionAction, signal?: AbortSignal) => Promise<string>;
+  updateChatAction: () => void;
 }
 const controller = (pet: Peetty) => pet as unknown as Controller;
 const response = (figure: Figure) => ({ ok: true, json: async () => figure }) as Response;
@@ -53,12 +66,64 @@ async function mountPet(t: Parameters<typeof installPetDOM>[0], options: Constru
   return { dom, pet, state: controller(pet) };
 }
 
+/** Use a bubbling shadow DOM for keyboard boundaries; geometry stays in the controller harness. */
+async function mountKeyboardPet(t: Parameters<typeof installPetDOM>[0], options: ConstructorParameters<typeof Peetty>[0] = {}) {
+  const dom = installPetDOM(t);
+  const window = new BrowserWindow({ url: 'https://host.example/' });
+  const restore = stubGlobals({ window, document: window.document, Element: window.Element });
+  const pet = new Peetty({ greet: false, ...options });
+  dom.cleanup(() => { pet.destroy(); window.close(); restore(); });
+  const state = controller(pet);
+  mock.method(state, 'scan', () => []);
+  await pet.mount();
+  return { pet, state, window: window as unknown as Window & typeof globalThis };
+}
+
 function stand(state: Controller, x = 300) {
   const perch = floor(state.perchOptions);
   assert.ok(perch);
   state.x = x;
   state.land(perch, 0.2);
   return perch;
+}
+
+function chatPanelStub(setModel: (model: PeettyModelOptions) => Promise<void> = async () => {}) {
+  return {
+    isOpen: false,
+    language: 'en' as Language,
+    open() { this.isOpen = true; },
+    close() { this.isOpen = false; },
+    setLanguage(language: Language) { this.language = language; },
+    setModel,
+    destroy() { this.isOpen = false; },
+  };
+}
+
+function attachChatPanel(pet: Peetty, setModel: (model: PeettyModelOptions) => Promise<void> = async () => {}) {
+  const panel = chatPanelStub(setModel);
+  const host = pet as unknown as { chatPanel: typeof panel; chatLoading: Promise<typeof panel> };
+  host.chatPanel = panel;
+  host.chatLoading = Promise.resolve(panel);
+  return panel;
+}
+
+/** Exercise the real initialization chain with only the lazy chat module replaced. */
+async function petWithChatLoader(loadChatPanel: typeof import('../src/chat/load.ts').loadChatPanel): Promise<typeof Peetty> {
+  const result = await build({
+    entryPoints: [fileURLToPath(new URL('../src/pet/pet.ts', import.meta.url))],
+    bundle: true, write: false, platform: 'node', format: 'cjs',
+    plugins: [{
+      name: 'deferred-chat-loader',
+      setup(builder) {
+        builder.onLoad({ filter: /\/chat\/load\.ts$/ }, () => ({
+          contents: 'export const loadChatPanel = () => loadChatPanelForTest();',
+        }));
+      },
+    }],
+  });
+  const module = { exports: {} as { Peetty: typeof Peetty } };
+  runInThisContext(`(function(module, loadChatPanelForTest) { ${result.outputFiles[0]!.text}\n})`)(module, loadChatPanel);
+  return module.exports.Peetty;
 }
 
 describe('mount and figure request ownership', () => {
@@ -318,6 +383,31 @@ describe('safe surfaces and autonomous walking', () => {
     assert.ok(state.x >= state.perch!.left && state.x <= state.perch!.right);
     assert.ok(state.x - state.view.anchor[0] > 400, 'clear of the button');
   });
+
+  for (const request of ['chat', 'think', 'say', 'sleep', 'tool'] as const) {
+    it(`preserves the covered-floor evacuation deadline when asked to ${request}`, async (t) => {
+      const { dom, pet, state } = await mountPet(t);
+      const wall = dom.document.createElement('button');
+      wall.rect = { left: 0, top: 0, width: 400, height: 768 };
+      dom.document.body.append(wall);
+      dom.frame(300);
+      state.scanned = -Infinity;
+      state.x = 380;
+      state.y = 700;
+      state.vx = 0;
+      state.vy = 400;
+      for (let i = 0; state.mode === 'fall' && i < 50; i++) dom.frame(20);
+      assert.equal(state.perch?.clear, false);
+      const deadline = state.until;
+      if (request === 'chat') { attachChatPanel(pet); await pet.openChat(); }
+      else if (request === 'say') pet.say('A short reply.');
+      else if (request === 'tool') await assert.rejects(state.performChatAction('wave'), /clear ground/);
+      else pet.play(request);
+      assert.ok(state.until <= deadline, 'chat and stationary poses must not extend the existing exit budget');
+      for (let i = 0; !state.perch?.clear && i < 400; i++) dom.frame(20);
+      assert.equal(state.perch?.clear, true, 'evacuation still walks all the way to clear floor');
+    });
+  }
 
   it('fades out instead of walking or leaping off a covered spot when motion is reduced', async (t) => {
     const { dom, state } = await mountPet(t);
@@ -812,6 +902,1145 @@ describe('pointer and shadow event routing', () => {
     assert.equal(state.lastKey, state.clock);
     assert.equal(state.action, 'idle');
   });
+});
+
+describe('multiple companions and physical chat actions', () => {
+  it('leaves usable page space for another companion instead of avoiding an entire overlay host', async (t) => {
+    const { dom, state: first } = await mountPet(t);
+    (first.overlay.host as unknown as ElementStub).rect = { left: 0, top: 0, width: 1024, height: 768 };
+    (first.overlay.pet as unknown as ElementStub).rect = { left: 450, top: 490, width: 110, height: 180 };
+    const second = new Peetty({ greet: false });
+    dom.cleanup(() => second.destroy());
+    await second.mount();
+    assert.notEqual(controller(second).mode, 'paused');
+    assert.ok(floor(controller(second).perchOptions));
+    // Another companion's actual open panel still excludes the area it occupies.
+    const panel = dom.document.createElement('section');
+    panel.setAttribute('data-peetty', 'avoid');
+    panel.rect = { left: 600, top: 0, width: 424, height: 768 };
+    (first.overlay.host as unknown as ElementStub).shadowRoot!.append(panel);
+    dom.frame(300);
+    const free = floor(controller(second).perchOptions);
+    assert.ok(free);
+    assert.ok(free.right < 600, 'only the real panel footprint should be excluded');
+  });
+
+  it('plays each queued pose on the real animation clock before the next one starts', async (t) => {
+    const { dom, state } = await mountPet(t);
+    stand(state);
+    state.chatVisible = true;
+    const completed: string[] = [];
+    const sequence = (async () => {
+      for (const action of ['wave', 'sit', 'lie'] as const) {
+        await state.performChatAction(action);
+        completed.push(action);
+      }
+    })();
+    const advance = async (milliseconds: number) => {
+      for (let elapsed = 0; elapsed < milliseconds; elapsed += 50) { dom.frame(50); await Promise.resolve(); }
+    };
+    assert.equal(state.view.motion.current, 'wave');
+    await advance(1000);
+    assert.equal(state.view.motion.current, 'wave');
+    assert.deepEqual(completed, []);
+    await advance(2600);
+    assert.equal(state.view.motion.current, 'sit');
+    assert.deepEqual(completed, ['wave']);
+    await advance(1000);
+    assert.equal(state.view.motion.current, 'sit');
+    await advance(2600);
+    assert.equal(state.view.motion.current, 'lie');
+    assert.deepEqual(completed, ['wave', 'sit']);
+    await advance(3600);
+    await sequence;
+    assert.deepEqual(completed, ['wave', 'sit', 'lie']);
+  });
+
+  for (const action of ['wave', 'sleep'] as const) {
+    it(`preserves a running ${action} tool when chat is reopened`, async (t) => {
+      const { dom, pet, state } = await mountPet(t);
+      stand(state);
+      attachChatPanel(pet);
+      await pet.openChat();
+      let completed = false;
+      const pending = state.performChatAction(action).then(() => { completed = true; });
+      await pet.openChat();
+      await pet.configure();
+      dom.frame(50);
+      await Promise.resolve();
+      assert.equal(state.view.motion.current, action);
+      assert.equal(completed, false);
+      for (let i = 0; i < 500 && !completed; i++) { dom.frame(50); await Promise.resolve(); }
+      await pending;
+      assert.equal(completed, true);
+    });
+  }
+
+  for (const action of ['wave', 'idle'] as const) {
+    it(`does not schedule a landing greeting over a ${action} tool when chat opened in midair`, async (t) => {
+      const { dom, pet, state } = await mountPet(t, { greet: true });
+      assert.equal(state.mode, 'fall');
+      attachChatPanel(pet);
+      await pet.openChat();
+      stand(state);
+      assert.equal(dom.timers.size, 0);
+      let completed = false;
+      const pending = state.performChatAction(action).then(() => { completed = true; });
+      for (let i = 0; i < 16; i++) { dom.frame(50); await Promise.resolve(); }
+      assert.equal(state.view.motion.current, action);
+      assert.equal(state.overlay.bubble.textContent, '');
+      for (let i = 0; i < 80 && !completed; i++) { dom.frame(50); await Promise.resolve(); }
+      await pending;
+      assert.equal(completed, true);
+    });
+  }
+
+  it('cancels an already queued greeting before a chat action begins', async (t) => {
+    const { dom, state } = await mountPet(t, { greet: true });
+    stand(state);
+    assert.equal(dom.timers.size, 1);
+    state.chatVisible = true;
+    let completed = false;
+    const pending = state.performChatAction('idle').then(() => { completed = true; });
+    assert.equal(dom.timers.size, 0);
+    for (let i = 0; i < 16; i++) { dom.frame(50); await Promise.resolve(); }
+    assert.equal(state.view.motion.current, 'idle');
+    assert.equal(state.overlay.bubble.textContent, '');
+    for (let i = 0; i < 80 && !completed; i++) { dom.frame(50); await Promise.resolve(); }
+    await pending;
+    assert.equal(completed, true);
+  });
+
+  it('keeps an idle tool from being interrupted by the nearby-pointer greeting', async (t) => {
+    const { dom, pet, state } = await mountPet(t);
+    stand(state);
+    state.chatVisible = true;
+    dom.window.dispatchEvent(pointer('pointermove', 1, state.x, state.y - state.view.height / 2));
+    let completed = false;
+    const pending = state.performChatAction('idle').then(() => { completed = true; });
+    for (let i = 0; i < 20; i++) { dom.frame(50); await Promise.resolve(); }
+    assert.equal(state.view.motion.current, 'idle');
+    assert.equal(completed, false);
+    for (let i = 0; i < 60 && !completed; i++) { dom.frame(50); await Promise.resolve(); }
+    await pending;
+    assert.equal(completed, true);
+    state.chatVisible = false;
+    pet.play('idle');
+    dom.frame(50);
+    assert.equal(state.view.motion.current, 'wave', 'ordinary proximity greetings resume when no tool is pending');
+  });
+
+  it('keeps a move pending through a real jump until landing', async (t) => {
+    const { dom, state } = await mountPet(t);
+    const target = stand(state);
+    state.chatVisible = true;
+    const from: [number, number] = [state.x, state.y];
+    const plan = planJump(from, [500, target.y]);
+    assert.ok(plan);
+    // Fix target selection for reproducibility; flying(), refresh() and land() remain real.
+    t.mock.method(state, 'leap', () => {
+      state.mode = 'jump';
+      state.perch = null;
+      state.jump = { from, plan, t: -0.18, target, targetOrigin: [target.left, target.y], hang: false };
+      state.view.motion.play('jump');
+      return true;
+    });
+    let completed = false;
+    const moving = state.performChatAction('move').then(() => { completed = true; });
+    assert.equal(state.mode, 'jump');
+    for (let i = 0; i < 3; i++) { dom.frame(50); await Promise.resolve(); }
+    assert.equal(completed, false);
+    assert.equal(state.mode, 'jump');
+    for (let i = 0; i < 100 && !completed; i++) { dom.frame(50); await Promise.resolve(); }
+    await moving;
+    assert.equal(state.mode, 'ground');
+    assert.ok(Math.abs(state.x - 500) < 1);
+    assert.equal(completed, true);
+  });
+
+  for (const failure of ['removed', 'covered'] as const) {
+    it(`rejects a move when its target is ${failure}, even if the fall reaches covered floor`, async (t) => {
+      const { dom, state } = await mountPet(t);
+      const ledge = dom.document.createElement('button');
+      ledge.rect = { left: 450, top: 700, width: 240, height: 40 };
+      dom.document.body.append(ledge);
+      dom.frame(300);
+      const target = state.scan(true).find((perch) => perch.el === ledge as unknown as Element);
+      assert.ok(target);
+      stand(state, (target.left + target.right) / 2);
+      state.chatVisible = true;
+      const from: [number, number] = [state.x, state.y];
+      const plan = planJump(from, [(target.left + target.right) / 2, target.y]);
+      assert.ok(plan);
+      t.mock.method(state, 'leap', () => {
+        state.mode = 'jump';
+        state.perch = null;
+        state.jump = { from, plan, t: -0.18, target, targetOrigin: [target.left, target.y], hang: false };
+        state.view.motion.play('jump');
+        return true;
+      });
+      const rejection = assert.rejects(state.performChatAction('move'), /interrupted/);
+      for (let i = 0; i < 5; i++) { dom.frame(50); await Promise.resolve(); }
+      const mode = () => state.mode;
+      assert.equal(mode(), 'jump');
+      if (failure === 'removed') ledge.remove();
+      const blocker = dom.document.createElement('input');
+      blocker.rect = { left: 0, top: 0, width: 1024, height: 768 };
+      dom.document.body.append(blocker);
+      dom.frame(300);
+      for (let i = 0; i < 100 && mode() === 'jump'; i++) { dom.frame(50); await Promise.resolve(); }
+      await rejection;
+      for (let i = 0; i < 200 && mode() === 'fall'; i++) dom.frame(20);
+      assert.equal(state.mode, 'ground');
+      assert.equal(state.perch?.clear, false, 'landing on the catch-all is not a successful safe move');
+    });
+  }
+
+  for (const action of ['sleep', 'wave', 'sit', 'lie', 'idle'] as const) {
+    for (const chatVisible of [false, true]) {
+      it(`immediately releases an aborted ${action} pose with chat ${chatVisible ? 'open' : 'closed'}`, async (t) => {
+        const { state } = await mountPet(t);
+        stand(state);
+        state.chatVisible = chatVisible;
+        const abort = new AbortController();
+        const rejected = assert.rejects(state.performChatAction(action, abort.signal), { name: 'AbortError' });
+        abort.abort();
+        assert.equal(state.action, chatVisible ? 'sit' : 'idle');
+        assert.equal(state.view.motion.current, state.action, 'the visible animation changes before another frame');
+        assert.equal(state.until, state.clock / 1000 + (chatVisible ? 15 : 2));
+        assert.equal(state.chatGestureUntil, state.clock, 'chat gestures no longer wait for the cancelled tool');
+        await rejected;
+      });
+    }
+  }
+
+  for (const speaking of [false, true]) {
+    it(`restores the active chat ${speaking ? 'talk' : 'think'} pose when sleep is aborted`, async (t) => {
+      const { state } = await mountPet(t);
+      stand(state);
+      state.chatVisible = state.chatWorking = true;
+      state.chatSpeaking = speaking;
+      const abort = new AbortController();
+      const rejected = assert.rejects(state.performChatAction('sleep', abort.signal), { name: 'AbortError' });
+      abort.abort();
+      assert.equal(state.view.motion.current, speaking ? 'talk' : 'think');
+      await rejected;
+    });
+  }
+
+  for (const action of ['sleep', 'lie'] as const) {
+    it(`leaves a safe idle pose when closing chat aborts ${action}`, async (t) => {
+      const { pet, state } = await mountPet(t);
+      stand(state);
+      const panel = attachChatPanel(pet);
+      await pet.openChat();
+      const abort = new AbortController();
+      mock.method(panel, 'close', () => { panel.isOpen = false; abort.abort(); });
+      const rejected = assert.rejects(state.performChatAction(action, abort.signal), { name: 'AbortError' });
+      pet.closeChat();
+      assert.equal(state.chatVisible, false);
+      assert.equal(state.view.motion.current, 'idle');
+      assert.equal(state.until, state.clock / 1000 + 2);
+      await rejected;
+    });
+  }
+
+  for (const replacement of ['sit', 'nap', 'walk'] as const) {
+    it(`does not overwrite a user-selected ${replacement} when the previous sleep tool is aborted`, async (t) => {
+      const { pet, state } = await mountPet(t);
+      stand(state);
+      state.chatVisible = true;
+      const abort = new AbortController();
+      const rejected = assert.rejects(state.performChatAction('sleep', abort.signal), { name: 'AbortError' });
+      if (replacement === 'nap') {
+        const nap = [...state.overlay.menu.children].find((button) => button.getAttribute('data-action') === 'nap');
+        assert.ok(nap);
+        nap.dispatchEvent(new Event('click'));
+      } else pet.play(replacement);
+      const action = state.action;
+      const deadline = state.until;
+      const walkTo = state.walkTo;
+      abort.abort();
+      assert.equal(state.action, action);
+      assert.equal(state.view.motion.current, action);
+      assert.equal(state.until, deadline, 'even a replacement with the same pose and deadline keeps ownership');
+      assert.equal(state.walkTo, walkTo);
+      await rejected;
+    });
+  }
+
+  for (const replacement of ['play', 'nap'] as const) {
+    for (const elapsed of [10000, 20000, 20050]) {
+      it(`rejects a sleep tool replaced by ${replacement} at ${elapsed}ms without changing the replacement`, async (t) => {
+        const { pet, state } = await mountPet(t);
+        stand(state);
+        const started = state.clock;
+        const rejected = assert.rejects(state.performChatAction('sleep'), /interrupted/);
+        if (replacement === 'play') {
+          state.clock += 10000;
+          pet.play('sleep');
+        } else {
+          const nap = [...state.overlay.menu.children].find((button) => button.getAttribute('data-action') === 'nap');
+          assert.ok(nap);
+          nap.dispatchEvent(new Event('click'));
+          assert.equal(state.until, (started + 20000) / 1000, 'the replacement has the identical pose and deadline');
+        }
+        const deadline = state.until;
+        state.clock = started + elapsed;
+        state.updateChatAction();
+        await rejected;
+        assert.equal(state.action, 'sleep');
+        assert.equal(state.view.motion.current, 'sleep');
+        assert.equal(state.until, deadline);
+      });
+    }
+  }
+
+  it('completes an owned sleep tool when a frame passes its deadline', async (t) => {
+    const { dom, state } = await mountPet(t);
+    stand(state);
+    const pending = state.performChatAction('sleep');
+    state.clock += 19990;
+    dom.frame(50);
+    assert.equal(await pending, 'Finished sleep.');
+  });
+
+  for (const replacement of ['drag', 'fall', 'landing'] as const) {
+    it(`does not overwrite ${replacement} when an earlier idle tool is aborted`, async (t) => {
+      const { dom, state } = await mountPet(t);
+      const perch = stand(state);
+      state.chatVisible = true;
+      const abort = new AbortController();
+      const rejected = assert.rejects(state.performChatAction('idle', abort.signal), { name: 'AbortError' });
+      if (replacement === 'drag') {
+        state.overlay.pet.dispatchEvent(pointer('pointerdown', 1));
+        dom.window.dispatchEvent(pointer('pointermove', 1, 150, 150));
+      } else {
+        state.startFall();
+        if (replacement === 'landing') state.land(perch, 0.2);
+      }
+      const mode = state.mode;
+      const motion = state.view.motion.current;
+      const deadline = state.until;
+      const play = mock.method(state.view.motion, 'play');
+      abort.abort();
+      assert.equal(state.mode, mode);
+      assert.equal(state.view.motion.current, motion);
+      assert.equal(state.until, deadline);
+      assert.equal(play.mock.callCount(), 0, 'physics retains animation ownership');
+      await rejected;
+    });
+  }
+
+  it('keeps an aborted move flying on its original arc through landing', async (t) => {
+    const { dom, state } = await mountPet(t);
+    const target = stand(state);
+    state.chatVisible = true;
+    const from: [number, number] = [state.x, state.y];
+    const plan = planJump(from, [500, target.y]);
+    assert.ok(plan);
+    mock.method(state, 'leap', () => {
+      state.mode = 'jump';
+      state.perch = null;
+      state.jump = { from, plan, t: -0.18, target, targetOrigin: [target.left, target.y], hang: false };
+      state.view.motion.play('jump');
+      return true;
+    });
+    const abort = new AbortController();
+    const rejected = assert.rejects(state.performChatAction('move', abort.signal), { name: 'AbortError' });
+    for (let i = 0; i < 5; i++) dom.frame(50);
+    const jump = state.jump;
+    const position = [state.x, state.y, state.vx, state.vy];
+    abort.abort();
+    assert.equal(state.mode, 'jump');
+    assert.equal(state.jump, jump);
+    assert.equal(state.view.motion.current, 'jump');
+    assert.deepEqual([state.x, state.y, state.vx, state.vy], position);
+    await rejected;
+    for (let i = 0; i < 100 && state.mode === 'jump'; i++) dom.frame(50);
+    assert.equal(state.mode, 'ground');
+    assert.ok(Math.abs(state.x - 500) < 1);
+  });
+
+  it('does not extend a covered-floor evacuation deadline when a stationary tool is aborted', async (t) => {
+    const { dom, state } = await mountPet(t);
+    const perch = stand(state, 380);
+    state.chatVisible = true;
+    const abort = new AbortController();
+    const rejected = assert.rejects(state.performChatAction('sleep', abort.signal), { name: 'AbortError' });
+    const wall = dom.document.createElement('button');
+    wall.rect = { left: 0, top: 0, width: 400, height: 768 };
+    dom.document.body.append(wall);
+    state.perch = { ...perch, clear: false };
+    const deadline = state.until = state.clock / 1000 + 0.2;
+    abort.abort();
+    assert.equal(state.action, 'idle', 'a covered surface must not regain a stationary chat pose');
+    assert.ok(state.until <= deadline);
+    await rejected;
+    for (let i = 0; !state.perch?.clear && i < 400; i++) dom.frame(20);
+    assert.equal(state.perch?.clear, true, 'she still evacuates all the way to clear floor');
+  });
+
+  for (const interruption of ['abort', 'hide', 'destroy'] as const) {
+    it(`releases a pending physical action on ${interruption}`, async (t) => {
+      const { pet, state } = await mountPet(t);
+      stand(state);
+      state.chatVisible = true;
+      const controller = new AbortController();
+      const pending = state.performChatAction('sit', controller.signal);
+      const rejected = assert.rejects(pending, interruption === 'abort' ? { name: 'AbortError' } : /interrupted/);
+      const motion = state.view.motion;
+      if (interruption === 'abort') controller.abort();
+      else pet[interruption]();
+      await rejected;
+      const play = mock.method(motion, 'play');
+      controller.abort();
+      assert.equal(play.mock.callCount(), 0, 'disposed abort handlers cannot regain pose ownership');
+    });
+  }
+});
+
+describe('in-place interface language', () => {
+  it('updates overlay and existing panel without replacing the session or interrupting an action', async (t) => {
+    const { dom, pet, state } = await mountPet(t, { language: 'en' });
+    stand(state);
+    const panel = attachChatPanel(pet);
+    await pet.openChat();
+    const overlay = state.overlay;
+    const view = state.view;
+    const figure = state.figure;
+    const buttons = [...overlay.menu.children];
+    const frames = [...dom.frames.keys()];
+    const localize = mock.method(panel, 'setLanguage');
+    const model = mock.method(panel, 'setModel');
+    const destroyPanel = mock.method(panel, 'destroy');
+    const destroyPet = mock.method(pet, 'destroy');
+    const mount = mock.method(pet, 'mount');
+    pet.say('Keep this reply visible');
+    const running = state.performChatAction('wave');
+    const deadline = state.until;
+    overlay.menu.classList.add('show');
+    overlay.measure(overlay.menu);
+    const menu = overlay.menu as unknown as ElementStub;
+    const dimensions = menu.dimensionReads;
+
+    assert.equal(pet.setLanguage('zh'), undefined, 'language switching is synchronous');
+    assert.equal(state.overlay, overlay);
+    assert.equal(state.view, view);
+    assert.equal(state.figure, figure);
+    assert.equal(dom.hosts.length, 1);
+    assert.deepEqual([...dom.frames.keys()], frames);
+    assert.deepEqual([...overlay.menu.children], buttons);
+    assert.equal(overlay.pet.getAttribute('aria-label'), strings('zh').pet);
+    assert.equal(overlay.menu.getAttribute('aria-label'), strings('zh').menu);
+    for (const button of buttons) {
+      const action = button.getAttribute('data-action') as 'chat' | 'greet' | 'move' | 'nap' | 'configure' | 'hide';
+      assert.equal(button.textContent, strings('zh')[action]);
+    }
+    overlay.measure(overlay.menu);
+    assert.equal(menu.dimensionReads, dimensions + 2, 'translated menu dimensions must be remeasured');
+    assert.equal(overlay.menu.classList.contains('show'), true);
+    assert.equal(overlay.pet.getAttribute('aria-expanded'), 'true');
+    assert.equal(overlay.bubble.textContent, 'Keep this reply visible');
+    assert.equal(overlay.bubble.classList.contains('show'), true);
+    assert.equal(panel.isOpen, true);
+    assert.equal(panel.language, 'zh');
+    assert.deepEqual(localize.mock.calls.map((call) => call.arguments), [['zh']]);
+    assert.equal(model.mock.callCount(), 0);
+    assert.equal(destroyPanel.mock.callCount(), 0);
+    assert.equal(destroyPet.mock.callCount(), 0);
+    assert.equal(mount.mock.callCount(), 0);
+    assert.equal(state.action, 'wave');
+    assert.equal(state.until, deadline);
+    for (let i = 0; i < 180; i++) dom.frame(20);
+    assert.equal(await running, 'Finished wave.');
+    assert.equal((pet as unknown as { options: { language: string } }).options.language, 'zh');
+  });
+
+  it('keeps chat:false activation and greetings local in the new language', async (t) => {
+    const { dom, pet, state } = await mountPet(t, { chat: false, language: 'en' });
+    stand(state);
+    const network = mock.method(globalThis, 'fetch', async () => { throw new Error('unexpected network'); });
+    pet.setLanguage('zh');
+    assert.equal(state.overlay.pet.getAttribute('aria-label'), strings('zh').greet);
+    assert.equal(state.overlay.pet.getAttribute('aria-haspopup'), null);
+    assert.equal(state.overlay.pet.getAttribute('aria-expanded'), null);
+    for (const button of state.overlay.menu.children) {
+      if (['chat', 'configure'].includes(button.getAttribute('data-action') ?? '')) assert.equal((button as HTMLElement).hidden, true);
+    }
+    state.overlay.pet.dispatchEvent(new Event('click'));
+    dom.frame(400);
+    assert.ok((strings('zh').hello as readonly string[]).includes(state.overlay.bubble.textContent ?? ''));
+    assert.equal((pet as unknown as { chatLoading: unknown }).chatLoading, null);
+    assert.equal(network.mock.callCount(), 0);
+  });
+
+  it('uses the latest language when a pending figure is first mounted and resolves auto', async (t) => {
+    const dom = installPetDOM(t);
+    const figure = deferred<Response>();
+    mock.method(globalThis, 'fetch', () => figure.promise);
+    const pet = new Peetty({ figure: '/pending-language.json', language: 'en', greet: false });
+    dom.cleanup(() => pet.destroy());
+    const mounting = pet.mount();
+    pet.setLanguage('zh');
+    figure.resolve(response(PRESETS.miru));
+    await mounting;
+    const state = controller(pet);
+    assert.equal(state.overlay.menu.getAttribute('aria-label'), strings('zh').menu);
+    pet.setLanguage('auto');
+    assert.equal(state.overlay.menu.getAttribute('aria-label'), strings(languageOf('auto')).menu);
+    assert.equal((pet as unknown as { options: { language: string } }).options.language, 'auto');
+  });
+
+  it('applies the latest language before publishing and opening a panel initialized asynchronously', async (t) => {
+    const module = deferred<Awaited<ReturnType<typeof import('../src/chat/load.ts').loadChatPanel>>>();
+    const ready = deferred<ReturnType<typeof chatPanelStub>>();
+    const IsolatedPeetty = await petWithChatLoader(() => module.promise);
+    const dom = installPetDOM(t);
+    const pet = new IsolatedPeetty({ language: 'en', greet: false });
+    dom.cleanup(() => pet.destroy());
+    const create = mock.fn(async (_options: { language: Language }) => ready.promise);
+    const opening = pet.openChat();
+    await turns();
+    pet.setLanguage('zh');
+    module.resolve({ createChatPanel: create });
+    await turns();
+    assert.equal(create.mock.callCount(), 1);
+    assert.equal(create.mock.calls[0]!.arguments[0].language, 'zh');
+    pet.setLanguage('zh');
+    pet.setLanguage('en');
+    const panel = chatPanelStub();
+    const events: string[] = [];
+    mock.method(panel, 'setLanguage', (language: Language) => {
+      assert.equal((pet as unknown as { chatPanel: unknown }).chatPanel, null);
+      panel.language = language;
+      events.push(`language:${language}`);
+    });
+    mock.method(panel, 'open', () => { panel.isOpen = true; events.push('open'); });
+    ready.resolve(panel);
+    await opening;
+    assert.deepEqual(events, ['language:en', 'open']);
+    assert.equal(panel.language, 'en');
+    assert.equal((pet as unknown as { chatPanel: unknown }).chatPanel, panel);
+    assert.equal(controller(pet).overlay.menu.getAttribute('aria-label'), strings('en').menu);
+  });
+
+  for (const interruption of ['closeChat', 'destroy'] as const) {
+    it(`preserves ${interruption} ownership when language changes during panel initialization`, async (t) => {
+      const ready = deferred<ReturnType<typeof chatPanelStub>>();
+      const create = mock.fn(async () => ready.promise);
+      const IsolatedPeetty = await petWithChatLoader(async () => ({ createChatPanel: create }));
+      const dom = installPetDOM(t);
+      const pet = new IsolatedPeetty({ language: 'en', greet: false });
+      dom.cleanup(() => pet.destroy());
+      const opening = pet.openChat();
+      await turns();
+      assert.equal(create.mock.callCount(), 1);
+      pet.setLanguage('zh');
+      pet[interruption]();
+      const panel = chatPanelStub();
+      const localize = mock.method(panel, 'setLanguage');
+      const open = mock.method(panel, 'open');
+      const destroy = mock.method(panel, 'destroy');
+      ready.resolve(panel);
+      await opening;
+      assert.equal(open.mock.callCount(), 0);
+      assert.equal(destroy.mock.callCount(), interruption === 'destroy' ? 1 : 0);
+      assert.deepEqual(localize.mock.calls.map((call) => call.arguments), interruption === 'destroy' ? [] : [['zh']]);
+    });
+  }
+
+  it('retains a concurrent language change when an asynchronous model update finishes', async (t) => {
+    const { pet, state } = await mountPet(t, { language: 'en' });
+    const applying = deferred<void>();
+    const panel = attachChatPanel(pet, () => applying.promise);
+    const next = { id: 'new-model', baseUrl: 'https://new.example/v1', apiKey: 'ephemeral-key' };
+    const updating = pet.setModel(next);
+    pet.setLanguage('zh');
+    applying.resolve();
+    await updating;
+    assert.equal(panel.language, 'zh');
+    assert.equal(state.overlay.pet.getAttribute('aria-label'), strings('zh').pet);
+    const options = (pet as unknown as { options: { language: string; model: PeettyModelOptions } }).options;
+    assert.equal(options.language, 'zh');
+    assert.deepEqual(options.model, next);
+  });
+
+  it('rejects unsupported values without echoing input or changing the current language', async (t) => {
+    const { pet, state } = await mountPet(t, { language: 'en' });
+    const panel = attachChatPanel(pet);
+    const localize = mock.method(panel, 'setLanguage');
+    const invalid = [null, undefined, 1, '', 'fr', 'private-secret', { toString() { throw new Error('must not coerce input'); } }];
+    for (const value of invalid) {
+      assert.throws(() => pet.setLanguage(value as Language), { name: 'TypeError', message: 'Language must be en, zh, or auto.' });
+    }
+    assert.equal((pet as unknown as { options: { language: string } }).options.language, 'en');
+    assert.equal(state.overlay.pet.getAttribute('aria-label'), strings('en').pet);
+    assert.equal(localize.mock.callCount(), 0);
+  });
+});
+
+describe('chat pose ownership', () => {
+  for (const source of ['open', 'think', 'talk', 'reply', 'ground', 'cancel'] as const) {
+    for (const manual of [false, true]) {
+      it(`closes ${source} with ${manual ? 'an identical caller replacement preserved' : 'the chat pose reset'}`, async (t) => {
+        let callbacks: Parameters<typeof import('../src/chat/panel.ts').createChatPanel>[0] | undefined;
+        const IsolatedPeetty = await petWithChatLoader(async () => ({
+          createChatPanel: async (options) => { callbacks = options; return chatPanelStub(); },
+        }));
+        const dom = installPetDOM(t);
+        const pet = new IsolatedPeetty({ greet: false });
+        dom.cleanup(() => pet.destroy());
+        await pet.mount();
+        const state = controller(pet);
+        stand(state);
+        await pet.openChat();
+        assert.ok(callbacks);
+        if (source === 'think' || source === 'talk') callbacks.onState(true, source === 'talk');
+        if (source === 'reply') {
+          pet.play('idle');
+          callbacks.onReply('Short reply');
+        }
+        if (source === 'ground') {
+          state.until = -1;
+          dom.frame(16);
+        }
+        if (source === 'cancel') {
+          const abort = new AbortController();
+          const pending = state.performChatAction('sit', abort.signal);
+          const rejected = assert.rejects(pending, { name: 'AbortError' });
+          if (manual) pet.play('sit');
+          abort.abort();
+          await rejected;
+        } else if (manual) pet.play(state.action as Parameters<Peetty['play']>[0]);
+        const action = state.action;
+        const until = state.until;
+        pet.closeChat();
+        assert.equal(state.action, manual ? action : 'idle');
+        if (manual) assert.equal(state.until, until, 'closing preserves the caller deadline');
+      });
+    }
+  }
+
+  it('preserves a public say deadline when chat closes', async (t) => {
+    const { pet, state } = await mountPet(t);
+    stand(state);
+    attachChatPanel(pet);
+    await pet.openChat();
+    pet.play('idle');
+    pet.say('Caller message', 1.2);
+    const until = state.until;
+    pet.closeChat();
+    assert.equal(state.action, 'talk');
+    assert.equal(state.until, until);
+  });
+
+  it('keeps a completed sit tool caller-independent when chat closes', async (t) => {
+    const { pet, state } = await mountPet(t);
+    stand(state);
+    attachChatPanel(pet);
+    await pet.openChat();
+    const pending = state.performChatAction('sit');
+    state.clock += 3500;
+    state.updateChatAction();
+    await pending;
+    const until = state.until;
+    pet.closeChat();
+    assert.equal(state.action, 'sit');
+    assert.equal(state.until, until);
+  });
+});
+
+describe('chat entry points and SDK model injection', () => {
+  it('uses the lazy reply renderer for a short bubble and invalidates its measured size', async (t) => {
+    let reply: ((text: string, render?: (target: HTMLElement) => void) => void) | undefined;
+    const IsolatedPeetty = await petWithChatLoader(async () => ({
+      createChatPanel: async (options) => { reply = options.onReply; return chatPanelStub(); },
+    }));
+    const dom = installPetDOM(t);
+    const pet = new IsolatedPeetty({ greet: false });
+    dom.cleanup(() => pet.destroy());
+    await pet.openChat();
+    const state = controller(pet);
+    stand(state);
+    const bubble = state.overlay.bubble;
+    state.overlay.measure(bubble);
+    const render = mock.fn((target: HTMLElement) => {
+      assert.equal(target, bubble);
+      target.textContent = 'cat\n /\\_/\\';
+      (target as unknown as ElementStub).rect = { left: 0, top: 0, width: 210, height: 90 };
+    });
+    assert.ok(reply);
+    reply('**cat**\n\n```text\n /\\_/\\\n```', render);
+    assert.equal(bubble.textContent, 'cat\n /\\_/\\');
+    assert.equal(bubble.classList.contains('show'), true);
+    assert.deepEqual(state.overlay.measure(bubble), { width: 210, height: 90 });
+    reply('x'.repeat(181), render);
+    assert.equal(render.mock.callCount(), 1, 'long replies remain in the chat panel');
+    pet.say('plain\nsecond line');
+    assert.equal(bubble.textContent, 'plain\nsecond line');
+    pet.destroy();
+    reply('late', render);
+    assert.equal(render.mock.callCount(), 1);
+  });
+
+  it('accepts an injected model without loading chat, resolving credentials, or calling the endpoint on mount', async (t) => {
+    let keys = 0;
+    const network = mock.method(globalThis, 'fetch', async () => { throw new Error('unexpected network'); });
+    const { pet } = await mountPet(t, { model: { baseUrl: 'https://api.example.test/v1', id: 'first', getApiKey: () => { keys++; return 'key'; } } });
+    await pet.setModel({ baseUrl: 'https://other.example.test/v1', id: 'second', apiKey: 'another-key' });
+    assert.equal(keys, 0);
+    assert.equal(network.mock.callCount(), 0);
+    assert.equal((pet as unknown as { chatLoading: unknown }).chatLoading, null);
+  });
+
+  it('rejects an invalid SDK model replacement before chat has been loaded', async (t) => {
+    const original = { baseUrl: 'https://original.example/v1', id: 'original-model', apiKey: 'old-key' };
+    const { pet } = await mountPet(t, { model: original });
+    const network = mock.method(globalThis, 'fetch', async () => { throw new Error('unexpected network'); });
+    for (const replacement of [
+      { ...original, baseUrl: 'https://user:private-secret@new.example/' },
+      { ...original, id: '' },
+      { ...original, headers: { Authorization: 123 } as unknown as Record<string, string> },
+    ]) {
+      await assert.rejects(pet.setModel(replacement), (error: Error) => error.message.includes('valid API base URL and model ID') && !error.message.includes('private-secret'));
+      assert.deepEqual((pet as unknown as { options: { model: unknown } }).options.model, original);
+    }
+    await pet.setModel({ id: 'root-model', baseUrl: 'https://root.example/' });
+    assert.equal((pet as unknown as { options: { model: { baseUrl: string } } }).options.model.baseUrl, 'https://root.example');
+    assert.equal((pet as unknown as { chatLoading: unknown }).chatLoading, null);
+    assert.equal(network.mock.callCount(), 0);
+  });
+
+  for (const phase of ['loading', 'applying'] as const) {
+    it(`discards a model replacement waiting for chat ${phase} after destruction`, async (t) => {
+      const { pet } = await mountPet(t);
+      const loading = deferred<null>();
+      const applying = deferred<void>();
+      if (phase === 'loading') (pet as unknown as { chatLoading: Promise<null> }).chatLoading = loading.promise;
+      else attachChatPanel(pet, () => applying.promise);
+      const old = pet.setModel({ id: 'stale', baseUrl: 'https://stale.example', apiKey: 'stale-key' });
+      pet.destroy();
+      const fresh = { id: 'fresh', baseUrl: 'https://fresh.example', apiKey: 'fresh-key' };
+      await pet.setModel(fresh);
+      loading.resolve(null);
+      applying.resolve();
+      await old;
+      await pet.mount();
+      assert.deepEqual((pet as unknown as { options: { model: PeettyModelOptions } }).options.model, fresh);
+      assert.equal(pet.mounted, true);
+    });
+  }
+
+  it('keeps the latest model when earlier panel updates finish out of order', async (t) => {
+    const { pet } = await mountPet(t);
+    const first = deferred<void>();
+    const second = deferred<void>();
+    attachChatPanel(pet, (model) => model.id === 'first' ? first.promise : second.promise);
+    const old = pet.setModel({ id: 'first', baseUrl: 'https://first.example', apiKey: 'first-key' });
+    const fresh = pet.setModel({ id: 'second', baseUrl: 'https://second.example', apiKey: 'second-key' });
+    second.resolve();
+    await fresh;
+    first.resolve();
+    await old;
+    assert.equal((pet as unknown as { options: { model: PeettyModelOptions } }).options.model.id, 'second');
+  });
+
+  it('opens chat from a synthesized click with no pointer or keyboard events', async (t) => {
+    const { pet, state } = await mountPet(t);
+    stand(state);
+    const open = mock.method(pet, 'openChat', async () => {});
+    const click = new Event('click', { bubbles: true, cancelable: true });
+    state.overlay.pet.dispatchEvent(click);
+    assert.equal(open.mock.callCount(), 1);
+    assert.equal(click.defaultPrevented, true);
+    await turns();
+    state.overlay.pet.dispatchEvent(Object.assign(new Event('click'), { detail: 0, pointerType: '' }));
+    assert.equal(open.mock.callCount(), 2);
+  });
+
+  for (const device of ['mouse', 'touch'] as const) {
+    it(`ignores ${device} compatibility clicks after handling pointer releases`, async (t) => {
+      const { dom, pet, state } = await mountPet(t);
+      stand(state);
+      const open = mock.method(pet, 'openChat', async () => {});
+      for (let i = 0; i < 2; i++) {
+        state.overlay.pet.dispatchEvent(Object.assign(pointer('pointerdown', 1), { pointerType: device }));
+        dom.window.dispatchEvent(Object.assign(pointer('pointerup', 1), { pointerType: device }));
+        state.overlay.pet.dispatchEvent(Object.assign(new Event('click'), { detail: device === 'touch' ? 0 : i + 1, pointerType: device }));
+        assert.equal(open.mock.callCount(), i);
+        if (!i) dom.frame(100);
+      }
+    });
+  }
+
+  for (const key of ['Enter', ' '] as const) {
+    it(`does not duplicate ${JSON.stringify(key)} activation through key repeat or a synthesized click`, async (t) => {
+      const { pet, state } = await mountPet(t);
+      stand(state);
+      const open = mock.method(pet, 'openChat', async () => {});
+      state.overlay.pet.dispatchEvent(Object.assign(new Event('keydown', { cancelable: true }), { key, repeat: false }));
+      state.overlay.pet.dispatchEvent(Object.assign(new Event('keydown', { cancelable: true }), { key, repeat: true }));
+      state.overlay.pet.dispatchEvent(Object.assign(new Event('click'), { detail: 0, pointerType: '' }));
+      assert.equal(open.mock.callCount(), 1);
+    });
+  }
+
+  it('keeps synthesized activation local when chat is disabled', async (t) => {
+    const { pet, state } = await mountPet(t, { chat: false, language: 'en' });
+    stand(state);
+    const network = mock.method(globalThis, 'fetch', async () => { throw new Error('unexpected network'); });
+    state.overlay.pet.dispatchEvent(new Event('click'));
+    assert.equal(state.action, 'wave');
+    assert.equal(state.overlay.pet.getAttribute('aria-label'), 'Say hi');
+    assert.equal(state.overlay.pet.getAttribute('aria-haspopup'), null);
+    pet.closeChat();
+    assert.equal(state.overlay.pet.getAttribute('aria-expanded'), null);
+    assert.equal((pet as unknown as { chatLoading: unknown }).chatLoading, null);
+    assert.equal(network.mock.callCount(), 0);
+  });
+
+  it('greets on both quick pointer clicks without initializing disabled chat', async (t) => {
+    const { dom, pet, state } = await mountPet(t, { chat: false });
+    stand(state);
+    const open = mock.method(pet, 'openChat', async () => {});
+    const play = mock.method(state.view.motion, 'play');
+    const network = mock.method(globalThis, 'fetch', async () => { throw new Error('unexpected network'); });
+    for (let i = 0; i < 2; i++) {
+      state.overlay.pet.dispatchEvent(pointer('pointerdown', 1));
+      dom.window.dispatchEvent(pointer('pointerup', 1));
+      assert.equal(state.press, null);
+      assert.equal(state.action, 'wave');
+      assert.equal(play.mock.calls.filter((call) => call.arguments[0] === 'wave').length, i + 1);
+      if (!i) dom.frame(100);
+    }
+    assert.equal(open.mock.callCount(), 0);
+    assert.equal((pet as unknown as { chatLoading: unknown }).chatLoading, null);
+    assert.equal(network.mock.callCount(), 0);
+  });
+
+  it('greets and preserves the touch menu on every disabled-chat tap', async (t) => {
+    const { dom, pet, state } = await mountPet(t, { chat: false });
+    stand(state);
+    const play = mock.method(state.view.motion, 'play');
+    for (let i = 0; i < 3; i++) {
+      state.overlay.pet.dispatchEvent(Object.assign(pointer('pointerdown', i), { pointerType: 'touch' }));
+      dom.window.dispatchEvent(Object.assign(pointer('pointerup', i), { pointerType: 'touch' }));
+      assert.equal(state.overlay.menu.classList.contains('show'), true);
+      assert.equal(play.mock.calls.filter((call) => call.arguments[0] === 'wave').length, i + 1);
+      dom.frame(50);
+    }
+    assert.equal((pet as unknown as { chatLoading: unknown }).chatLoading, null);
+  });
+
+  it('opens chat once on a double tap and cancels the delayed greeting', async (t) => {
+    const { dom, pet, state } = await mountPet(t);
+    stand(state);
+    const open = mock.method(pet, 'openChat', async () => {});
+    for (let i = 0; i < 2; i++) {
+      state.overlay.pet.dispatchEvent(pointer('pointerdown', 1));
+      dom.window.dispatchEvent(pointer('pointerup', 1));
+      if (!i) dom.frame(100);
+    }
+    assert.equal(open.mock.callCount(), 1);
+    assert.equal(dom.timers.size, 0);
+  });
+
+  it('cancels queued hover and tap work when chat opens', async (t) => {
+    const { dom, pet, state } = await mountPet(t);
+    stand(state);
+    const panel = attachChatPanel(pet);
+    state.overlay.pet.dispatchEvent(new Event('pointerover'));
+    state.overlay.pet.dispatchEvent(pointer('pointerdown', 1));
+    dom.window.dispatchEvent(pointer('pointerup', 1));
+    dom.frame(100);
+    await pet.openChat();
+    assert.equal(panel.isOpen, true);
+    dom.frame(1000);
+    assert.equal(state.overlay.menu.classList.contains('show'), false);
+    assert.equal(state.action, 'sit');
+    assert.equal(dom.timers.size, 0);
+  });
+
+  it('contains companion context menus while preserving host context menus elsewhere', async (t) => {
+    const { state, window } = await mountKeyboardPet(t);
+    const host = mock.fn();
+    window.document.addEventListener('contextmenu', host);
+    const event = new window.MouseEvent('contextmenu', { bubbles: true, composed: true, cancelable: true });
+    state.overlay.pet.dispatchEvent(event);
+    assert.equal(event.defaultPrevented, true);
+    assert.equal(host.mock.callCount(), 0, 'the host custom menu does not receive the companion event');
+    state.overlay.pet.dispatchEvent(new window.Event('pointerout'));
+    assert.equal(state.overlay.menu.classList.contains('show'), true);
+    const outside = new window.MouseEvent('contextmenu', { bubbles: true, composed: true, cancelable: true });
+    window.document.body.dispatchEvent(outside);
+    assert.equal(outside.defaultPrevented, false);
+    assert.equal(host.mock.callCount(), 1);
+  });
+
+  it('restores hover access after dragging dismisses a pinned menu', async (t) => {
+    const { dom, state } = await mountPet(t);
+    stand(state);
+    state.overlay.pet.dispatchEvent(new Event('contextmenu', { cancelable: true }));
+    assert.equal(state.overlay.menu.classList.contains('show'), true);
+    state.overlay.pet.dispatchEvent(pointer('pointerdown', 1));
+    dom.window.dispatchEvent(pointer('pointermove', 1, 150, 150));
+    assert.equal(state.mode, 'drag');
+    assert.equal(state.overlay.menu.classList.contains('show'), false);
+    dom.window.dispatchEvent(pointer('pointerup', 1, 150, 150));
+    state.overlay.pet.dispatchEvent(new Event('pointerover'));
+    dom.frame(300);
+    assert.equal(state.overlay.menu.classList.contains('show'), true);
+  });
+
+  for (const dismissal of ['park', 'hide'] as const) {
+    it(`restores hover access after ${dismissal} dismisses a pinned menu`, async (t) => {
+      const { dom, pet, state } = await mountPet(t);
+      stand(state);
+      state.overlay.pet.dispatchEvent(new Event('contextmenu', { cancelable: true }));
+      if (dismissal === 'park') (pet as unknown as { park(): void }).park();
+      else pet.hide();
+      assert.equal(state.overlay.menu.classList.contains('show'), false);
+      if (dismissal === 'hide') pet.show();
+      else for (let i = 0; i < 30; i++) dom.frame(50);
+      state.overlay.pet.dispatchEvent(new Event('pointerover'));
+      dom.frame(300);
+      assert.equal(state.overlay.menu.classList.contains('show'), true);
+    });
+  }
+
+  it('offers the menu on a touch tap and routes the Chat action to the public API', async (t) => {
+    const { dom, pet, state } = await mountPet(t);
+    stand(state);
+    state.overlay.pet.dispatchEvent(pointer('pointerdown', 1));
+    dom.window.dispatchEvent(Object.assign(pointer('pointerup', 1), { pointerType: 'touch' }));
+    assert.equal(state.overlay.menu.classList.contains('show'), true);
+    const open = mock.method(pet, 'openChat', async () => {});
+    const button = [...state.overlay.menu.children].find((node) => node.getAttribute('data-action') === 'chat');
+    assert.ok(button);
+    button.dispatchEvent(new Event('click'));
+    assert.equal(open.mock.callCount(), 1);
+  });
+
+  it('cancels a pending tap greeting when a drag starts', async (t) => {
+    const { dom, state } = await mountPet(t);
+    stand(state);
+    state.overlay.pet.dispatchEvent(pointer('pointerdown', 1));
+    dom.window.dispatchEvent(pointer('pointerup', 1));
+    assert.equal(dom.timers.size, 1);
+    state.overlay.pet.dispatchEvent(pointer('pointerdown', 2));
+    dom.window.dispatchEvent(pointer('pointermove', 2, 150, 150));
+    assert.equal(state.mode, 'drag');
+    assert.equal(dom.timers.size, 0);
+  });
+
+  it('can disable chat without affecting local pet interactions', async (t) => {
+    const { pet, state } = await mountPet(t, { chat: false });
+    await pet.openChat();
+    await pet.configure();
+    assert.equal((pet as unknown as { chatLoading: unknown }).chatLoading, null);
+    for (const button of state.overlay.menu.children) {
+      if (['chat', 'configure'].includes(button.getAttribute('data-action') ?? '')) assert.equal((button as HTMLElement).hidden, true);
+    }
+  });
+});
+
+describe('companion and menu keyboard boundaries', () => {
+  for (const key of ['ContextMenu', 'F10']) {
+    it(`focuses the first visible enabled local action with ${key} when chat is disabled`, async (t) => {
+      const { state, window } = await mountKeyboardPet(t, { chat: false });
+      const greet = state.overlay.menu.querySelector<HTMLButtonElement>('[data-action="greet"]')!;
+      greet.disabled = true;
+      state.overlay.pet.focus();
+      state.overlay.pet.dispatchEvent(new window.KeyboardEvent('keydown', {
+        key, shiftKey: key === 'F10', bubbles: true, composed: true, cancelable: true,
+      }));
+      assert.equal(state.overlay.host.shadowRoot!.activeElement, state.overlay.menu.querySelector('[data-action="move"]'));
+      state.overlay.host.shadowRoot!.activeElement!.dispatchEvent(new window.KeyboardEvent('keydown', {
+        key: 'Escape', bubbles: true, composed: true, cancelable: true,
+      }));
+      assert.equal(state.overlay.menu.classList.contains('show'), false);
+      assert.equal(state.overlay.host.shadowRoot!.activeElement, state.overlay.pet);
+    });
+  }
+
+  for (const cleanup of ['release', 'fresh press', 'blur', 'destroy'] as const) {
+    it(`contains Hide's Enter after focus leaves and clears ownership on ${cleanup}`, async (t) => {
+      const { pet, state, window } = await mountKeyboardPet(t);
+      const host = mock.fn();
+      for (const type of ['keydown', 'keypress', 'keyup']) window.document.addEventListener(type, host);
+      const button = state.overlay.menu.querySelector<HTMLButtonElement>('[data-action="hide"]')!;
+      state.overlay.menu.classList.add('show');
+      button.focus();
+      const down = new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, composed: true, cancelable: true });
+      button.dispatchEvent(down);
+      assert.equal(down.defaultPrevented, false, 'Hide retains its native default activation');
+      button.click();
+      button.blur();
+      for (const type of ['keydown', 'keypress']) {
+        const event = new window.KeyboardEvent(type, { key: 'Enter', repeat: true, bubbles: true, composed: true, cancelable: true });
+        window.document.body.dispatchEvent(event);
+        assert.equal(event.defaultPrevented, true);
+      }
+      const unrelated = new window.KeyboardEvent('keyup', { key: 'k', bubbles: true, cancelable: true });
+      window.document.body.dispatchEvent(unrelated);
+      assert.equal(unrelated.defaultPrevented, false);
+      assert.equal(host.mock.callCount(), 1);
+      if (cleanup === 'release') {
+        const up = new window.KeyboardEvent('keyup', { key: 'Enter', bubbles: true, cancelable: true });
+        window.document.body.dispatchEvent(up);
+        assert.equal(up.defaultPrevented, true);
+      } else if (cleanup === 'blur') window.dispatchEvent(new window.Event('blur'));
+      else if (cleanup === 'destroy') pet.destroy();
+      for (const type of ['keydown', 'keypress', 'keyup']) {
+        const event = new window.KeyboardEvent(type, { key: 'Enter', bubbles: true, cancelable: true });
+        window.document.body.dispatchEvent(event);
+        assert.equal(event.defaultPrevented, false, 'the next host press remains native');
+      }
+      assert.equal(host.mock.callCount(), 4);
+    });
+  }
+
+  for (const focusablePanel of [false, true]) {
+    it(`removes a parked pet from tab order and accessibility with ${focusablePanel ? 'focusable' : 'legacy'} chat`, async (t) => {
+      const { pet, state } = await mountKeyboardPet(t);
+      stand(state);
+      const panel = attachChatPanel(pet);
+      const focus = mock.fn();
+      if (focusablePanel) Object.assign(panel, { focus });
+      const open = mock.method(panel, 'open');
+      await pet.openChat();
+      state.overlay.pet.focus();
+      (pet as unknown as { park(): void }).park();
+      assert.equal(state.overlay.host.style.visibility, 'visible');
+      assert.equal(state.overlay.pet.getAttribute('tabindex'), '-1');
+      assert.equal(state.overlay.pet.getAttribute('aria-hidden'), 'true');
+      assert.notEqual(state.overlay.host.shadowRoot!.activeElement, state.overlay.pet);
+      assert.equal(focus.mock.callCount(), focusablePanel ? 1 : 0);
+      assert.equal(open.mock.callCount(), 1, 'parking never reopens the panel or resets setup');
+      await pet.openChat();
+      assert.equal(state.overlay.pet.getAttribute('aria-hidden'), 'true');
+      const perch = floor(state.perchOptions)!;
+      mock.method(state, 'scan', () => [perch]);
+      (pet as unknown as { enter(): void }).enter();
+      assert.equal(state.overlay.pet.getAttribute('tabindex'), '0');
+      assert.equal(state.overlay.pet.getAttribute('aria-hidden'), null);
+      assert.equal(state.overlay.pet.classList.contains('gone'), false);
+    });
+  }
+
+  for (const key of ['Enter', ' '] as const) {
+    it(`contains every phase of ${JSON.stringify(key)} activation without duplicating chat`, async (t) => {
+      const { pet, state, window } = await mountKeyboardPet(t);
+      const open = mock.method(pet, 'openChat', async () => {});
+      const host = mock.fn();
+      for (const type of ['keydown', 'keypress', 'keyup']) window.document.addEventListener(type, host);
+      for (const [type, repeat] of [['keydown', false], ['keydown', true], ['keypress', false], ['keyup', false]] as const) {
+        const event = new window.KeyboardEvent(type, { key, repeat, bubbles: true, composed: true, cancelable: true });
+        state.overlay.pet.dispatchEvent(event);
+        assert.equal(event.defaultPrevented, true, `${type} is consumed by the companion`);
+      }
+      state.overlay.pet.dispatchEvent(new window.MouseEvent('click', { detail: 0, bubbles: true, composed: true }));
+      assert.equal(open.mock.callCount(), 1);
+      assert.equal(host.mock.callCount(), 0);
+    });
+  }
+
+  for (const key of ['ContextMenu', 'F10'] as const) {
+    it(`contains ${key} through the focus transfer to the menu and modifier release`, async (t) => {
+      const { state, window } = await mountKeyboardPet(t);
+      const host = mock.fn();
+      for (const type of ['keydown', 'keypress', 'keyup']) window.document.addEventListener(type, host);
+      state.overlay.pet.focus();
+      state.overlay.pet.dispatchEvent(new window.KeyboardEvent('keydown', {
+        key, shiftKey: key === 'F10', bubbles: true, composed: true, cancelable: true,
+      }));
+      assert.equal(state.overlay.menu.classList.contains('show'), true);
+      const button = state.overlay.menu.querySelector('button')!;
+      assert.equal(state.overlay.host.shadowRoot!.activeElement, button);
+      for (const type of ['keypress', 'keyup']) {
+        const event = new window.KeyboardEvent(type, { key, shiftKey: false, bubbles: true, composed: true, cancelable: true });
+        button.dispatchEvent(event);
+        assert.equal(event.defaultPrevented, true);
+      }
+      assert.equal(host.mock.callCount(), 0);
+      if (key === 'F10') {
+        for (const type of ['keydown', 'keypress', 'keyup']) {
+          const event = new window.KeyboardEvent(type, { key, bubbles: true, composed: true, cancelable: true });
+          state.overlay.pet.dispatchEvent(event);
+          assert.equal(event.defaultPrevented, false, 'a new unmodified F10 press belongs to the host');
+        }
+        assert.equal(host.mock.callCount(), 3);
+      }
+    });
+  }
+
+  it('contains menu Escape through the return of focus, then lets unrelated companion Escape through', async (t) => {
+    const { state, window } = await mountKeyboardPet(t);
+    const host = mock.fn();
+    for (const type of ['keydown', 'keypress', 'keyup']) window.document.addEventListener(type, host);
+    state.overlay.menu.classList.add('show');
+    const button = state.overlay.menu.querySelector('button')!;
+    button.focus();
+    const down = new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, composed: true, cancelable: true });
+    button.dispatchEvent(down);
+    assert.equal(down.defaultPrevented, true);
+    assert.equal(state.overlay.menu.classList.contains('show'), false);
+    assert.equal(state.overlay.host.shadowRoot!.activeElement, state.overlay.pet);
+    const repeat = new window.KeyboardEvent('keydown', { key: 'Escape', repeat: true, bubbles: true, composed: true, cancelable: true });
+    state.overlay.pet.dispatchEvent(repeat);
+    assert.equal(repeat.defaultPrevented, true, 'a held Escape remains consumed after focus returns');
+    for (const type of ['keypress', 'keyup']) {
+      const event = new window.KeyboardEvent(type, { key: 'Escape', bubbles: true, composed: true, cancelable: true });
+      state.overlay.pet.dispatchEvent(event);
+      assert.equal(event.defaultPrevented, true);
+    }
+    assert.equal(host.mock.callCount(), 0);
+    for (const type of ['keydown', 'keypress', 'keyup']) {
+      const event = new window.KeyboardEvent(type, { key: 'Escape', bubbles: true, composed: true, cancelable: true });
+      state.overlay.pet.dispatchEvent(event);
+      assert.equal(event.defaultPrevented, false);
+    }
+    assert.equal(host.mock.callCount(), 3);
+  });
+
+  for (const key of ['Enter', ' '] as const) {
+    it(`contains native menu-button ${JSON.stringify(key)} without preventing its activation`, async (t) => {
+      const { pet, state, window } = await mountKeyboardPet(t);
+      const open = mock.method(pet, 'openChat', async () => {});
+      const host = mock.fn();
+      for (const type of ['keydown', 'keypress', 'keyup', 'click']) window.document.addEventListener(type, host);
+      state.overlay.menu.classList.add('show');
+      const button = state.overlay.menu.querySelector<HTMLButtonElement>('[data-action="chat"]')!;
+      button.focus();
+      for (const type of ['keydown', 'keypress', 'keyup']) {
+        const event = new window.KeyboardEvent(type, { key, bubbles: true, composed: true, cancelable: true });
+        button.dispatchEvent(event);
+        assert.equal(event.defaultPrevented, false, 'native buttons retain their default keyboard action');
+      }
+      // The DOM fixture does not synthesize the browser's default keyboard click.
+      button.click();
+      assert.equal(open.mock.callCount(), 1);
+      assert.equal(host.mock.callCount(), 0);
+    });
+  }
+
+  for (const target of ['pet', 'menu'] as const) {
+    it(`preserves unrelated host shortcuts from the ${target}`, async (t) => {
+      const { state, window } = await mountKeyboardPet(t);
+      const host = mock.fn();
+      for (const type of ['keydown', 'keypress', 'keyup']) window.document.addEventListener(type, host);
+      const origin = target === 'pet' ? state.overlay.pet : state.overlay.menu.querySelector('button')!;
+      for (const key of ['k', 'Tab', 'ArrowLeft', 'F10']) {
+        for (const type of ['keydown', 'keypress', 'keyup']) {
+          const event = new window.KeyboardEvent(type, { key, ctrlKey: key === 'k', bubbles: true, composed: true, cancelable: true });
+          origin.dispatchEvent(event);
+          assert.equal(event.defaultPrevented, false);
+        }
+      }
+      assert.equal(host.mock.callCount(), 12);
+    });
+  }
 });
 
 describe('overlay geometry and weighted selection', () => {

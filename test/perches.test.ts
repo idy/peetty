@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { bottom, clearAt, crossing, findPerches, floor, inUse, limits, perchOf, reach, refresh, support, type Perch, type PerchOptions } from '../src/pet/perches.ts';
 import { landing } from '../src/pet/physics.ts';
+import { LIMITS } from '../src/figure/validate.ts';
 import { stubGlobals } from './helpers/stubs.ts';
 
 type Rect = { left: number; top: number; right: number; bottom: number; width: number; height: number };
@@ -399,6 +400,340 @@ describe('safe viewport floor', () => {
     const avoid = element('section', rect(0, 0, 800, 700));
     avoid.setAttribute('data-peetty', 'avoid');
     assert.deepEqual(findPerches(fixture.opts), []);
+  });
+});
+
+describe('bounded companion graphics', () => {
+  function figure(bounds: Rect, shape = { x: 0, y: 0, width: bounds.width, height: bounds.height }, flip = false) {
+    // The real host is pointer-transparent outside its painted figure.
+    const host = element('peetty-companion', empty());
+    const shadow = new TestShadow(host); host.shadowRoot = shadow;
+    const pet = new TestElement('DIV', bounds); pet.setAttribute('data-peetty', 'avoid'); shadow.append(pet);
+    const svg = element('svg', bounds, pet);
+    Object.assign(svg, {
+      getBBox: () => shape,
+      getScreenCTM: () => ({ a: flip ? -1 : 1, b: 0, c: 0, d: 1, e: flip ? bounds.right : bounds.left, f: bounds.top }),
+    });
+    return { svg, pet };
+  }
+
+  function part(svg: TestElement, bounds: Rect, id = 'body') {
+    // RigRenderer: per-bone part -> optional clip group -> look/spring group -> shapes.
+    const outer = element('g', bounds, svg); outer.setAttribute('data-part', id);
+    const clipped = element('g', bounds, outer); clipped.setAttribute('clip-path', 'url(#clip)');
+    return element('g', bounds, clipped);
+  }
+
+  it('keeps clear space usable beside several figures with thousands of visible parts', () => {
+    for (let n = 0; n < 3; n++) {
+      const { svg } = figure(rect(n * 130, 580, 100, 120));
+      for (let i = 0; i < 2500; i++) element('path', svg.bounds, svg);
+    }
+    const found = floor(fixture.opts);
+    assert.ok(found, 'one graphic must not exhaust the shared rectangle or traversal budget');
+    assert.ok(found.left > 410 && found.right <= 750);
+    assert.ok(fixture.styleReads < 50, `bounded style reads: ${fixture.styleReads}`);
+    assert.ok(fixture.geometryReads < 50, `bounded geometry reads: ${fixture.geometryReads}`);
+  });
+
+  it('includes overflow-visible SVG geometry outside the declared viewport', () => {
+    const { svg } = figure(rect(0, 580, 100, 120), { x: 0, y: 0, width: 230, height: 120 });
+    element('path', rect(0, 580, 230, 120), svg);
+    const found = floor(fixture.opts);
+    assert.ok(found);
+    assert.ok(found.left > 280, `painted geometry extends the blocked span: ${found.left}`);
+  });
+
+  it('transforms the whole geometry when the figure is mirrored', () => {
+    const { svg } = figure(rect(500, 580, 100, 120), { x: 0, y: 0, width: 200, height: 120 }, true);
+    element('path', rect(400, 580, 200, 120), svg);
+    const found = floor(fixture.opts);
+    assert.ok(found);
+    assert.ok(found.right < 350, `mirrored overflow stays blocked: ${found.right}`);
+  });
+
+  it('does not fill the gap to disconnected offscreen geometry', () => {
+    const body = rect(650, 580, 100, 120);
+    const { svg } = figure(body, { x: -10_650, y: 0, width: 10_750, height: 120 });
+    const main = part(svg, body);
+    for (let i = 0; i < 2500; i++) element('path', body, main);
+    const distant = part(svg, rect(-10_000, 600, 10, 10), 'distant');
+    for (let i = 0; i < 2500; i++) element('ellipse', distant.bounds, distant);
+    const found = floor(fixture.opts);
+    assert.ok(found, 'the space between the offscreen part and the body remains clear');
+    assert.equal(found.left, 50);
+    assert.ok(found.right > 590 && found.right < 600, `only the body blocks the floor: ${found.right}`);
+    assert.ok(fixture.geometryReads < 30, `covered/offscreen groups are pruned: ${fixture.geometryReads}`);
+    assert.ok(fixture.styleReads < 30, `covered/offscreen groups need no descendant styles: ${fixture.styleReads}`);
+  });
+
+  it('prunes a part whose two offscreen ellipses bracket the whole viewport', () => {
+    // The native-browser repro: both ellipses paint below the page, at x = +/-2000,
+    // but unioning their part with the SVG viewport would block every floor anchor.
+    const body = rect(650, 580, 100, 120);
+    const { svg } = figure(body, { x: -2005, y: 0, width: 4010, height: 2005 });
+    element('path', body, part(svg, body));
+    const distant = part(svg, rect(-1355, 2575, 4010, 10), 'head');
+    element('ellipse', rect(-1355, 2575, 10, 10), distant);
+    element('ellipse', rect(2645, 2575, 10, 10), distant);
+    const found = floor(fixture.opts);
+    assert.ok(found, 'the disconnected part cannot park another companion');
+    assert.equal(found.left, 50);
+    assert.ok(found.right > 590 && found.right < 600);
+    assert.ok(fixture.geometryReads < 20, 'the offscreen part can be pruned without reading its shapes');
+  });
+
+  for (const flip of [false, true]) {
+    it(`preserves an onscreen gap between distant shapes within one ${flip ? 'mirrored ' : ''}grouped part`, () => {
+      const body = rect(flip ? 50 : 650, 580, 100, 120);
+      const island = rect(flip ? 630 : 150, 610, 20, 40);
+      const { svg } = figure(body, { x: -500, y: 0, width: 600, height: 120 }, flip);
+      const group = part(svg, rect(Math.min(body.left, island.left), 580, 600, 120));
+      // Native screen rectangles already include the nested look/spring/shape transforms.
+      group.setAttribute('transform', 'translate(20 0) rotate(15 0 0)');
+      element('path', body, group);
+      const shape = element('ellipse', island, group);
+      shape.setAttribute('transform', 'rotate(30 0 0)');
+      const found = floor(fixture.opts);
+      assert.ok(found);
+      if (flip) {
+        assert.ok(found.left > 200 && found.left < 210, `the mirrored body remains protected: ${found.left}`);
+        assert.ok(found.right > 570 && found.right < 580, `the mirrored island remains protected: ${found.right}`);
+      } else {
+        assert.ok(found.left > 220 && found.left < 230, `the island remains protected: ${found.left}`);
+        assert.ok(found.right > 590 && found.right < 600, `the body remains protected: ${found.right}`);
+      }
+      assert.ok(found.right - found.left > 360, 'part/group unions must not block the gap');
+    });
+  }
+
+  it('protects the soul effect while ignoring nonpainting defs', () => {
+    const { svg } = figure(rect(650, 580, 100, 120), { x: -500, y: -40, width: 600, height: 160 });
+    const defs = element('defs', rect(0, 0, 800, 700), svg);
+    const clip = element('clipPath', defs.bounds, defs);
+    for (let i = 0; i < 2500; i++) element('path', defs.bounds, clip);
+    element('path', svg.bounds, part(svg, svg.bounds));
+    const soul = element('g', rect(150, 540, 20, 80), svg); soul.setAttribute('data-effect', 'soul');
+    element('path', soul.bounds, soul);
+    const face = element('g', rect(153, 550, 14, 12), soul);
+    for (let i = 0; i < 3; i++) element('ellipse', face.bounds, face);
+    const found = floor(fixture.opts);
+    assert.ok(found);
+    assert.ok(found.left > 220 && found.left < 230, `the soul outside the viewport stays protected: ${found.left}`);
+    assert.ok(found.right > 590 && found.right < 600);
+    assert.ok(fixture.geometryReads < 30, `defs and covered soul details are pruned: ${fixture.geometryReads}`);
+  });
+
+  it('handles maximum-size parts with repeated disconnected shapes without consuming the rectangle budget', () => {
+    const body = rect(650, 580, 100, 120);
+    const island = rect(150, 610, 20, 40);
+    const { svg } = figure(body, { x: -500, y: 0, width: 600, height: 120 });
+    for (let i = 0; i < LIMITS.maxParts; i++) {
+      const group = part(svg, rect(150, 580, 600, 120), `part${i}`);
+      for (let j = 0; j < LIMITS.maxShapesPerPart; j++) element(j % 2 ? 'path' : 'ellipse', j % 2 ? body : island, group);
+    }
+    const found = floor(fixture.opts);
+    assert.ok(found, '200 parts x 64 mixed shapes fit within the shared collection budget');
+    assert.ok(found.left > 220 && found.left < 230);
+    assert.ok(found.right > 590 && found.right < 600);
+    assert.ok(fixture.styleReads < 650, `styles are needed only for overflowing groups: ${fixture.styleReads}`);
+    assert.ok(fixture.geometryReads < 13_450, `one native screen read per visited group/shape: ${fixture.geometryReads}`);
+  });
+
+  for (const direction of ['horizontal', 'vertical'] as const) {
+    it(`protects a ${direction} stroked path when all paint geometry has zero area`, () => {
+      const horizontal = direction === 'horizontal';
+      const { svg } = figure(rect(650, 580, 100, 120), { x: -500, y: 30, width: horizontal ? 20 : 0, height: horizontal ? 0 : 20 });
+      const bounds = rect(150, 610, horizontal ? 20 : 0, horizontal ? 0 : 20);
+      const path = element('path', bounds, part(svg, bounds));
+      path.setAttribute('stroke', '#6753b8'); path.setAttribute('stroke-width', '50'); path.setAttribute('stroke-linejoin', 'round');
+      Object.assign(path, { getScreenCTM: () => ({ a: 1, b: 0, c: 0, d: 1, e: 650, f: 580 }) });
+      const found = floor(fixture.opts);
+      assert.ok(found, 'clear floor remains beside the painted stroke');
+      assert.ok(found.left > (horizontal ? 245 : 225), `the full stroke must block the anchor span: ${found.left}`);
+      assert.ok(found.right > 590 && found.right < 600);
+    });
+  }
+
+  it('includes the screen-space stroke width of a mirrored, scaled path', () => {
+    const { svg } = figure(rect(650, 580, 100, 120), { x: -500, y: 30, width: 0, height: 20 });
+    const bounds = rect(150, 610, 0, 20);
+    const path = element('path', bounds, part(svg, bounds));
+    path.setAttribute('stroke', '#6753b8'); path.setAttribute('stroke-width', '50'); path.setAttribute('stroke-linejoin', 'miter');
+    Object.assign(path, { getScreenCTM: () => ({ a: -2, b: 0, c: 0, d: 0.5, e: 150, f: 600 }) });
+    const found = floor(fixture.opts);
+    assert.ok(found);
+    assert.ok(found.left > 400, `transformed miter extents remain blocked: ${found.left}`);
+  });
+
+  it('retains an on-screen stroke when a nonempty group geometry is entirely below the viewport', () => {
+    const { svg } = figure(rect(650, 580, 100, 120), { x: -500, y: 0, width: 600, height: 160 });
+    const group = part(svg, rect(150, 710, 40, 30));
+    const path = element('path', rect(150, 710, 40, 0), group);
+    path.setAttribute('stroke', '#6753b8'); path.setAttribute('stroke-width', '50'); path.setAttribute('stroke-linejoin', 'round');
+    Object.assign(path, { getScreenCTM: () => ({ a: 1, b: 0, c: 0, d: 1, e: 650, f: 580 }) });
+    element('ellipse', rect(160, 730, 10, 10), group);
+    const found = floor(fixture.opts);
+    assert.ok(found);
+    assert.ok(found.left > 265, `the descendant stroke reaches the floor: ${found.left}`);
+    assert.ok(found.right > 590 && found.right < 600);
+  });
+
+  it('does not prune the whole SVG when offscreen geometry has a stroke reaching the page', () => {
+    const { svg } = figure(rect(650, 580, 100, 120), { x: -500, y: 130, width: 40, height: 30 });
+    const group = part(svg, rect(150, 710, 40, 30));
+    const path = element('path', rect(150, 710, 40, 0), group);
+    path.setAttribute('stroke', '#6753b8'); path.setAttribute('stroke-width', '50'); path.setAttribute('stroke-linejoin', 'round');
+    Object.assign(path, { getScreenCTM: () => ({ a: 1, b: 0, c: 0, d: 1, e: 650, f: 580 }) });
+    element('ellipse', rect(160, 730, 10, 10), group);
+    const found = floor(fixture.opts);
+    assert.ok(found);
+    assert.ok(found.left > 265, `root pruning includes descendant paint: ${found.left}`);
+  });
+
+  for (const outerFirst of [true, false]) {
+    it(`coalesces 2,100 nested overflow boxes with the outer box ${outerFirst ? 'first' : 'last'}`, () => {
+      const { svg } = figure(rect(650, 580, 100, 120), { x: -500, y: 0, width: 600, height: 120 });
+      for (let i = 0; i < 2100; i++) {
+        const inset = (outerFirst ? i : 2099 - i) / 100;
+        element('ellipse', rect(150 + inset, 610 + inset / 4, 60 - inset * 2, 60 - inset / 2), svg);
+      }
+      const found = floor(fixture.opts);
+      assert.ok(found, 'nested geometry must not consume separate obstacle slots');
+      assert.ok(found.left > 260 && found.left < 270);
+      assert.ok(found.right > 590 && found.right < 600);
+    });
+  }
+
+  it('leaves usable floor beside 300 distinct overflow shapes without quadratic collection work', () => {
+    const { svg } = figure(rect(650, 580, 100, 120), { x: -550, y: 0, width: 650, height: 120 });
+    for (let i = 0; i < 300; i++) element('ellipse', rect(100 + i, 610, 0.1, 0.1), svg);
+    const found = floor(fixture.opts);
+    assert.ok(found, 'a modest number of distinct shapes must not exhaust collection');
+    assert.ok(found.left > 450 && found.right > 590);
+    assert.ok(fixture.geometryReads < 400, `collection visits each shape once: ${fixture.geometryReads}`);
+  });
+
+  for (const count of [1500, 2046]) {
+    it(`retains ${count} disjoint overflow boxes with distinct vertical intervals when they fit`, () => {
+      const { svg } = figure(rect(650, 580, 100, 120), { x: -500, y: 0, width: 600, height: 120 });
+      for (let i = 0; i < count; i++) element('ellipse', rect(150, 600 + i * 0.04, 0.1, 0.02), svg);
+      const found = floor(fixture.opts);
+      assert.ok(found, 'fitting boxes must not spend work on optional coverage indexing');
+      assert.ok(found.left > 200 && found.right > 590);
+    });
+  }
+
+  for (const scenario of ['incoming nested groups', 'both need compaction', 'incoming disjoint', 'incoming overlapping'] as const) {
+    it(`preserves the scan budget across incoming and retained paint: ${scenario}`, () => {
+      const first = figure(rect(650, 580, 100, 120), { x: -500, y: 0, width: 600, height: 120 });
+      const oldCount = scenario === 'incoming nested groups' ? 1500 : 2044;
+      for (let i = 0; i < oldCount; i++) {
+        const inset = i / 100;
+        element('ellipse', scenario === 'incoming nested groups'
+          ? rect(150, 600 + i * 0.04, 0.1, 0.02)
+          : rect(150 + inset, 610 + inset / 4, 60 - inset * 2, 60 - inset / 2), first.svg);
+      }
+      const second = figure(rect(0, 580, 100, 120), { x: 0, y: 0, width: 380, height: 120 });
+      if (scenario === 'incoming disjoint' || scenario === 'incoming overlapping') {
+        const step = scenario === 'incoming overlapping' ? 0.02 : 0.04;
+        const height = scenario === 'incoming overlapping' ? 0.03 : 0.02;
+        for (let i = 0; i < 1500; i++) element('ellipse', rect(250, 600 + i * step, 0.1, height), second.svg);
+      } else {
+        const count = scenario === 'both need compaction' ? 1050 : 400;
+        for (const x of [250, 350]) for (let i = 0; i < count; i++) {
+          const inset = i / 1000;
+          element('ellipse', rect(x + inset, 610 + inset / 4, 30 - inset * 2, 30 - inset / 2), second.svg);
+        }
+      }
+      const found = floor(fixture.opts);
+      assert.ok(found, 'both figures fit after only the necessary compaction');
+      assert.ok(found.right > 590 && found.right < 600);
+    });
+  }
+
+  it('reclaims a cheap nested batch before indexing an earlier disjoint batch', () => {
+    const first = figure(rect(650, 580, 100, 120), { x: -500, y: 0, width: 600, height: 120 });
+    for (let i = 0; i < 1000; i++) element('ellipse', rect(150, 600 + i * 0.04, 0.1, 0.02), first.svg);
+    const second = figure(rect(0, 580, 100, 120), { x: 0, y: 0, width: 310, height: 120 });
+    for (let i = 0; i < 1000; i++) {
+      const inset = i / 100;
+      element('ellipse', rect(250 + inset, 610 + inset / 4, 60 - inset * 2, 60 - inset / 2), second.svg);
+    }
+    for (let i = 0; i < 45; i++) element('button', rect(i * 10, 100, 4, 4));
+    const found = floor(fixture.opts);
+    assert.ok(found, 'cheap reclaim must happen before optional indexing spends the remaining budget');
+    assert.ok(found.left > 360 && found.left < 370);
+    assert.ok(found.right > 590 && found.right < 600);
+  });
+
+  for (const later of ['buttons', 'text', 'figure'] as const) {
+    it(`compacts an earlier fitting figure when later ${later} need obstacle slots`, () => {
+      const { svg } = figure(rect(650, 580, 100, 120), { x: -500, y: 0, width: 600, height: 120 });
+      for (let i = 0; i < 2046; i++) {
+        const inset = i / 100;
+        element('ellipse', rect(150 + inset, 610 + inset / 4, 60 - inset * 2, 60 - inset / 2), svg);
+      }
+      if (later === 'buttons') {
+        element('button', rect(300, 650, 20, 20));
+        element('button', rect(400, 650, 20, 20));
+      } else if (later === 'text') {
+        fixture.document.body.append(new TestText('later text', [rect(300, 650, 20, 20), rect(400, 650, 20, 20)]));
+      } else {
+        const other = figure(rect(0, 580, 100, 120));
+        element('path', other.svg.bounds, other.svg);
+      }
+      const found = floor(fixture.opts);
+      assert.ok(found, 'previously retained nested boxes must leave room for later obstacles');
+      const left = later === 'figure' ? 260 : 470;
+      assert.ok(found.left > left && found.left < left + 10, 'later page obstacles remain protected');
+      assert.ok(found.right > 590 && found.right < 600);
+    });
+  }
+
+  it('does not mistake separated vertical coverage for a fully covered rectangle', () => {
+    const { svg } = figure(rect(650, 580, 100, 120), { x: -550, y: 0, width: 650, height: 120 });
+    element('path', rect(100, 600, 200, 10), svg);
+    // Exceed the raw cap so this case continues to exercise coverage indexing.
+    for (let i = 0; i < 2100; i++) element('ellipse', rect(101 + i / 10_000, 600, 180 - i / 10_000, 10), svg);
+    element('path', rect(110, 620, 190, 10), svg);
+    element('path', rect(120, 600, 130, 100), svg);
+    const found = floor({ ...fixture.opts, width: 20, height: 20, anchor: [10, 20] });
+    assert.ok(found);
+    assert.ok(found.left > 260 && found.left < 270, `paint in the vertical gap stays protected: ${found.left}`);
+  });
+
+  it('bounds descendant stroke metadata work on an oversized companion subtree', () => {
+    const { svg } = figure(rect(650, 580, 100, 120), { x: -500, y: 0, width: 600, height: 120 });
+    for (let i = 0; i < 50_000; i++) element('path', rect(150, 610, 1, 1), svg);
+    assert.equal(floor(fixture.opts), null, 'an incomplete metadata walk cannot certify clear floor');
+    assert.ok(fixture.geometryReads < 100, `metadata traversal is bounded before native geometry reads: ${fixture.geometryReads}`);
+  });
+
+  it('bounds extra collection work when a companion has too many disconnected overflow shapes', () => {
+    const { svg } = figure(rect(0, 580, 100, 120), { x: 0, y: 0, width: 800, height: 120 });
+    for (let i = 0; i < 10_000; i++) element('path', rect(110 + (i % 600), 600 + Math.floor(i / 600), 0.1, 0.1), svg);
+    assert.equal(floor(fixture.opts), null, 'an incomplete overflow collection cannot certify clear floor');
+    assert.ok(fixture.geometryReads < 10_100, `geometry collection stays linear before coalescing: ${fixture.geometryReads}`);
+  });
+
+  it('falls back to normal descendant scanning if native SVG bounds fail', () => {
+    const { svg } = figure(rect(0, 580, 100, 120));
+    Object.assign(svg, { getBBox() { throw new Error('No native geometry'); } });
+    element('path', rect(0, 580, 230, 120), svg);
+    const found = floor(fixture.opts);
+    assert.ok(found);
+    assert.ok(found.left > 280);
+  });
+
+  it('does not prune arbitrary avoided page SVG content as a companion graphic', () => {
+    const avoid = element('section', rect(0, 580, 100, 120)); avoid.setAttribute('data-peetty', 'avoid');
+    const svg = element('svg', rect(0, 580, 100, 120), avoid);
+    Object.assign(svg, { getBBox: () => ({ x: 0, y: 0, width: 100, height: 120 }), getScreenCTM: () => ({ a: 1, b: 0, c: 0, d: 1, e: 0, f: 580 }) });
+    element('button', rect(0, 580, 250, 120), svg);
+    const found = floor(fixture.opts);
+    assert.ok(found);
+    assert.ok(found.left > 300);
   });
 });
 

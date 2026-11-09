@@ -6,6 +6,10 @@ import { languageOf, strings, type Language, type Strings } from './i18n.ts';
 import { bottom, clearAt, crossing, findPerches, floor, inUse, isEditable, limits, reach, refresh, support, type Perch, type PerchOptions } from './perches.ts';
 import { along, GRAVITY, impact, planJump, weighted, type Jump } from './physics.ts';
 import { createOverlay, placeAbove, type MenuAction, type Overlay } from './ui.ts';
+import type { ChatPanel } from '../chat/panel.ts';
+import { loadChatPanel } from '../chat/load.ts';
+import { normalizeModelOptions } from '../chat/connections.ts';
+import type { CompanionAction, PeettyChatOptions, PeettyModelOptions } from '../chat/types.ts';
 
 export type Activity = 'calm' | 'normal' | 'lively';
 
@@ -24,6 +28,10 @@ export interface PeettyOptions {
   greet?: boolean;
   /** Overlay stacking order. */
   zIndex?: number;
+  /** An OpenAI-compatible connection. Injected credentials are not saved automatically. */
+  model?: PeettyModelOptions;
+  /** Chat storage and personality; false disables all chat entry points. */
+  chat?: PeettyChatOptions | false;
 }
 
 type Mode = 'ground' | 'jump' | 'fall' | 'drag' | 'hang' | 'paused';
@@ -34,6 +42,14 @@ interface FigureRequest {
   superseded: Promise<null>;
   supersede: () => void;
   failed: boolean;
+}
+interface ActionCompletion {
+  action: CompanionAction;
+  actionVersion: number;
+  until: number;
+  resolve: (result: string) => void;
+  reject: (error: Error) => void;
+  dispose: () => void;
 }
 
 const BASE: Partial<Record<AutonomousAction, number>> = { idle: 3, walk: 3, jump: 2, sit: 2, lie: 1, sleep: 0.6, think: 0.4 };
@@ -79,6 +95,8 @@ export class Peetty {
   private perches: Perch[] = [];
   private scanned = -Infinity;
   private action: Action = 'idle';
+  private actionVersion = 0;
+  private chatPoseVersion: number | null = null;
   private until = 0;
   private walkTo = 0;
   private jump: { from: [number, number]; plan: Jump; t: number; target: Perch; targetOrigin: [number, number]; hang: boolean; fright?: boolean } | null = null;
@@ -96,9 +114,21 @@ export class Peetty {
   private bubbleTimer = 0;
   private greetTimer = 0;
   private hidden = false;
+  private chatPanel: ChatPanel | null = null;
+  private chatLoading: Promise<ChatPanel | null> | null = null;
+  private chatOperation = 0;
+  private modelOperation = 0;
+  private chatVisible = false;
+  private chatWorking = false;
+  private chatSpeaking = false;
+  private chatGestureUntil = 0;
+  private actionCompletion: ActionCompletion | null = null;
+  private menuPinned = false;
+  private lastTap: { at: number; x: number; y: number } | null = null;
+  private tapTimer = 0;
 
   constructor(options: PeettyOptions = {}) {
-    this.options = { ...options };
+    this.options = { ...options, ...(options.model ? { model: normalizeModelOptions(options.model) } : {}) };
     this.text = strings(languageOf(options.language));
   }
 
@@ -121,6 +151,17 @@ export class Peetty {
 
   /** Removes her and every listener, and invalidates unfinished loads. */
   destroy(): void {
+    this.finishChatAction(new Error('Companion action interrupted by removal.'));
+    this.chatOperation++;
+    this.modelOperation++;
+    this.chatPanel?.destroy();
+    this.chatPanel = null;
+    this.chatLoading = null;
+    this.chatVisible = this.chatWorking = this.chatSpeaking = false;
+    this.chatGestureUntil = 0;
+    this.chatPoseVersion = null;
+    this.menuPinned = false;
+    this.lastTap = null;
     this.generation++;
     this.figureRequest?.supersede();
     this.figureRequest = null;
@@ -181,7 +222,7 @@ export class Peetty {
     bubble.classList.add('show');
     clearTimeout(this.bubbleTimer);
     this.bubbleTimer = window.setTimeout(() => bubble.classList.remove('show'), seconds * 1000);
-    if (this.mode === 'ground' && this.action !== 'lie' && this.action !== 'sit') {
+    if (this.mode === 'ground' && this.perch?.clear && this.action !== 'lie' && this.action !== 'sit' && this.action !== 'sleep') {
       this.setAction('talk', Math.min(seconds, 2.6));
     }
   }
@@ -193,10 +234,207 @@ export class Peetty {
     else this.setAction(state, DURATION[state]?.[0] ?? 3);
   }
 
+  /** Opens chat, or connection setup on the first visit. Chat code loads only here. */
+  openChat(): Promise<void> { return this.openPanel(false); }
+
+  /** Opens the connection settings without discarding conversation history. */
+  configure(): Promise<void> { return this.openPanel(true); }
+
+  closeChat(): void {
+    this.chatOperation++;
+    this.chatPanel?.close();
+    this.chatClosed();
+  }
+
+  /** Changes interface language in place. Unsupported values throw without changing the session. */
+  setLanguage(language: Language | 'auto'): void {
+    if (language !== 'en' && language !== 'zh' && language !== 'auto') {
+      throw new TypeError('Language must be en, zh, or auto.');
+    }
+    const resolved = languageOf(language);
+    this.options = { ...this.options, language };
+    this.text = strings(resolved);
+    const overlay = this.overlay;
+    if (overlay) {
+      overlay.pet.setAttribute('aria-label', this.options.chat === false ? this.text.greet : this.text.pet);
+      overlay.menu.setAttribute('aria-label', this.text.menu);
+      for (const button of overlay.menu.children) {
+        const action = button.getAttribute('data-action') as MenuAction;
+        button.textContent = this.text[action];
+      }
+      overlay.invalidate(overlay.menu);
+    }
+    this.chatPanel?.setLanguage(resolved);
+  }
+
+  /** Replaces the injected model and aborts an unfinished reply. Credentials stay in memory. */
+  async setModel(model: PeettyModelOptions): Promise<void> {
+    const next = normalizeModelOptions(model);
+    const generation = this.generation;
+    const operation = ++this.modelOperation;
+    const current = () => generation === this.generation && operation === this.modelOperation;
+    const panel = this.chatPanel ?? (this.chatLoading ? await this.chatLoading : null);
+    if (!current()) return;
+    await panel?.setModel(next);
+    if (!current()) return;
+    this.options = { ...this.options, model: next };
+  }
+
+  private async openPanel(settings: boolean): Promise<void> {
+    if (this.options.chat === false) return;
+    const generation = this.generation;
+    const operation = ++this.chatOperation;
+    await this.mount();
+    if (generation !== this.generation || operation !== this.chatOperation || !this.overlay) return;
+    this.show();
+    if (!this.chatLoading) {
+      const root = this.overlay.host.shadowRoot!;
+      const pending = loadChatPanel().then(({ createChatPanel }) => {
+        if (generation !== this.generation) return null;
+        return createChatPanel({
+          root, language: languageOf(this.options.language),
+          ...(this.options.model ? { model: this.options.model } : {}),
+          ...(this.options.chat ? { chat: this.options.chat } : {}),
+          onAction: (action, signal) => {
+            if (generation !== this.generation) throw new Error('Companion no longer available.');
+            return this.performChatAction(action, signal);
+          },
+          onReply: (text, render) => {
+            if (generation !== this.generation || text.length > 180) return;
+            const previousVersion = this.actionVersion;
+            this.say(text, 6);
+            if (this.actionVersion !== previousVersion) this.chatPoseVersion = this.actionVersion;
+            if (render && this.overlay && this.mode !== 'paused') {
+              render(this.overlay.bubble);
+              this.overlay.invalidate(this.overlay.bubble);
+              this.place();
+            }
+          },
+          onState: (busy, speaking) => {
+            if (generation !== this.generation) return;
+            this.chatWorking = busy;
+            this.chatSpeaking = speaking;
+            if (this.chatVisible && busy && this.mode === 'ground' && this.perch?.clear && this.clock >= this.chatGestureUntil) {
+              const action = speaking ? 'talk' : 'think';
+              if (this.action !== action) this.setChatPose(action, 15);
+            }
+          },
+          onClose: () => this.chatClosed(),
+        });
+      }).then((panel) => {
+        if (generation !== this.generation) { panel?.destroy(); return null; }
+        panel?.setLanguage(languageOf(this.options.language));
+        this.chatPanel = panel;
+        return panel;
+      }).catch(() => {
+        if (generation === this.generation) { this.chatLoading = null; this.say(this.text.chatFailed); }
+        return null;
+      });
+      this.chatLoading = pending;
+    }
+    const panel = await this.chatLoading;
+    if (!panel || generation !== this.generation || operation !== this.chatOperation) return;
+    const opening = !this.chatVisible;
+    this.chatVisible = true;
+    this.menuPinned = false;
+    clearTimeout(this.menuTimer);
+    clearTimeout(this.tapTimer);
+    this.lastTap = null;
+    clearTimeout(this.greetTimer);
+    this.overlay?.menu.classList.remove('show');
+    this.overlay?.bubble.classList.remove('show');
+    this.overlay?.pet.setAttribute('aria-expanded', 'true');
+    if (this.overlay) {
+      this.overlay.host.style.visibility = 'visible';
+      if (this.mode === 'paused') this.setPetVisible(false);
+    }
+    if (opening && this.mode === 'ground' && this.perch?.clear && !this.actionCompletion) this.setChatPose('sit', 30);
+    panel.open(settings);
+  }
+
+  private chatClosed(): void {
+    this.chatVisible = this.chatWorking = this.chatSpeaking = false;
+    if (this.options.chat === false) this.overlay?.pet.removeAttribute('aria-expanded');
+    else this.overlay?.pet.setAttribute('aria-expanded', 'false');
+    if (this.mode === 'ground' && this.chatPoseVersion === this.actionVersion) this.setAction('idle', 2);
+    this.chatPoseVersion = null;
+  }
+
+  private async performChatAction(action: CompanionAction, signal?: AbortSignal): Promise<string> {
+    if (signal?.aborted) throw new DOMException('Action stopped.', 'AbortError');
+    if (this.hidden || this.mode === 'paused') throw new Error('The companion is not currently visible.');
+    if (this.mode !== 'ground' || this.actionCompletion) throw new Error('The companion is moving; try again once she lands.');
+    if (action !== 'move' && !this.perch?.clear) throw new Error('The companion must reach clear ground before playing a pose.');
+    clearTimeout(this.greetTimer);
+    const duration = action === 'sleep' ? 20000 : 3500;
+    if (action === 'move') {
+      if (!this.leap()) throw new Error('No other safe spot is available.');
+      this.chatGestureUntil = Infinity;
+    } else {
+      this.chatGestureUntil = this.clock + duration;
+      this.setAction(action, duration / 1000);
+    }
+    return new Promise<string>((resolve, reject) => {
+      const stop = () => {
+        if (this.actionCompletion !== pending) return;
+        this.finishChatAction(new DOMException('Action stopped.', 'AbortError'));
+        // Only the tool's own stationary pose is ours to replace. Moves and later
+        // user actions (even another identical pose) keep their animation ownership.
+        if (action !== 'move' && !this.hidden && this.mode === 'ground' && this.actionVersion === pending.actionVersion) {
+          const chat = this.chatVisible && this.perch?.clear;
+          if (chat) this.setChatPose(this.chatWorking ? this.chatSpeaking ? 'talk' : 'think' : 'sit', 15);
+          else this.setAction('idle', 2);
+        }
+      };
+      const pending: ActionCompletion = {
+        action, actionVersion: this.actionVersion, until: this.clock + duration, resolve, reject,
+        dispose: () => signal?.removeEventListener('abort', stop),
+      };
+      this.actionCompletion = pending;
+      signal?.addEventListener('abort', stop, { once: true });
+      if (signal?.aborted) stop();
+    });
+  }
+
+  private finishChatAction(error?: Error): void {
+    const pending = this.actionCompletion;
+    if (!pending) return;
+    this.actionCompletion = null;
+    pending.dispose();
+    this.chatGestureUntil = this.clock;
+    if (error) pending.reject(error);
+    else pending.resolve(pending.action === 'move' ? 'Arrived at another safe spot.' : `Finished ${pending.action}.`);
+  }
+
+  /** A tool completes on the animation clock, or on landing, rather than when the pose is selected. */
+  private updateChatAction(): void {
+    const pending = this.actionCompletion;
+    if (!pending) return;
+    if (this.hidden || this.mode === 'paused' || this.mode === 'drag') {
+      this.finishChatAction(new Error('Companion action interrupted.'));
+    } else if (pending.action === 'move') {
+      if (this.mode === 'ground') {
+        if (this.perch?.clear) this.finishChatAction();
+        else this.finishChatAction(new Error('Companion move interrupted without a clear landing.'));
+      }
+    } else if (this.mode !== 'ground' || this.actionVersion !== pending.actionVersion || this.action !== pending.action) {
+      this.finishChatAction(new Error('Companion action interrupted.'));
+    } else if (this.clock >= pending.until) {
+      this.finishChatAction();
+    }
+  }
+
   /** Takes her off the page until `show()`; her frame loop stops meanwhile. */
   hide(): void {
     if (!this.overlay) return;
     this.hidden = true;
+    this.finishChatAction(new Error('Companion action interrupted by hiding.'));
+    this.closeChat();
+    this.menuPinned = false;
+    this.overlay.menu.classList.remove('show');
+    clearTimeout(this.menuTimer);
+    clearTimeout(this.tapTimer);
+    this.lastTap = null;
     this.releasePress();
     cancelAnimationFrame(this.raf);
     this.raf = 0;
@@ -294,7 +532,7 @@ export class Peetty {
     if (!pool.length) return this.park();
     const target = pickOne(pool);
     this.overlay!.host.style.visibility = 'visible';
-    this.overlay!.pet.classList.remove('gone');
+    this.setPetVisible(true);
     this.x = rand(target.left, target.right);
     this.y = Math.min(target.y - 40, this.view!.height * 0.6);
     this.vx = 0;
@@ -305,9 +543,12 @@ export class Peetty {
 
   /** No usable anchor: step out of view (fading when she is on screen) and rescan at a bounded interval. */
   private park(fade = false) {
+    this.finishChatAction(new Error('Companion action interrupted because no safe surface is available.'));
     this.mode = 'paused';
     this.perch = null;
     this.jump = null;
+    this.menuPinned = false;
+    clearTimeout(this.menuTimer);
     this.releasePress();
     this.vx = this.vy = 0;
     const { pet, host, menu, bubble } = this.overlay!;
@@ -315,9 +556,27 @@ export class Peetty {
     menu.classList.remove('show');
     bubble.classList.remove('show');
     // A faded figure takes no pointer events; the next retry hides the overlay if she cannot come back.
-    if (fade) pet.classList.add('gone');
-    else host.style.visibility = 'hidden';
+    this.setPetVisible(false);
+    host.style.visibility = this.chatVisible || fade ? 'visible' : 'hidden';
     this.retryAt = this.clock + SCAN_INTERVAL;
+  }
+
+  private setPetVisible(visible: boolean) {
+    const pet = this.overlay!.pet;
+    if (visible) {
+      pet.classList.remove('gone');
+      pet.setAttribute('tabindex', '0');
+      pet.removeAttribute('aria-hidden');
+    } else {
+      const focused = (pet.getRootNode() as Document | ShadowRoot).activeElement === pet;
+      if (focused) {
+        pet.blur();
+        if (this.chatVisible) this.chatPanel?.focus?.();
+      }
+      pet.setAttribute('tabindex', '-1');
+      pet.setAttribute('aria-hidden', 'true');
+      pet.classList.add('gone');
+    }
   }
 
   private readonly listeners: [EventTarget, string, EventListener, AddEventListenerOptions | undefined][] = [];
@@ -329,7 +588,94 @@ export class Peetty {
     };
     const pet = this.overlay!.pet;
     const menu = this.overlay!.menu;
+    let activatingChat = false;
+    const activateCompanion = () => {
+      if (activatingChat) return;
+      activatingChat = true;
+      const finished = () => { activatingChat = false; };
+      const action = this.options.chat === false ? Promise.resolve(this.greet()) : this.openChat();
+      void action.then(finished, finished);
+    };
+    on(pet, 'click', (e: MouseEvent) => {
+      // Pointer taps are handled on release; assistive/programmatic clicks have no pointer source.
+      if (e.detail || (e as PointerEvent).pointerType) return;
+      e.preventDefault();
+      e.stopPropagation();
+      activateCompanion();
+    });
     on(pet, 'pointerdown', (e: PointerEvent) => this.onDown(e));
+    on(pet, 'contextmenu', (e: MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      clearTimeout(this.menuTimer);
+      clearTimeout(this.tapTimer);
+      this.lastTap = null;
+      this.menuPinned = true;
+      menu.classList.add('show');
+      this.place();
+    });
+    const activationKey = (key: string) => key === 'Enter' || key === ' ';
+    const contextKey = (e: KeyboardEvent) => e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10');
+    // Focus can move between pet and menu before release, and Shift can be
+    // released before F10. Keep the consumed key contained for the whole press.
+    const consumedKeys = new Set<string>();
+    const containKey = (e: KeyboardEvent, nativeButton = false) => {
+      e.stopPropagation();
+      if (!nativeButton) e.preventDefault();
+      if (e.type === 'keydown') consumedKeys.add(e.key);
+      else if (e.type === 'keyup') consumedKeys.delete(e.key);
+    };
+    // A native button can hide the overlay on keydown. Its remaining press still
+    // belongs to us even if the browser sends it to the page after focus moves.
+    for (const type of ['keydown', 'keypress', 'keyup']) {
+      on(window, type, (e: KeyboardEvent) => {
+        if (type === 'keydown' && !e.repeat) consumedKeys.delete(e.key);
+        if (!consumedKeys.has(e.key)) return;
+        const path = e.composedPath();
+        if (!path.includes(pet) && !path.includes(menu)) containKey(e);
+      }, { capture: true });
+    }
+    on(window, 'blur', () => consumedKeys.clear());
+    for (const target of [pet, menu]) {
+      on(target, 'keydown', (e: KeyboardEvent) => {
+        const activation = activationKey(e.key);
+        const context = contextKey(e);
+        const escape = target === menu && e.key === 'Escape';
+        const repeated = e.repeat && consumedKeys.has(e.key);
+        consumedKeys.delete(e.key);
+        if (!activation && !context && !escape && !repeated) return;
+        containKey(e, target === menu && activation);
+        if (e.repeat) return;
+        if (target === pet && activation) activateCompanion();
+        else if (context) {
+          this.menuPinned = true; menu.classList.add('show');
+          [...menu.querySelectorAll<HTMLButtonElement>('button')].find((button) => {
+            const style = getComputedStyle(button);
+            return !button.hidden && !button.disabled && style.display !== 'none' && style.visibility !== 'hidden';
+          })?.focus();
+        } else if (escape) {
+          this.menuPinned = false; menu.classList.remove('show'); pet.focus();
+        }
+      });
+      for (const type of ['keypress', 'keyup']) {
+        on(target, type, (e: KeyboardEvent) => {
+          if (consumedKeys.has(e.key) || activationKey(e.key) || contextKey(e) || (target === menu && e.key === 'Escape')) {
+            containKey(e, target === menu && activationKey(e.key));
+          }
+        });
+      }
+    }
+    on(window, 'pointerdown', (e: PointerEvent) => {
+      const path = e.composedPath();
+      if (!path.includes(pet) && !path.includes(menu)) { this.menuPinned = false; menu.classList.remove('show'); }
+    });
+    if (this.options.chat === false) {
+      pet.setAttribute('aria-label', this.text.greet);
+      pet.removeAttribute('aria-haspopup');
+      for (const button of menu.children) {
+        if (['chat', 'configure'].includes(button.getAttribute('data-action') ?? '')) (button as HTMLElement).hidden = true;
+      }
+    }
     on(window, 'pointermove', (e: PointerEvent) => this.onMove(e), { passive: true });
     on(window, 'pointerup', (e: PointerEvent) => this.onUp(e));
     on(window, 'pointercancel', (e: PointerEvent) => this.onUp(e, true));
@@ -366,6 +712,7 @@ export class Peetty {
     clearTimeout(this.menuTimer);
     clearTimeout(this.bubbleTimer);
     clearTimeout(this.greetTimer);
+    clearTimeout(this.tapTimer);
   }
 
   // ------------------------------------------------------------ the loop
@@ -391,6 +738,7 @@ export class Peetty {
     if (this.mode === 'paused') return;
     this.view.step(dt);
     this.place();
+    this.updateChatAction();
   };
 
   private ground(now: number, dt: number) {
@@ -422,12 +770,15 @@ export class Peetty {
         this.x += Math.sign(dx) * Math.min(Math.abs(dx), this.pace * dt);
       }
     } else if (now / 1000 > this.until) {
-      if (live.clear) this.decide();
-      else this.leaveEdge();
+      // Let the frame's completion check finish an owned pose before choosing another.
+      if (live.clear && this.actionCompletion?.action !== 'move' && this.actionCompletion?.actionVersion === this.actionVersion) return;
+      if (!live.clear) this.leaveEdge();
+      else if (this.chatVisible) this.setChatPose(this.chatWorking ? this.chatSpeaking ? 'talk' : 'think' : 'sit', 15);
+      else this.decide();
     }
 
     // A friendly wave when the pointer comes close, now and then.
-    if (this.pointer && this.action === 'idle' && now - this.lastGreet > 25000 && !this.view!.reducedMotion) {
+    if (this.pointer && this.action === 'idle' && !this.actionCompletion && now - this.lastGreet > 25000 && !this.view!.reducedMotion) {
       const dx = this.pointer[0] - this.x;
       const dy = this.pointer[1] - (this.y - this.view!.height / 2);
       if (dx * dx + dy * dy < 150 * 150) {
@@ -613,9 +964,19 @@ export class Peetty {
     this.setAction('walk', Math.abs(end - this.x) / this.pace + 0.5);
   }
 
+  private setChatPose(action: Action, seconds: number) {
+    this.setAction(action, seconds);
+    this.chatPoseVersion = this.actionVersion;
+  }
+
   private setAction(action: Action, seconds: number) {
+    this.actionVersion++;
     this.action = action;
-    this.until = this.clock / 1000 + seconds;
+    const deadline = this.clock / 1000 + seconds;
+    // A stationary pose must not extend the exit budget over covered floor.
+    // Walking keeps its own deadline so evacuation can reach a clear spot.
+    this.until = this.mode === 'ground' && this.perch?.clear === false && action !== 'walk'
+      ? Math.min(this.until, deadline) : deadline;
     this.view!.motion.play(action);
   }
 
@@ -666,6 +1027,7 @@ export class Peetty {
 
   /** Lets go; the viewport bottom catches her if nothing else does. A calm fall never frightens her. */
   private startFall(calm = false) {
+    if (this.actionCompletion?.action === 'move') this.finishChatAction(new Error('Companion move interrupted before landing.'));
     this.perch = null;
     this.jump = null;
     this.mode = 'fall';
@@ -682,10 +1044,11 @@ export class Peetty {
     this.jump = null;
     this.x = clamp(this.x, perch.left, perch.right);
     this.view!.motion.land(strength);
+    this.actionVersion++;
     this.action = 'idle';
     this.until = this.clock / 1000 + (strength > 0.85 ? 1.8 : rand(0.6, 1.4));
     if (perch.input) this.until = this.clock / 1000 + 0.5;
-    if (this.options.greet !== false && this.lastGreet === -Infinity && this.figure) {
+    if (this.options.greet !== false && !this.chatVisible && !this.actionCompletion && this.lastGreet === -Infinity && this.figure) {
       this.lastGreet = this.clock;
       this.scheduleGreeting(700);
     }
@@ -718,6 +1081,10 @@ export class Peetty {
     if (!this.press || e.pointerId !== this.press.id || this.hidden) return;
     if (this.mode !== 'drag') {
       if (Math.hypot(e.clientX - this.press.x, e.clientY - this.press.y) < 5) return;
+      clearTimeout(this.tapTimer);
+      clearTimeout(this.menuTimer);
+      this.lastTap = null;
+      this.menuPinned = false;
       this.mode = 'drag';
       this.perch = null;
       this.jump = null;
@@ -768,10 +1135,30 @@ export class Peetty {
       this.dragTrail = [];
       // Let go mid-swing, she keeps flying the way she was thrown; calm until she starts coming down.
       this.startFall();
-    } else if (!cancelled) this.greet();
+    } else if (!cancelled) {
+      if (this.options.chat === false) {
+        if (e.pointerType === 'touch') { this.menuPinned = true; this.overlay!.menu.classList.add('show'); }
+        this.greet();
+        return;
+      }
+      const now = performance.now();
+      const previous = this.lastTap;
+      if (previous && now - previous.at < 420 && Math.hypot(e.clientX - previous.x, e.clientY - previous.y) < 24) {
+        this.lastTap = null;
+        clearTimeout(this.tapTimer);
+        if (this.chatPanel?.isOpen) this.closeChat();
+        else void this.openChat();
+      } else {
+        this.lastTap = { at: now, x: e.clientX, y: e.clientY };
+        clearTimeout(this.tapTimer);
+        if (e.pointerType === 'touch') { this.menuPinned = true; this.overlay!.menu.classList.add('show'); }
+        else this.tapTimer = window.setTimeout(() => { this.lastTap = null; this.greet(); }, 420);
+      }
+    }
   }
 
   private hover(on: boolean) {
+    if (this.menuPinned || this.chatVisible) return;
     clearTimeout(this.menuTimer);
     const menu = this.overlay?.menu;
     if (!menu) return;
@@ -782,8 +1169,11 @@ export class Peetty {
   }
 
   private onMenu(action: MenuAction) {
+    this.menuPinned = false;
     this.overlay!.menu.classList.remove('show');
-    if (action === 'greet') this.greet();
+    if (action === 'chat') void this.openChat();
+    else if (action === 'configure') void this.configure();
+    else if (action === 'greet') this.greet();
     else if (action === 'move') {
       if (this.mode === 'ground' && !this.leap()) this.say(pickOne(this.text.hello));
     } else if (action === 'nap') {

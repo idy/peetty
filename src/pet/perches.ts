@@ -125,6 +125,260 @@ function hostOf(node: Node): Element | null {
   return root.nodeType === FRAGMENT ? (root as ShadowRoot).host ?? null : null;
 }
 
+/** Native paint bounds, including overflow and the figure's screen transform. */
+function figureBounds(el: Element): Box | null {
+  const svg = el as SVGGraphicsElement;
+  if (typeof svg.getBBox !== 'function' || typeof svg.getScreenCTM !== 'function') return null;
+  try {
+    const shape = svg.getBBox();
+    const matrix = svg.getScreenCTM();
+    if (!matrix || ![shape.x, shape.y, shape.width, shape.height, matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f].every(Number.isFinite) || shape.width < 0 || shape.height < 0) return null;
+    let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+    for (const x of [shape.x, shape.x + shape.width]) for (const y of [shape.y, shape.y + shape.height]) {
+      const px = matrix.a * x + matrix.c * y + matrix.e;
+      const py = matrix.b * x + matrix.d * y + matrix.f;
+      if (!Number.isFinite(px) || !Number.isFinite(py)) return null;
+      left = Math.min(left, px); right = Math.max(right, px);
+      top = Math.min(top, py); bottom = Math.max(bottom, py);
+    }
+    return box(left, top, right, bottom);
+  } catch { return null; }
+}
+
+type PaintPadding = [number, number];
+
+/** getBoundingClientRect excludes SVG stroke, including all paint on a straight path. */
+function strokePadding(el: Element): PaintPadding | null {
+  const stroke = el.getAttribute('stroke');
+  const width = Number(el.getAttribute('stroke-width') ?? 1);
+  if (!stroke || stroke === 'none' || width <= 0) return [0, 0];
+  try {
+    const matrix = (el as SVGGraphicsElement).getScreenCTM();
+    if (!Number.isFinite(width) || !matrix || ![matrix.a, matrix.b, matrix.c, matrix.d].every(Number.isFinite)) return null;
+    // The renderer uses round joins by default; SVG's default miter limit is four.
+    // A local square also covers square caps, and transforms conservatively under shear.
+    const join = el.getAttribute('stroke-linejoin');
+    const radius = width / 2 * (join === null || join === 'miter' ? 4 : 1);
+    const x = radius * (Math.abs(matrix.a) + Math.abs(matrix.c));
+    const y = radius * (Math.abs(matrix.b) + Math.abs(matrix.d));
+    return Number.isFinite(x) && Number.isFinite(y) ? [x, y] : null;
+  } catch { return null; }
+}
+
+/** Reserve each node's enter/exit bookkeeping; native matrix reads cost another unit. */
+function descendantStrokePadding(root: Element, data: Scan): WeakMap<Element, PaintPadding> | null {
+  const padding = new WeakMap<Element, PaintPadding>();
+  const ordered: Element[] = [];
+  const pending: Node[] = [root];
+  while (pending.length) {
+    if (!spend(data.budget)) { data.complete = false; return null; }
+    const node = pending.pop()!;
+    if (node !== root && node.nextSibling) pending.push(node.nextSibling);
+    if (node.nodeType !== Node.ELEMENT_NODE) continue;
+    const el = node as Element;
+    if (el.tagName.toUpperCase() === 'DEFS') continue;
+    ordered.push(el);
+    if (el.getAttribute('stroke')) {
+      if (!spend(data.budget)) { data.complete = false; return null; }
+      const own = strokePadding(el);
+      if (!own) { data.complete = false; return null; }
+      if (own[0] || own[1]) padding.set(el, own);
+    }
+    if (el.firstChild) pending.push(el.firstChild);
+  }
+  // Screen-space extents aggregate without reapplying a parent's transform.
+  for (let i = ordered.length - 1; i >= 0; i--) {
+    const el = ordered[i]!, own = padding.get(el), parent = el.parentElement;
+    if (!own || el === root || !parent) continue;
+    const previous = padding.get(parent) ?? [0, 0];
+    padding.set(parent, [Math.max(previous[0], own[0]), Math.max(previous[1], own[1])]);
+  }
+  return padding;
+}
+
+function paddedBounds(bounds: Box, padding: PaintPadding | undefined): Box {
+  const [x, y] = padding ?? [0, 0];
+  return box(bounds.left - x, bounds.top - y, bounds.right + x, bounds.bottom + y);
+}
+
+/** A single enclosing box is a common, linear-time way to reclaim nested paint. */
+function enclosingFigureBox(bounds: Box[], data: Scan): Box[] | null {
+  if (!bounds.length) return [];
+  let outer = bounds[0]!;
+  for (const rect of bounds) {
+    if (!spend(data.budget)) { data.complete = false; return null; }
+    if (rect.width * rect.height > outer.width * outer.height) outer = rect;
+  }
+  for (const rect of bounds) {
+    if (!spend(data.budget)) { data.complete = false; return null; }
+    if (outer.left > rect.left || outer.right < rect.right || outer.top > rect.top || outer.bottom < rect.bottom) return null;
+  }
+  return [outer];
+}
+
+/**
+ * Sweep left edges and track the furthest painted right edge along y. A range
+ * minimum query detects coverage by earlier boxes, including nested boxes, in
+ * O(log n) work without filling the gaps between disconnected shapes.
+ */
+function coalesceFigureBoxes(bounds: Box[], data: Scan, capacity: number): Box[] {
+  // Callers have already tried enclosure and cheap reclamation. Only the
+  // remaining cases need sorting and a coverage index.
+  if (bounds.length < 2) return bounds;
+  const compare = (a: number, b: number) => {
+    if (!spend(data.budget)) data.complete = false;
+    return a - b;
+  };
+  bounds.sort((a, b) => compare(a.left, b.left) || b.right - a.right || a.top - b.top || b.bottom - a.bottom);
+  if (!data.complete) return [];
+  // Separated intervals cannot contain each other. Prove that cheaply instead of
+  // building a coverage tree for a large incoming column or row of disjoint paint.
+  let separatedX = true, maybeSeparatedY = true;
+  for (let i = 1; i < bounds.length; i++) {
+    if (!spend(data.budget)) { data.complete = false; return []; }
+    const previous = bounds[i - 1]!, current = bounds[i]!;
+    if (previous.right > current.left) separatedX = false;
+    if (previous.top < current.bottom && current.top < previous.bottom) maybeSeparatedY = false;
+    if (!separatedX && !maybeSeparatedY) break;
+  }
+  let separatedY = false;
+  if (!separatedX && maybeSeparatedY) {
+    const byTop = [...bounds].sort((a, b) => compare(a.top, b.top));
+    if (!data.complete) return [];
+    separatedY = true;
+    for (let i = 1; i < byTop.length; i++) {
+      if (!spend(data.budget)) { data.complete = false; return []; }
+      if (byTop[i - 1]!.bottom > byTop[i]!.top) { separatedY = false; break; }
+    }
+  }
+  if (separatedX || separatedY) {
+    if (bounds.length > capacity) data.complete = false;
+    return bounds;
+  }
+  const ys = [...new Set(bounds.flatMap((r) => [r.top, r.bottom]))].sort(compare);
+  if (!data.complete) return [];
+  const indices = new Map(ys.map((y, i) => [y, i]));
+  const size = ys.length - 1;
+  const minimum = new Array<number>(size * 4).fill(-Infinity);
+  const lazy = new Array<number>(size * 4).fill(-Infinity);
+  const apply = (node: number, right: number) => {
+    minimum[node] = Math.max(minimum[node]!, right);
+    lazy[node] = Math.max(lazy[node]!, right);
+  };
+  const push = (node: number) => {
+    apply(node * 2, lazy[node]!); apply(node * 2 + 1, lazy[node]!);
+    lazy[node] = -Infinity;
+  };
+  const visit = () => {
+    if (spend(data.budget)) return true;
+    data.complete = false; return false;
+  };
+  const covered = (node: number, left: number, right: number, from: number, to: number, edge: number): boolean => {
+    if (!visit()) return false;
+    if (minimum[node]! >= edge) return true;
+    if (from <= left && right <= to) return false;
+    const mid = (left + right) >>> 1;
+    push(node);
+    return (from >= mid || covered(node * 2, left, mid, from, to, edge)) &&
+      (to <= mid || covered(node * 2 + 1, mid, right, from, to, edge));
+  };
+  const paint = (node: number, left: number, right: number, from: number, to: number, edge: number): void => {
+    if (!visit()) return;
+    if (from <= left && right <= to) { apply(node, edge); return; }
+    const mid = (left + right) >>> 1;
+    push(node);
+    if (from < mid) paint(node * 2, left, mid, from, to, edge);
+    if (to > mid && data.complete) paint(node * 2 + 1, mid, right, from, to, edge);
+    minimum[node] = Math.min(minimum[node * 2]!, minimum[node * 2 + 1]!);
+  };
+  const result: Box[] = [];
+  for (const rect of bounds) {
+    const from = indices.get(rect.top)!, to = indices.get(rect.bottom)!;
+    if (!covered(1, 0, size, from, to, rect.right)) {
+      if (!data.complete) break;
+      if (result.length >= capacity) { data.complete = false; break; }
+      result.push(rect);
+      paint(1, 0, size, from, to, rect.right);
+    }
+    if (!data.complete) break;
+  }
+  return result;
+}
+
+/**
+ * Keep a validated companion's viewport and disconnected overflow separate.
+ * A bounded stroke metadata pass makes group pruning paint-aware. Native group
+ * bounds then avoid covered/offscreen geometry reads. Mixed groups are refined
+ * to leaves, whose screen rectangles include bone, spring and mirror transforms.
+ */
+function figureBoxes(el: Element, rect: Box, clip: Box, data: Scan, makeRoom: (count: number, cheapOnly?: boolean) => boolean): Box[] | null {
+  if (el.tagName.toUpperCase() !== 'SVG' || hostOf(el)?.tagName.toUpperCase() !== 'PEETTY-COMPANION' || !finiteBox(rect)) return null;
+  if (!spend(data.budget, 2)) { data.complete = false; return null; }
+  const geometry = figureBounds(el);
+  if (!geometry) return null;
+  const padding = descendantStrokePadding(el, data);
+  if (!padding) return null;
+  const bounds = paddedBounds(geometry, padding.get(el));
+  const overflow: Box[] = [];
+  const known = new Set<string>();
+  const keyOf = (bounds: Box) => `${bounds.left}:${bounds.top}:${bounds.right}:${bounds.bottom}`;
+  const covers = (outer: Box, inner: Box) => outer.left <= inner.left && outer.right >= inner.right && outer.top <= inner.top && outer.bottom >= inner.bottom;
+  const uncovered = (bounds: Box): Box | null => {
+    const visible = intersection(bounds, clip);
+    if (empty(visible) || covers(rect, visible)) return null;
+    if (!spend(data.budget)) { data.complete = false; return null; }
+    // Exact duplicates are common across parts. A hash lookup keeps distinct
+    // overflow shapes linear instead of comparing each with every prior box.
+    return known.has(keyOf(visible)) ? null : visible;
+  };
+  // A zero-area geometry box can still have a visible stroke. Refine it before pruning.
+  if (!empty(bounds) && !uncovered(bounds)) return overflow;
+  const pending: Node[] = el.firstChild ? [el.firstChild] : [];
+  try {
+    while (pending.length && data.complete) {
+      // Metadata traversal was charged above; charge this native geometry read
+      // separately. Queue siblings lazily, including huge child lists.
+      if (!spend(data.budget)) { data.complete = false; break; }
+      const node = pending.pop()!;
+      if (node.nextSibling) pending.push(node.nextSibling);
+      if (node.nodeType !== Node.ELEMENT_NODE) continue;
+      const child = node as Element;
+      // Clip paths and gradients in the renderer's defs do not paint by themselves.
+      if (child.tagName.toUpperCase() === 'DEFS') continue;
+      const geometry = child.getBoundingClientRect();
+      if (!finiteBox(geometry)) return null;
+      const bounds = paddedBounds(geometry, padding.get(child));
+      if (!finiteBox(bounds)) { data.complete = false; break; }
+      const visible = uncovered(bounds);
+      if (!visible || !data.complete) continue;
+      if (child.firstChild) {
+        if (!spend(data.budget)) { data.complete = false; break; }
+        const style = getComputedStyle(child);
+        if (style.display !== 'none' && Number(style.opacity) !== 0 && style.contentVisibility !== 'hidden') pending.push(child.firstChild);
+      } else {
+        // Collection remains work-bounded; apply the rectangle cap after containment
+        // coalescing so differently sized nested paint does not consume every slot.
+        overflow.push(visible);
+        known.add(keyOf(visible));
+      }
+    }
+  } catch { return null; }
+  if (!data.complete) return overflow;
+  if (data.obstacles.length + overflow.length + 1 > MAX_RECTS) {
+    // Try cheap work on both sides before indexing either one. Full reclamation
+    // of earlier complex batches still waits for this figure's compacted count.
+    const enclosing = enclosingFigureBox(overflow, data);
+    if (!data.complete) return overflow;
+    if (enclosing) { makeRoom(enclosing.length + 1); return enclosing; }
+    if (makeRoom(overflow.length + 1, true)) return overflow;
+    if (!data.complete) return overflow;
+    const compacted = coalesceFigureBoxes(overflow, data, MAX_RECTS - 1);
+    if (data.complete) makeRoom(compacted.length + 1);
+    return compacted;
+  }
+  return overflow;
+}
+
 /** The topmost page element at a point, including open shadow trees. */
 export function topAt(x: number, y: number, host: Element): Element | null {
   return hitAt(x, y, host, { left: HIT_BUDGET });
@@ -353,12 +607,48 @@ function scan(opts: PerchOptions): Scan {
   let visited = 0;
   // Created on the first text node, one range measures all text of this scan.
   let range: Range | undefined;
-  const addObstacle = (rect: Box, owner: Element | null, avoid: boolean, clip: Box) => {
+  const retainedFigures = new Map<Element, Obstacle[]>();
+  const complexFigures = new Map<Element, Obstacle[]>();
+  const replaceFigure = (members: Obstacle[], compacted: Box[]): boolean => {
+    if (compacted.length >= members.length) return true;
+    if (!spend(result.budget, result.obstacles.length)) { result.complete = false; return false; }
+    const previous = new Set(members);
+    result.obstacles = result.obstacles.filter((entry) => !previous.has(entry));
+    for (const bounds of compacted) result.obstacles.push({ ...members[0]!, box: bounds });
+    return true;
+  };
+  const makeRoom = (count: number, cheapOnly = false): boolean => {
+    if (count > MAX_RECTS) return false;
+    if (result.obstacles.length + count <= MAX_RECTS) return true;
+    // Completed batches advance through these queues once. Reclaim cheap nested
+    // paint before coverage indexing; viewports and page obstacles stay untouched.
+    for (const [owner, members] of retainedFigures) {
+      retainedFigures.delete(owner);
+      if (!spend(result.budget, members.length)) { result.complete = false; return false; }
+      const enclosing = enclosingFigureBox(members.map((entry) => entry.box), result);
+      if (!result.complete) return false;
+      if (!enclosing) { complexFigures.set(owner, members); continue; }
+      if (!replaceFigure(members, enclosing)) return false;
+      if (result.obstacles.length + count <= MAX_RECTS) return true;
+    }
+    if (cheapOnly) return false;
+    for (const [owner, members] of complexFigures) {
+      complexFigures.delete(owner);
+      if (!spend(result.budget, members.length)) { result.complete = false; return false; }
+      const compacted = coalesceFigureBoxes(members.map((entry) => entry.box), result, members.length);
+      if (!result.complete || !replaceFigure(members, compacted)) return false;
+      if (result.obstacles.length + count <= MAX_RECTS) return true;
+    }
+    return false;
+  };
+  const addObstacle = (rect: Box, owner: Element | null, avoid: boolean, clip: Box): Obstacle | undefined => {
     if (!finiteBox(rect) || empty(rect)) return;
     const clipped = intersection(rect, clip);
     if (empty(clipped)) return;
-    if (result.obstacles.length >= MAX_RECTS || !spend(result.budget)) { result.complete = false; return; }
-    result.obstacles.push({ box: box(clipped.left - PAD, clipped.top - PAD, clipped.right + PAD, clipped.bottom + PAD), owner, avoid });
+    if (!makeRoom(1) || !spend(result.budget)) { result.complete = false; return; }
+    const entry = { box: box(clipped.left - PAD, clipped.top - PAD, clipped.right + PAD, clipped.bottom + PAD), owner, avoid };
+    result.obstacles.push(entry);
+    return entry;
   };
   while (pending.length && result.complete) {
     const { node, context } = pending.pop()!;
@@ -374,7 +664,7 @@ function scan(opts: PerchOptions): Scan {
       range.selectNodeContents(node);
       if (empty(intersection(range.getBoundingClientRect(), context.flow))) continue;
       const rects = range.getClientRects();
-      if (rects.length > MAX_RECTS - result.obstacles.length) { result.complete = false; break; }
+      if (!makeRoom(rects.length)) { result.complete = false; break; }
       for (const rect of rects) addObstacle(rect, null, false, context.flow);
       continue;
     }
@@ -397,7 +687,19 @@ function scan(opts: PerchOptions): Scan {
     // below its containing block. A contents box is never positioned.
     const position = style.display === 'contents' ? 'static' : style.position;
     const own = position === 'fixed' ? context.fixed : position === 'absolute' ? context.absolute : context.flow;
+    const graphic = visible && avoid && style.overflowX === 'visible' && style.overflowY === 'visible' ? figureBoxes(el, rect, own, result, makeRoom) : null;
+    if (!result.complete) break;
     if (visible && (avoid || el.matches(INTERACTIVE) || MEDIA_TAGS.has(el.tagName.toUpperCase()))) addObstacle(rect, el, avoid, own);
+    if (graphic) {
+      const members: Obstacle[] = [];
+      for (const bounds of graphic) {
+        const entry = addObstacle(bounds, el, avoid, own);
+        if (entry) members.push(entry);
+        if (!result.complete) break;
+      }
+      if (members.length > 1) retainedFigures.set(el, members);
+      continue;
+    }
     if (!avoid && opacity >= MIN_OPACITY && rect.width > 0 && rect.top >= own.top && rect.top < own.bottom && carries(el, style, rect)) {
       const list = el.getAttribute('data-peetty') === 'perch' ? preferred : ordinary;
       if (list.length < MAX_CANDIDATES) list.push(el);

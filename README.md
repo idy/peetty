@@ -6,7 +6,7 @@ Peetty is an open-source, local-first browser pet. The idea is simple: a small c
 
 Bring your own AI API key, shape its personality, and take its memories with you.
 
-> **Status: early development.** The companion works on real pages: six animated preset characters, a JSON format for your own, and one-script embedding. Chat, memory and the management page are not built yet. Released versions are published to GitHub Packages. The capabilities below describe the intended product.
+> **Status: early development.** The companion, chat and connection settings work: six animated presets, a JSON figure format, one-script embedding, OpenAI-compatible models and AI-triggered actions. Editable long-term memory and a dedicated management page are planned. Released versions are published to GitHub Packages.
 
 ## The experience
 
@@ -15,6 +15,60 @@ Bring your own AI API key, shape its personality, and take its memories with you
 - **A little awareness.** Use lightweight, permitted page context to get a rough sense of what you are reading or doing, without needing to understand every action.
 - **A familiar companion.** Keep the same personality, memories, and conversations as you move between websites.
 - **Quiet company.** Run movement and idle behavior locally, with configurable activity and interruptions. An AI connection is for conversation, not every animation frame.
+
+## Chat and model configuration
+
+Double-click the companion to open chat. Right-click for actions and connection settings; the hover menu also has a Chat button. Touch users can tap to open the menu, and keyboard users can focus the companion and press Enter. Screen-reader click activation also opens chat. The website also provides a **Chat with her** button.
+
+On the first visit, enter an OpenAI-compatible API base URL and your API key, load the model list, choose a model, and save. If model discovery is unavailable, enter the model ID manually. Keyless local endpoints are supported. Use the actual API base path: root-level endpoints stay at the root, and `/v1` is never inserted automatically. Requests do not follow HTTP redirects, so use the final API base URL. The endpoint must permit browser requests through CORS; an SDK or browser setting cannot bypass a provider's restrictions. An HTTPS website may also block HTTP endpoints.
+
+The **Use local Magpie** shortcut fills `http://127.0.0.1:3425/v1`. Start Magpie on the device running the browser, allow the current website origin in **Settings → Network and sharing → Web pages**, create a gateway key in Magpie's **Gateway → Gateway keys** and enter it, then load and select a model. Website authorization and gateway-key authentication are separate; a 401 response means gateway authentication failed. The shortcut never copies credentials from a different endpoint. HTTPS pages accessing HTTP loopback depend on browser support, local-network permissions and Magpie's CORS policy; this is not a universal browser bypass. An HTTPS public server cannot proxy a visitor's `127.0.0.1` gateway.
+
+SDK callers can use `model: { ...LOCAL_MAGPIE, id: 'your-model-id', apiKey: yourGatewayKey }`, importing `LOCAL_MAGPIE` from `@idy/peetty`. The preset contains only the loopback base URL, with no embedded key or default model.
+
+The SDK can inject the connection directly, including an asynchronous credential callback:
+
+```js
+import { createPeetty } from '@idy/peetty';
+
+const pet = createPeetty({
+  figure: 'miru',
+  model: {
+    baseUrl: 'https://your-api.example/v1',
+    id: 'your-model-id',
+    getApiKey: async () => yourUserProvidedKey,
+    // apiKey: 'your-user-provided-key' is also supported.
+    // effort: 'high' requests explicit reasoning effort when the model supports it.
+  },
+  chat: {
+    name: 'Miru',
+    personality: 'A warm, curious companion who keeps replies concise.',
+    storageKey: 'my-companion',
+    // persist: false disables saving the connection and conversation.
+  },
+});
+await pet.mount();
+await pet.openChat();
+
+// Replace the model without rebuilding the companion.
+await pet.setModel({ baseUrl: 'https://your-api.example/v1', id: 'another-model', apiKey: yourUserProvidedKey });
+// Translate controls in place, retaining chat, drafts and in-memory credentials.
+pet.setLanguage('zh'); // Also accepts 'en' and 'auto'.
+pet.closeChat();
+// await pet.configure();
+```
+
+Mounting the companion makes no AI requests. Chat, Markdown tokenization and provider code load on demand. Script-tag embeds load the adjacent `chat/` and `chunks/` directories; self-host the complete `dist/` directory, not just `peetty.global.js`.
+
+The chat UI uses a same-origin initial `about:blank` iframe built with DOM APIs, keeping typing and pointer events out of the embedding document's event path, including earlier capture listeners. Escape keeps focus inside that frame until key release, then restores the previous host focus. This is an event boundary; trusted scripts on the same origin can still access the UI and credentials.
+
+Injected connections override saved settings for the current session. SDK `setModel()` calls leave the saved connection intact. Remembering an injected key defaults to off; saving it requires the user to check **Remember my key on this device** and submit the setup form. Invalid `setModel()` replacements reject with a sanitized error and leave the last valid connection intact. Older asynchronous replacements are discarded after destruction or a newer replacement. Optional model headers apply to chat and model discovery only at the configured endpoint. Entering a replacement key overrides conflicting SDK authentication headers; explicitly clearing the key also disables the previous SDK credential callback for that setup connection. Header records must contain strings with valid HTTP names and values; they are normalized before replacing an active model. The setup form offers an explicit **Remember my key on this device** checkbox. Saved settings and conversations use this origin's IndexedDB and fall back to memory when storage is unavailable. Instances sharing a storage key merge message changes transactionally, refresh shared history before each turn, and reject stale writes after history is cleared. Same-origin scripts can access browser-stored credentials: only enter a personal key on a website you trust. Never put a shared production secret in a public bundle, HTML attribute or example. Use a backend proxy when the embedding site supplies credentials for its visitors. `chat: false` disables chat entry points.
+
+Thinking effort is configurable in setup and through `model.effort`: `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. Leave it at **Model default** to send no explicit effort. The selected model and endpoint must support the chosen level; existing request, output and timeout limits still apply.
+
+Assistant replies render lightweight Markdown, including line breaks, lists, quotes, tables, inline code and fenced code blocks. Short speech-bubble replies share that formatting. Rendering builds DOM nodes without HTML string sinks: raw HTML stays literal, remote images stay alt text, and links accept only HTTP(S) destinations with no referrer. User messages and persisted history retain their original text.
+
+Chat supports streaming, stopping a response, clearing history, and model-selected actions (`wave`, `sit`, `lie`, `sleep`, `move`, `idle`). For models without tool-calling support, uncheck **Let the model control companion actions** in setup or inject `model: { ..., tools: false }` to send plain text chat without tools. Requests suppress the embedding page's referrer and omit browser cookies. If a credential callback is still pending when a turn is canceled or fails, its optimistic input is discarded before persistence because the callback's secret is not yet available for redaction. Canceled replies remain in history when safe to save, without a new speech bubble or completion announcement. Pi runs the tool loop; the local companion controls animation and finds safe landing spots. Action tools wait for their animation or clear landing before the next action starts; interrupted moves report failure, and stopping a reply cancels unfinished tools. Model requests have a time limit and a tool-call budget. Ordinary movement never calls the model, and no page text is automatically sent. Automatic long-term memory and proactive conversations are not implemented yet.
 
 ## Make it yours
 
@@ -70,7 +124,7 @@ When embedded through the SDK, settings and any saved key live in that website's
 
 ## Install from GitHub Packages
 
-The package is named `@idy/peetty` and is published to GitHub Packages. GitHub Packages requires authentication, including for public packages. Configure the scope and authenticate with a GitHub account that can read the package, using a personal access token (classic) with `read:packages`:
+The package is named `@idy/peetty` and is published to GitHub Packages. GitHub Packages requires authentication, including for public packages. Route only the `@idy` scope there so Pi, OpenAI and other dependencies continue to resolve from the default npm registry. Configure the scope and authenticate with a GitHub account that can read the package, using a personal access token (classic) with `read:packages`:
 
 ```bash
 npm config set @idy:registry https://npm.pkg.github.com
@@ -88,7 +142,7 @@ Release workflow: after the intended version is on the repository, push a matchi
 
 ## Development
 
-Requires Node.js 22.18 or later.
+Requires Node.js 22.19 or later.
 
 ```bash
 npm install

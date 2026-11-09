@@ -6,3 +6,5 @@ export * from './figure/types.ts';
 export { Peetty, createPeetty, type PeettyOptions, type Activity } from './pet/pet.ts';
 export { PRESETS, PRESET_IDS, FIGURE_CATALOG, resolveFigure, listFigures, type PresetId, type CatalogEntry } from './presets.ts';
 export { planJump, landing, GRAVITY } from './pet/physics.ts';
+export type { PeettyModelOptions, PeettyReasoningEffort, PeettyChatOptions, CompanionAction } from './chat/types.ts';
+export { LOCAL_MAGPIE } from './chat/connections.ts';
