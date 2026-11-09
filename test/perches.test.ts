@@ -624,6 +624,32 @@ describe('bounded companion graphics', () => {
     });
   }
 
+  for (const scenario of ['incoming nested groups', 'both need compaction', 'incoming disjoint'] as const) {
+    it(`sizes compacted incoming paint before reclaiming old boxes: ${scenario}`, () => {
+      const first = figure(rect(650, 580, 100, 120), { x: -500, y: 0, width: 600, height: 120 });
+      const oldCount = scenario === 'incoming nested groups' ? 1500 : 2044;
+      for (let i = 0; i < oldCount; i++) {
+        const inset = i / 100;
+        element('ellipse', scenario === 'incoming nested groups'
+          ? rect(150, 600 + i * 0.04, 0.1, 0.02)
+          : rect(150 + inset, 610 + inset / 4, 60 - inset * 2, 60 - inset / 2), first.svg);
+      }
+      const second = figure(rect(0, 580, 100, 120), { x: 0, y: 0, width: 380, height: 120 });
+      if (scenario === 'incoming disjoint') {
+        for (let i = 0; i < 1500; i++) element('ellipse', rect(250, 600 + i * 0.04, 0.1, 0.02), second.svg);
+      } else {
+        const count = scenario === 'both need compaction' ? 1050 : 400;
+        for (const x of [250, 350]) for (let i = 0; i < count; i++) {
+          const inset = i / 1000;
+          element('ellipse', rect(x + inset, 610 + inset / 4, 30 - inset * 2, 30 - inset / 2), second.svg);
+        }
+      }
+      const found = floor(fixture.opts);
+      assert.ok(found, 'both figures fit after only the necessary compaction');
+      assert.ok(found.right > 590 && found.right < 600);
+    });
+  }
+
   it('reclaims a cheap nested batch before indexing an earlier disjoint batch', () => {
     const first = figure(rect(650, 580, 100, 120), { x: -500, y: 0, width: 600, height: 120 });
     for (let i = 0; i < 1000; i++) element('ellipse', rect(150, 600 + i * 0.04, 0.1, 0.02), first.svg);

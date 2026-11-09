@@ -236,6 +236,31 @@ function coalesceFigureBoxes(bounds: Box[], data: Scan, capacity = MAX_RECTS - d
     return a - b;
   };
   bounds.sort((a, b) => compare(a.left, b.left) || b.right - a.right || a.top - b.top || b.bottom - a.bottom);
+  if (!data.complete) return [];
+  // Separated intervals cannot contain each other. Prove that cheaply instead of
+  // building a coverage tree for a large incoming column or row of disjoint paint.
+  let separatedX = true, maybeSeparatedY = true;
+  for (let i = 1; i < bounds.length; i++) {
+    if (!spend(data.budget)) { data.complete = false; return []; }
+    const previous = bounds[i - 1]!, current = bounds[i]!;
+    if (previous.right > current.left) separatedX = false;
+    if (previous.top < current.bottom && current.top < previous.bottom) maybeSeparatedY = false;
+    if (!separatedX && !maybeSeparatedY) break;
+  }
+  let separatedY = false;
+  if (!separatedX && maybeSeparatedY) {
+    const byTop = [...bounds].sort((a, b) => compare(a.top, b.top));
+    if (!data.complete) return [];
+    separatedY = true;
+    for (let i = 1; i < byTop.length; i++) {
+      if (!spend(data.budget)) { data.complete = false; return []; }
+      if (byTop[i - 1]!.bottom > byTop[i]!.top) { separatedY = false; break; }
+    }
+  }
+  if (separatedX || separatedY) {
+    if (bounds.length > capacity) data.complete = false;
+    return bounds;
+  }
   const ys = [...new Set(bounds.flatMap((r) => [r.top, r.bottom]))].sort(compare);
   if (!data.complete) return [];
   const indices = new Map(ys.map((y, i) => [y, i]));
@@ -346,14 +371,13 @@ function figureBoxes(el: Element, rect: Box, clip: Box, data: Scan, makeRoom: (c
   } catch { return null; }
   if (!data.complete) return overflow;
   if (data.obstacles.length + overflow.length + 1 > MAX_RECTS) {
-    // Prefer cheap compaction of this figure, then reclaim slots from completed
-    // earlier figures before applying the remaining capacity to this one.
-    const enclosing = enclosingFigureBox(overflow, data);
-    if (!data.complete) return overflow;
-    if (enclosing) { makeRoom(enclosing.length + 1); return enclosing; }
-    makeRoom(overflow.length + 1);
+    // Determine this figure's own compacted requirement independently of earlier
+    // batches; only then reclaim the actual number of slots it needs.
+    const compacted = coalesceFigureBoxes(overflow, data, MAX_RECTS - 1, true);
+    if (data.complete) makeRoom(compacted.length + 1);
+    return compacted;
   }
-  return data.complete ? coalesceFigureBoxes(overflow, data) : overflow;
+  return overflow;
 }
 
 /** The topmost page element at a point, including open shadow trees. */
