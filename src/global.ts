@@ -19,6 +19,7 @@ if (script?.hasAttribute('data-peetty-auto')) {
   if (data.activity === 'calm' || data.activity === 'normal' || data.activity === 'lively') options.activity = data.activity as Activity;
   if (data.language === 'en' || data.language === 'zh') options.language = data.language;
   if (data.greet === 'false') options.greet = false;
+  if (data.sound === 'true' || data.sound === 'false') options.sound = data.sound === 'true';
   const start = () => {
     const pet = createPeetty(options);
     (globalThis as { peetty?: unknown }).peetty = pet;

@@ -107,6 +107,42 @@ The SDK animates `idle`, `walk`, `jump`, `fall`, `sit`, `lie`, `hang`, `sleep`, 
 
 A fall frightens her: the SDK draws her soul drifting out of her mouth and hides the irises (the parts with `look`), so her eyes go blank, then lets the soul slip back in shortly after she lands. Dropping in, floating under an umbrella and the way up after a throw stay calm. Nothing needs to be drawn for this; the soul's tail ends just above the `head` pivot, where the presets draw the mouth.
 
+### Action sounds
+
+The optional `sounds` field belongs to each figure. Presets include quiet synthesized cues with their own pitches and rhythms; they work offline without audio downloads. Older figures without `sounds` stay silent.
+
+```json
+{
+  "sounds": {
+    "volume": 0.35,
+    "cooldown": 0.6,
+    "events": {
+      "wave": [
+        { "notes": [659, 880, 988], "duration": 0.08, "waveform": "sine" },
+        { "notes": [784, 988], "duration": 0.09, "volume": 0.8 }
+      ],
+      "jump": [{ "notes": [330, 660], "duration": 0.06, "waveform": "triangle" }],
+      "land": [{ "src": "./sounds/soft-landing.wav", "volume": 0.6, "playbackRate": 1 }],
+      "sleep": [{ "src": "https://example.com/sounds/sleep.wav" }]
+    }
+  }
+}
+```
+
+Events are the animation states (`idle`, `walk`, `jump`, `fall`, `sit`, `lie`, `hang`, `sleep`, `drag`, `wave`, `talk`, `think`), plus `land` and `wake`. State sounds play once on entry, not on every frame or loop. A configured `land` cue takes priority over the `idle` entry cue; when `land` is absent, landing uses `idle` if configured. `wake` replaces the next state's cue when leaving sleep. Omitted events stay silent. Each event accepts 1–8 alternatives, chosen randomly. `cooldown` sets the minimum seconds between repeats of one event (0–60, default 0.6); a brief global gap also prevents bursts. Playback is one cue at a time.
+
+Use exactly one of `notes` or `src` per cue:
+
+- `notes`: 1–8 frequencies from 80 to 4000 Hz. `duration` is seconds per note (0.03–1, default 0.08); the whole cue must fit within 5 seconds. `waveform` is `sine` (default), `triangle`, or `square`.
+- `src`: an HTTP(S) audio URL or relative path. HTTPS pages require HTTPS audio under the browser's mixed-content rules. Relative paths resolve against the loaded figure JSON's final URL; inline figures use the embedding document's base URL. The loader retains the original JSON strings and remembers the asset base separately, so resolving a URL cannot invalidate the drawing. `playbackRate` is 0.5–2 (default 1). File contents must be uncompressed integer PCM RIFF/WAVE: mono or stereo, 8/16/24/32-bit samples, and an 8–192 kHz sample rate. Files must be served with CORS, no larger than 2 MiB, and no longer than 5 seconds. The player validates container structure, actual PCM frame count and expected resampled memory before invoking the browser decoder. Ancillary metadata, including standard `bext` and `cue ` chunks, is stripped; the native decoder receives only canonical format and PCM data. Compressed, floating-point, extensible and alternative audio containers are skipped. Format is determined from bytes, not the URL extension. Files are fetched on demand without cookies or referrers, including ordinary HTTP redirects; slow, unavailable or invalid sounds are skipped.
+- `volume`: cue gain from 0–1 (default 1), multiplied by the figure volume (default 0.35) and SDK master volume (default 1).
+
+Pending audio work and decoded PCM cache memory have separate budgets. Canceled native decodes keep their budget until they actually settle. Native decoding cannot be aborted, so supported WAV files must pass duration and decoded-memory bounds before decoding; decoded duration, channel count and PCM size are checked again afterward. Deterministically invalid assets use a bounded retry backoff, which resets on figure replacement; transient download failures remain retryable.
+
+Sound starts **off**. The companion's menu has a localized Sound toggle; enabling it previews the `wave` cue. You can enable it in the SDK with `createPeetty({ sound: true })` or `sound: { enabled: true, volume: 0.6 }`, or on a script tag with `data-sound="true"`. Browsers still require a user gesture before audio can start; mouse, keyboard, touch/pen release, and gestures inside chat are supported. No sound is queued from before that gesture.
+
+Use `pet.setSound(true)`, `pet.setSound(false)`, or `pet.setSound({ volume: 0.5 })` to update settings; `pet.soundEnabled` reports the setting. Updating settings never initializes or resumes audio. The next trusted activation can unlock playback. Call `pet.previewSound('jump')` inside a button or key handler to audition an event without changing the animation. Muting, hiding, switching figures, leaving the tab, and destroying the companion stop unfinished sounds. Sound settings last for the current instance and are not persisted.
+
 ### Sprite figures
 
 `renderer: "sprite"` uses frames from one image instead of parts: `sprite.image` (an `https:` URL or a base64 PNG/WebP/GIF data URL), `frameWidth`, `frameHeight`, `columns`, and `animations` mapping states to `{ "frames": [0, 1, 2], "fps": 8, "loop": true }`. `idle` is required; other states fall back to it. Validation is in place; the sprite renderer is not implemented yet.

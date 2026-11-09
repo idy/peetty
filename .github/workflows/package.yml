@@ -40,3 +40,10 @@ jobs:
         run: npm publish --ignore-scripts
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify published package version
+        run: |
+          version=$(node -p "require('./package.json').version")
+          published=$(npm view "@idy/peetty@$version" version --registry=https://npm.pkg.github.com)
+          test "$published" = "$version"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

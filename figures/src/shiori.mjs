@@ -44,6 +44,18 @@ export default {
   height: 120,
   anchor: [100, 256],
   behavior: { weights: { idle: 4, sit: 4, walk: 1, jump: 0.5, sleep: 1 }, walkSpeed: 0.8, jumpPower: 0.85, idleProp: 'book' },
+  sounds: {
+    volume: 0.24, cooldown: 1.2,
+    events: {
+      wave: [{ notes: [494, 587, 740], duration: 0.11 }],
+      jump: [{ notes: [247, 494], duration: 0.075 }],
+      land: [{ notes: [165, 123], duration: 0.055, volume: 0.45 }],
+      drag: [{ notes: [587, 494], duration: 0.09 }],
+      sleep: [{ notes: [370, 294, 247], duration: 0.17, volume: 0.55 }],
+      wake: [{ notes: [247, 370, 494], duration: 0.12 }],
+      talk: [{ notes: [494, 587], duration: 0.06, volume: 0.35 }],
+    },
+  },
   palette: {
     skin: '#fff4ee', skinShade: '#f3d3c9', skinLine: '#dba698', blush: '#ff9fae', blushLine: '#ee7d90',
     lash: '#4a3442', sclera: '#ffffff', eyeShade: '#efdbe4',
