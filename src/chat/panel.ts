@@ -2,6 +2,7 @@ import { abortable, ChatRuntime, fetchModelList, normalizeBaseUrl } from './runt
 import { LOCAL_MAGPIE, localMagpieConnection } from './connections.ts';
 import type { ChatEntry, CompanionAction, PeettyChatOptions, PeettyModelOptions, PeettyReasoningEffort } from './types.ts';
 import type { Language } from '../pet/i18n.ts';
+import { isSoundGesture, SOUND_GESTURES } from '../pet/activation.ts';
 import { COPY } from './copy.ts';
 import { buildChatView, icon, setIcon } from './view.ts';
 import { MARKDOWN_STYLE, renderMarkdown, renderMarkdownBubble } from './markdown.ts';
@@ -105,6 +106,8 @@ interface PanelOptions {
   onReply: (text: string, render?: (target: HTMLElement) => void) => void;
   onState: (busy: boolean, speaking: boolean) => void;
   onClose: () => void;
+  /** Synchronous callback in this frame's trusted activation event. */
+  onGesture?: () => void;
 }
 
 export async function createChatPanel(options: PanelOptions): Promise<ChatPanel> {
@@ -172,6 +175,9 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
   const remember = find<HTMLInputElement>('[name="remember"]');
   // A host-supplied connection is ephemeral until the user opts in to saving its key.
   if (options.model) remember.checked = false;
+  const gesture = (event: Event) => { if (visible && isSoundGesture(event)) options.onGesture?.(); };
+  for (const type of SOUND_GESTURES) document.addEventListener(type, gesture, true);
+  const releaseGestures = () => { for (const type of SOUND_GESTURES) document.removeEventListener(type, gesture, true); };
   const input = find<HTMLTextAreaElement>('[name="message"]');
   const messages = find<HTMLDivElement>('.pc-messages');
   const content = find<HTMLDivElement>('.pc-content');
@@ -496,7 +502,7 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
   });
   root.append(innerStyle, panel);
   try { await runtime.initialize(); }
-  catch (error) { runtime.destroy(); mobile.removeEventListener('change', resize); frame.remove(); style.remove(); throw error; }
+  catch (error) { releaseGestures(); runtime.destroy(); mobile.removeEventListener('change', resize); frame.remove(); style.remove(); throw error; }
   if (disposed) return { isOpen: false, open() {}, close() {}, async setModel() {}, setLanguage() {}, destroy() {} };
   refreshCopy();
   return {
@@ -540,7 +546,7 @@ export async function createChatPanel(options: PanelOptions): Promise<ChatPanel>
       disposed = true; configuration++;
       releaseEscapePress?.(false);
       if (focused) restoreParentFocus();
-      visible = false; cancelDiscovery(); runtime.destroy();
+      visible = false; releaseGestures(); cancelDiscovery(); runtime.destroy();
       mobile.removeEventListener('change', resize);
       frame.remove(); style.remove();
     },

@@ -5,6 +5,7 @@ import { afterEach, describe, it, mock } from 'node:test';
 import { build } from 'esbuild';
 import { Window as BrowserWindow } from 'happy-dom';
 import { Peetty } from '../src/pet/pet.ts';
+import { SoundPlayer } from '../src/pet/sound.ts';
 import { AUTONOMOUS_ACTIONS, type Figure, type RigFigure } from '../src/figure/types.ts';
 import type { FigureView } from '../src/figure/view.ts';
 import { PRESETS } from '../src/presets.ts';
@@ -125,6 +126,116 @@ async function petWithChatLoader(loadChatPanel: typeof import('../src/chat/load.
   runInThisContext(`(function(module, loadChatPanelForTest) { ${result.outputFiles[0]!.text}\n})`)(module, loadChatPanel);
   return module.exports.Peetty;
 }
+
+describe('companion action sounds', () => {
+  it('starts muted and toggles a localized, keyboard-accessible preview', async (t) => {
+    const { pet, state } = await mountPet(t, { language: 'en' });
+    stand(state);
+    const play = mock.method(SoundPlayer.prototype, 'play', () => {});
+    const button = [...state.overlay.menu.children].find((node) => node.getAttribute('data-action') === 'sound')!;
+    assert.equal(pet.soundEnabled, false);
+    assert.equal(button.getAttribute('aria-pressed'), 'false');
+    button.dispatchEvent(new Event('click'));
+    assert.equal(pet.soundEnabled, true);
+    assert.equal(button.textContent, strings('en').soundOn);
+    assert.equal(button.getAttribute('aria-pressed'), 'true');
+    assert.deepEqual(play.mock.calls.map((call) => call.arguments), [['wave']]);
+    pet.setLanguage('zh');
+    assert.equal(button.textContent, strings('zh').soundOn);
+    assert.equal(button.getAttribute('aria-label'), strings('zh').soundLabel);
+    button.dispatchEvent(new Event('click'));
+    assert.equal(pet.soundEnabled, false);
+    assert.equal(button.textContent, strings('zh').sound);
+    assert.equal(play.mock.callCount(), 1);
+  });
+
+  it('emits state-entry, wake, drag and landing events without repeating a pose', async (t) => {
+    const { dom, pet, state } = await mountPet(t);
+    stand(state);
+    const play = mock.method(SoundPlayer.prototype, 'play', () => {});
+    pet.play('wave'); pet.play('wave'); pet.play('sleep'); pet.play('sit');
+    assert.deepEqual(play.mock.calls.map((call) => call.arguments[0]), ['wave', 'sleep', 'wake']);
+    state.land(state.perch!, 0.2);
+    const element = state.overlay.pet as unknown as ElementStub;
+    element.dispatchEvent(pointer('pointerdown', 1, 300, 650));
+    dom.window.dispatchEvent(pointer('pointermove', 1, 350, 550));
+    assert.deepEqual(play.mock.calls.slice(-2).map((call) => call.arguments[0]), ['land', 'drag']);
+  });
+
+  it('preserves normalized optional settings and player ownership across remount', async (t) => {
+    const { pet } = await mountPet(t, { sound: { enabled: true, volume: 0.4 } });
+    const player = (pet as unknown as { sounds: SoundPlayer }).sounds;
+    pet.setSound({ enabled: undefined, volume: undefined } as unknown as Parameters<Peetty['setSound']>[0]);
+    assert.equal(pet.soundEnabled, true);
+    pet.destroy();
+    await pet.mount();
+    assert.equal(pet.soundEnabled, true);
+    assert.equal((pet as unknown as { sounds: SoundPlayer }).sounds, player, 'outstanding native work retains its owner');
+  });
+
+  it('plays an idle entry on landing when no landing cue is configured', async (t) => {
+    const figure = { ...PRESETS.miru, sounds: { events: { idle: [{ notes: [440] }] } } };
+    const { pet, state } = await mountPet(t, { figure });
+    const play = mock.method(SoundPlayer.prototype, 'play', () => {});
+    stand(state);
+    pet.play('idle');
+    assert.deepEqual(play.mock.calls.map((call) => call.arguments[0]), ['idle']);
+    pet.play('wave');
+    state.land(state.perch!, 0.2);
+    assert.equal(play.mock.calls.at(-1)?.arguments[0], 'idle');
+  });
+
+  it('observes host keyboard and touch release before bubbling handlers consume them', async (t) => {
+    const { window } = await mountKeyboardPet(t, { sound: true });
+    const unlock = mock.method(SoundPlayer.prototype, 'unlock', () => {});
+    const field = window.document.createElement('input');
+    window.document.body.append(field);
+    field.addEventListener('keydown', (event) => event.stopPropagation());
+    const trusted = (type: string, extra: Record<string, unknown>) => {
+      const event = new window.Event(type, { bubbles: true, composed: true });
+      Object.defineProperty(event, 'isTrusted', { value: true });
+      Object.assign(event, extra);
+      return event;
+    };
+    field.dispatchEvent(trusted('keydown', { key: 'a' }));
+    assert.equal(unlock.mock.callCount(), 1);
+    field.dispatchEvent(trusted('pointerdown', { pointerType: 'touch', pointerId: 1 }));
+    assert.equal(unlock.mock.callCount(), 1, 'touch down precedes user activation');
+    field.dispatchEvent(trusted('pointerup', { pointerType: 'touch', pointerId: 1 }));
+    assert.equal(unlock.mock.callCount(), 2, 'release can unlock in the activating event');
+  });
+
+  it('stops playback on hide, hidden tabs, figure changes and destruction', async (t) => {
+    class AudioContextStub extends EventTarget {
+      state: AudioContextState = 'running';
+      async resume() { this.state = 'running'; }
+      async suspend() { this.state = 'suspended'; }
+      async close() { this.state = 'closed'; }
+    }
+    t.after(stubGlobals({ AudioContext: AudioContextStub }));
+    const { dom, pet, state } = await mountPet(t, { sound: { enabled: true, volume: 0.4 } });
+    stand(state);
+    pet.setSound(true);
+    const stop = mock.method(SoundPlayer.prototype, 'stop');
+    pet.hide();
+    assert.ok(stop.mock.callCount() >= 1);
+    pet.show();
+    dom.document.hidden = true;
+    const before = stop.mock.callCount();
+    dom.document.dispatchEvent(new Event('visibilitychange'));
+    assert.ok(stop.mock.callCount() > before);
+    dom.document.hidden = false;
+    const switchSounds = mock.method(SoundPlayer.prototype, 'setFigure');
+    await pet.setFigure('koharu');
+    assert.equal(switchSounds.mock.calls.at(-1)?.arguments[0], PRESETS.koharu.sounds);
+    pet.setSound(false);
+    pet.setSound({ volume: 0.2 });
+    assert.equal(pet.soundEnabled, false, 'changing volume preserves mute');
+    pet.destroy();
+    await pet.mount();
+    assert.equal(pet.soundEnabled, false, 'remount preserves the sound preference');
+  });
+});
 
 describe('mount and figure request ownership', () => {
   it('shares one pending mount and tears down every installed resource', async (t) => {

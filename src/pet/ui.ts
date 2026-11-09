@@ -33,7 +33,7 @@ const STYLE = `
   border-right: 1px solid var(--peetty-line, #e2deef); border-bottom: 1px solid var(--peetty-line, #e2deef);
 }
 .menu {
-  display: flex; flex-wrap: wrap; justify-content: center; width: max-content; max-width: calc(100vw - 12px); gap: 4px; padding: 4px; border-radius: 16px;
+  display: flex; flex-wrap: wrap; justify-content: center; box-sizing: border-box; width: max-content; max-width: calc(100vw - 12px); gap: 4px; padding: 4px; border-radius: 16px;
   background: var(--peetty-surface, #ffffff); border: 1px solid var(--peetty-line, #e2deef);
   box-shadow: 0 6px 18px rgba(40, 30, 80, .14); opacity: 0; transform: translateY(4px);
   transition: opacity .15s ease, transform .15s ease; visibility: hidden;
@@ -45,7 +45,7 @@ const STYLE = `
   color: var(--peetty-ink, #2b2840);
 }
 .menu button[hidden] { display: none !important; }
-.menu button:hover { background: var(--peetty-hover, #f1eefa); }
+.menu button:hover, .menu button[aria-pressed="true"] { background: var(--peetty-hover, #f1eefa); }
 .menu button:focus-visible { outline: 2px solid var(--peetty-accent, #7a6ee0); outline-offset: 1px; }
 @media (prefers-color-scheme: dark) {
   .bubble, .menu { --peetty-ink: #eeeaf8; --peetty-surface: #2a2738; --peetty-line: #3d3952; --peetty-hover: #38344b; }
@@ -55,7 +55,7 @@ const STYLE = `
 }
 `;
 
-export type MenuAction = 'chat' | 'greet' | 'move' | 'nap' | 'configure' | 'hide';
+export type MenuAction = 'chat' | 'greet' | 'move' | 'nap' | 'sound' | 'configure' | 'hide';
 
 export interface BoxSize {
   width: number;
@@ -107,11 +107,15 @@ export function createOverlay(text: Strings, zIndex: number, onAction: (action: 
   menu.className = 'menu';
   menu.setAttribute('role', 'toolbar');
   menu.setAttribute('aria-label', text.menu);
-  for (const action of ['chat', 'greet', 'move', 'nap', 'configure', 'hide'] as const) {
+  for (const action of ['chat', 'greet', 'move', 'nap', 'sound', 'configure', 'hide'] as const) {
     const button = document.createElement('button');
     button.type = 'button';
     button.setAttribute('data-action', action);
     button.textContent = text[action];
+    if (action === 'sound') {
+      button.setAttribute('aria-label', text.soundLabel);
+      button.setAttribute('aria-pressed', 'false');
+    }
     button.addEventListener('click', (event) => {
       event.stopPropagation();
       onAction(action);

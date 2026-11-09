@@ -114,7 +114,7 @@ Peetty's look is a JSON figure pack: layered vector parts on a standard skeleton
 - **Amara** (US): curly afro puffs and a camera she snaps photos with.
 - **Elsie** (UK): a blonde bob and freckles; sips tea and floats down under her umbrella.
 
-More characters, such as Shiori, live in the catalog in `figures/` and load on demand. See [Figure packs](docs/figures.md) to make your own or recolor a preset.
+More characters, such as Shiori, live in the catalog in `figures/` and load on demand. Each character has its own short action sounds, configured in the figure's optional `sounds.events` JSON. The bundled sounds synthesize locally without downloads; custom packs can use audio files and random variants. Sound is off by default: enable it in the companion's menu to hear a preview, or pass `sound: { enabled: true, volume: 0.6 }` to the SDK (`data-sound="true"` for script tags). A browser user gesture is still required. Use `pet.setSound(false)` to mute and `pet.previewSound('jump')` inside a click handler to audition a cue. See [Figure packs](docs/figures.md#action-sounds) for the JSON format and [Figure packs](docs/figures.md) to make your own or recolor a preset.
 
 ## Project direction
 
@@ -169,10 +169,11 @@ npm run check
 | `src/figure/rig.ts` | SVG renderer: bone matrices, springs, slots, gaze |
 | `src/figure/motion.ts` | Procedural animation for every state |
 | `src/figure/view.ts` | Animated figure element with its frame loop |
+| `src/figure/sources.ts` | Audio asset bases kept outside the validated figure JSON |
 | `figures/src/` | Preset sources and the drawing kit |
 | `figures/*.json` | Generated preset figure packs |
 | `schema/figure-v1.json` | JSON Schema for editors |
-| `src/pet/` | The companion: perch finding, jump physics, behaviour, dragging, hover menu and bubble |
+| `src/pet/` | The companion: perch finding, jump physics, behaviour, dragging, hover menu, bubble and action sounds |
 | `src/global.ts` | Script-tag build with `data-peetty-auto` |
 | `site/` | peetty.idy.dev, with the shared idy.dev shell in `site/shared/` |
 | `.github/workflows/pages.yml` | Checks on every PR; builds and deploys `site/` to GitHub Pages from `main` |

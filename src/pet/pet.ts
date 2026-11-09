@@ -1,5 +1,7 @@
 import { FigureView } from '../figure/view.ts';
-import { AUTONOMOUS_ACTIONS, type AutonomousAction, type Figure } from '../figure/types.ts';
+import { AUTONOMOUS_ACTIONS, type AutonomousAction, type Figure, type SoundEvent, type StateName } from '../figure/types.ts';
+import { SoundPlayer, type PeettySoundOptions } from './sound.ts';
+import { isSoundGesture, SOUND_GESTURES } from './activation.ts';
 import { clamp } from '../math.ts';
 import { resolveFigure } from '../presets.ts';
 import { languageOf, strings, type Language, type Strings } from './i18n.ts';
@@ -32,6 +34,8 @@ export interface PeettyOptions {
   model?: PeettyModelOptions;
   /** Chat storage and personality; false disables all chat entry points. */
   chat?: PeettyChatOptions | false;
+  /** Action sounds. Off by default; playback also requires a browser user gesture. */
+  sound?: boolean | PeettySoundOptions;
 }
 
 type Mode = 'ground' | 'jump' | 'fall' | 'drag' | 'hang' | 'paused';
@@ -126,10 +130,36 @@ export class Peetty {
   private menuPinned = false;
   private lastTap: { at: number; x: number; y: number } | null = null;
   private tapTimer = 0;
+  private readonly sounds: SoundPlayer;
 
   constructor(options: PeettyOptions = {}) {
     this.options = { ...options, ...(options.model ? { model: normalizeModelOptions(options.model) } : {}) };
     this.text = strings(languageOf(options.language));
+    this.sounds = new SoundPlayer(options.sound);
+  }
+
+  get soundEnabled(): boolean { return this.sounds.enabled; }
+
+  /** Enables/mutes action sounds or changes their master volume (0–1). */
+  setSound(sound: boolean | PeettySoundOptions): void {
+    this.sounds.setOptions(sound);
+    this.sounds.unlock();
+    this.syncSoundButton();
+  }
+
+  /** Previews one configured event; call from a click or key handler. */
+  previewSound(event: SoundEvent = 'wave'): void {
+    if (!this.overlay || this.hidden || this.mode === 'paused') return;
+    this.sounds.preview(event);
+  }
+
+  private syncSoundButton(): void {
+    const button = [...(this.overlay?.menu.children ?? [])].find((item) => item.getAttribute('data-action') === 'sound');
+    if (!button) return;
+    button.textContent = this.soundEnabled ? this.text.soundOn : this.text.sound;
+    button.setAttribute('aria-label', this.text.soundLabel);
+    button.setAttribute('aria-pressed', String(this.soundEnabled));
+    this.overlay?.invalidate(this.overlay.menu);
   }
 
   /** True once mounted, including while waiting for a safe place to stand. */
@@ -169,6 +199,7 @@ export class Peetty {
     cancelAnimationFrame(this.raf);
     this.raf = 0;
     this.unbind();
+    this.sounds.destroy();
     this.view?.destroy();
     this.overlay?.destroy();
     this.view = null;
@@ -209,6 +240,7 @@ export class Peetty {
       this.place();
     }
     this.figure = loaded;
+    this.sounds.setFigure(loaded.sounds);
     this.options = { ...this.options, figure };
   }
 
@@ -264,6 +296,7 @@ export class Peetty {
       }
       overlay.invalidate(overlay.menu);
     }
+    this.syncSoundButton();
     this.chatPanel?.setLanguage(resolved);
   }
 
@@ -319,6 +352,7 @@ export class Peetty {
               if (this.action !== action) this.setChatPose(action, 15);
             }
           },
+          onGesture: () => { if (generation === this.generation) this.sounds.unlock(); },
           onClose: () => this.chatClosed(),
         });
       }).then((panel) => {
@@ -430,6 +464,7 @@ export class Peetty {
     this.hidden = true;
     this.finishChatAction(new Error('Companion action interrupted by hiding.'));
     this.closeChat();
+    this.sounds.stop();
     this.menuPinned = false;
     this.overlay.menu.classList.remove('show');
     clearTimeout(this.menuTimer);
@@ -488,6 +523,8 @@ export class Peetty {
       this.figure = figure;
       this.view = view;
       this.overlay = overlay;
+      this.sounds.setFigure(figure.sounds);
+      this.syncSoundButton();
       overlay.pet.append(view.element);
       document.documentElement.append(overlay.host);
       this.bind();
@@ -543,6 +580,7 @@ export class Peetty {
 
   /** No usable anchor: step out of view (fading when she is on screen) and rescan at a bounded interval. */
   private park(fade = false) {
+    this.sounds.stop();
     this.finishChatAction(new Error('Companion action interrupted because no safe surface is available.'));
     this.mode = 'paused';
     this.perch = null;
@@ -590,6 +628,7 @@ export class Peetty {
     const menu = this.overlay!.menu;
     let activatingChat = false;
     const activateCompanion = () => {
+      this.sounds.unlock();
       if (activatingChat) return;
       activatingChat = true;
       const finished = () => { activatingChat = false; };
@@ -605,6 +644,7 @@ export class Peetty {
     });
     on(pet, 'pointerdown', (e: PointerEvent) => this.onDown(e));
     on(pet, 'contextmenu', (e: MouseEvent) => {
+      this.sounds.unlock();
       e.preventDefault();
       e.stopPropagation();
       clearTimeout(this.menuTimer);
@@ -665,6 +705,8 @@ export class Peetty {
         });
       }
     }
+    const activateSound = (event: Event) => { if (isSoundGesture(event)) this.sounds.unlock(); };
+    for (const type of SOUND_GESTURES) on(window, type, activateSound, { capture: true });
     on(window, 'pointerdown', (e: PointerEvent) => {
       const path = e.composedPath();
       if (!path.includes(pet) && !path.includes(menu)) { this.menuPinned = false; menu.classList.remove('show'); }
@@ -811,7 +853,7 @@ export class Peetty {
       return this.startFall();
     }
     // Over the top of a long drop she looks down, and her soul leaves her.
-    if (jump.fright && jump.t > -jump.plan.vy / GRAVITY) this.view!.motion.play('fall');
+    if (jump.fright && jump.t > -jump.plan.vy / GRAVITY) this.playMotion('fall');
     jump.target = target;
     if (arrived) {
       this.x = clamp(this.x, target.left, target.right);
@@ -820,7 +862,7 @@ export class Peetty {
         this.perch = target;
         this.mode = 'hang';
         this.hangUntil = this.clock + 1500;
-        this.view!.motion.play('hang');
+        this.playMotion('hang');
       } else this.land(target, impact(jump.plan.vy + GRAVITY * jump.t) * 0.7);
     }
   }
@@ -969,6 +1011,12 @@ export class Peetty {
     this.chatPoseVersion = this.actionVersion;
   }
 
+  private playMotion(state: StateName) {
+    const previous = this.view!.motion.current;
+    this.view!.motion.play(state);
+    if (previous !== state && !this.hidden) this.sounds.play(previous === 'sleep' ? 'wake' : state);
+  }
+
   private setAction(action: Action, seconds: number) {
     this.actionVersion++;
     this.action = action;
@@ -977,7 +1025,7 @@ export class Peetty {
     // Walking keeps its own deadline so evacuation can reach a clear spot.
     this.until = this.mode === 'ground' && this.perch?.clear === false && action !== 'walk'
       ? Math.min(this.until, deadline) : deadline;
-    this.view!.motion.play(action);
+    this.playMotion(action);
   }
 
   /** Jumps to another perch in reach, landing well clear of `exclude` if given; false if there is none. */
@@ -1021,7 +1069,7 @@ export class Peetty {
     this.jump = { from, plan: pick.plan, t: -0.18, target: pick.perch, targetOrigin: [pick.perch.left, pick.perch.y], hang, fright };
     this.mode = 'jump';
     this.perch = null;
-    view.motion.play('jump');
+    this.playMotion('jump');
     return true;
   }
 
@@ -1032,7 +1080,7 @@ export class Peetty {
     this.jump = null;
     this.mode = 'fall';
     this.calmFall = calm;
-    this.view!.motion.play('fall');
+    this.playMotion('fall');
   }
 
   private land(perch: Perch, strength: number) {
@@ -1043,7 +1091,11 @@ export class Peetty {
     this.vy = 0;
     this.jump = null;
     this.x = clamp(this.x, perch.left, perch.right);
+    const previous = this.view!.motion.current;
     this.view!.motion.land(strength);
+    const events = this.figure?.sounds?.events;
+    if (events && Object.hasOwn(events, 'land') && events.land?.length) this.sounds.play('land');
+    else if (previous !== 'idle') this.sounds.play('idle');
     this.actionVersion++;
     this.action = 'idle';
     this.until = this.clock / 1000 + (strength > 0.85 ? 1.8 : rand(0.6, 1.4));
@@ -1090,7 +1142,7 @@ export class Peetty {
       this.jump = null;
       this.overlay!.pet.classList.add('dragging');
       this.overlay!.menu.classList.remove('show');
-      this.view!.motion.play('drag');
+      this.playMotion('drag');
       this.dragTrail = [];
     }
     // Held by the top of the head, inside the viewport if she fits; the frame loop draws the latest position.
@@ -1169,6 +1221,12 @@ export class Peetty {
   }
 
   private onMenu(action: MenuAction) {
+    this.sounds.unlock();
+    if (action === 'sound') {
+      this.setSound(!this.soundEnabled);
+      if (this.soundEnabled) this.previewSound();
+      return;
+    }
     this.menuPinned = false;
     this.overlay!.menu.classList.remove('show');
     if (action === 'chat') void this.openChat();

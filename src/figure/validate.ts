@@ -9,6 +9,7 @@ import {
   LINE_CAPS,
   LINE_JOINS,
   SLOT_STATES,
+  SOUND_EVENTS,
   STATES,
   type Figure,
 } from './types.ts';
@@ -101,6 +102,7 @@ export function validateFigure(input: unknown): Figure {
   }
 
   if (f.behavior !== undefined) checkBehavior(f.behavior, fail);
+  if (f.sounds !== undefined) checkSounds(f.sounds, fail);
 
   if (f.renderer === 'rig') checkRig(f, palette, fail);
   else if (f.renderer === 'sprite') checkSprite(f, fail);
@@ -150,6 +152,58 @@ function checkBehavior(b: unknown, fail: Fail) {
   for (const key of ['walkSpeed', 'jumpPower'] as const) checkRange(fail, `behavior.${key}`, b[key], 0.25, 3);
   checkChoice(fail, 'behavior.idleProp', b.idleProp, IDLE_PROPS);
   checkChoice(fail, 'behavior.fallProp', b.fallProp, FALL_PROPS);
+}
+
+function checkSounds(s: unknown, fail: Fail) {
+  if (!isObj(s)) return fail('sounds', 'must be an object');
+  for (const key of Object.keys(s)) {
+    if (!['volume', 'cooldown', 'events'].includes(key)) fail(`sounds.${key}`, 'is not a known sound setting');
+  }
+  checkRange(fail, 'sounds.volume', s.volume, 0, 1);
+  checkRange(fail, 'sounds.cooldown', s.cooldown, 0, 60);
+  if (!isObj(s.events)) return fail('sounds.events', 'must map event names to arrays of sound cues');
+  for (const [event, cues] of Object.entries(s.events)) {
+    const path = `sounds.events.${event}`;
+    if (!(SOUND_EVENTS as readonly string[]).includes(event)) fail(path, 'is not a known sound event');
+    if (!Array.isArray(cues) || cues.length < 1 || cues.length > 8) {
+      fail(path, 'needs 1–8 sound cues');
+      continue;
+    }
+    cues.forEach((cue, i) => {
+      const p = `${path}[${i}]`;
+      if (!isObj(cue)) return fail(p, 'must be an object');
+      for (const key of Object.keys(cue)) {
+        if (!['src', 'notes', 'duration', 'waveform', 'volume', 'playbackRate'].includes(key)) fail(`${p}.${key}`, 'is not a known cue setting');
+      }
+      if ((cue.src === undefined) === (cue.notes === undefined)) fail(p, 'needs exactly one of src or notes');
+      if (cue.src !== undefined) {
+        const source = cue.src;
+        let safe = false;
+        if (typeof source === 'string' && source.length > 0 && source.length <= 2048
+          && !/[\s\\\u0000-\u001f\u007f]/.test(source) && !source.startsWith('//') && !/^[?#]/.test(source)) {
+          try {
+            const url = new URL(source, 'https://peetty.invalid/');
+            safe = (url.protocol === 'https:' || url.protocol === 'http:') && !url.username && !url.password;
+          } catch { /* Invalid URLs are reported with their field location. */ }
+        }
+        if (!safe) fail(`${p}.src`, 'must be an HTTP(S) URL or relative audio path without credentials');
+        if (cue.duration !== undefined || cue.waveform !== undefined) fail(p, 'duration and waveform apply only to notes');
+      }
+      if (cue.notes !== undefined) {
+        if (!Array.isArray(cue.notes) || cue.notes.length < 1 || cue.notes.length > 8
+          || !cue.notes.every((n) => isNum(n) && n >= 80 && n <= 4000)) {
+          fail(`${p}.notes`, 'needs 1–8 frequencies from 80 to 4000 Hz');
+        } else if (isNum(cue.duration) && cue.notes.length * cue.duration > 5) {
+          fail(`${p}.duration`, 'the note sequence must last at most 5 seconds');
+        }
+        if (cue.playbackRate !== undefined) fail(`${p}.playbackRate`, 'applies only to audio files');
+      }
+      checkRange(fail, `${p}.volume`, cue.volume, 0, 1);
+      checkRange(fail, `${p}.duration`, cue.duration, 0.03, 1);
+      checkRange(fail, `${p}.playbackRate`, cue.playbackRate, 0.5, 2);
+      checkChoice(fail, `${p}.waveform`, cue.waveform, ['sine', 'triangle', 'square']);
+    });
+  }
 }
 
 function checkRig(f: Obj, palette: Obj, fail: Fail) {

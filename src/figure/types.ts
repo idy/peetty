@@ -43,6 +43,34 @@ export type SlotState<S extends SlotName = SlotName> = (typeof SLOT_STATES)[S][n
 export const STATES = ['idle', 'walk', 'jump', 'fall', 'sit', 'lie', 'hang', 'sleep', 'drag', 'wave', 'talk', 'think'] as const;
 export type StateName = (typeof STATES)[number];
 
+/** Sounds play once on entering a state, on landing, or on waking from sleep. */
+export const SOUND_EVENTS = [...STATES, 'land', 'wake'] as const;
+export type SoundEvent = (typeof SOUND_EVENTS)[number];
+
+/** One short sound: an audio file or a sequence of synthesized frequencies. */
+export interface SoundCue {
+  /** HTTP(S) URL or relative path (relative to the figure JSON, or document for inline figures). */
+  src?: string;
+  /** 1–8 frequencies in Hz, each 80–4000. Use either notes or src. */
+  notes?: number[];
+  /** Seconds per synthesized note, 0.03–1; defaults to 0.08. Total at most 5 seconds. */
+  duration?: number;
+  waveform?: 'sine' | 'triangle' | 'square';
+  /** Gain multiplier, 0–1. */
+  volume?: number;
+  /** Audio-file playback rate, 0.5–2. */
+  playbackRate?: number;
+}
+
+export interface FigureSounds {
+  /** Figure gain, 0–1; defaults to 0.35. */
+  volume?: number;
+  /** Minimum seconds between repeats of one event, 0–60; defaults to 0.6. */
+  cooldown?: number;
+  /** Missing events stay silent. Multiple cues are chosen randomly. */
+  events: Partial<Record<SoundEvent, SoundCue[]>>;
+}
+
 /** Actions that may be selected autonomously; other states follow physics. */
 export const AUTONOMOUS_ACTIONS = ['idle', 'walk', 'jump', 'sit', 'lie', 'sleep', 'think', 'wave', 'talk'] as const;
 export type AutonomousAction = (typeof AUTONOMOUS_ACTIONS)[number];
@@ -185,6 +213,8 @@ interface FigureBase {
   anchor: Point;
   palette: Record<string, string>;
   behavior?: Behavior;
+  /** Optional action sounds; playback requires the visitor to enable sound. */
+  sounds?: FigureSounds;
 }
 
 export interface RigFigure extends FigureBase {

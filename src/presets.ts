@@ -7,6 +7,7 @@ import xiaoxiao from '../figures/xiaoxiao.json' with { type: 'json' };
 import { CATALOG_FORMAT, FIGURE_CATALOG, type PresetId } from './catalog.ts';
 import type { Figure, LocalizedText } from './figure/types.ts';
 import { FIGURE_ID, validateFigure } from './figure/validate.ts';
+import { resolveSoundSources } from './figure/sources.ts';
 
 export { FIGURE_CATALOG, PRESET_IDS, type PresetId } from './catalog.ts';
 
@@ -25,13 +26,13 @@ export interface CatalogEntry {
   url: string;
 }
 
-async function fetchJson(input: string, base: string): Promise<unknown> {
+async function fetchJson(input: string, base: string): Promise<{ data: unknown; url: string }> {
   // The base itself may be relative, e.g. a self-hosted catalog at '/figures/'.
   const url = new URL(input, new URL(base, document.baseURI));
   if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error('Figure URLs must use https: or http:.');
   const response = await fetch(url, { credentials: 'omit' });
   if (!response.ok) throw new Error(`Could not load ${url.href}: HTTP ${response.status}`);
-  return response.json();
+  return { data: await response.json(), url: response.url || url.href };
 }
 
 /**
@@ -43,15 +44,15 @@ async function fetchJson(input: string, base: string): Promise<unknown> {
  * Everything loaded is validated before use.
  */
 export async function resolveFigure(input: string | object = 'miru', catalog = FIGURE_CATALOG): Promise<Figure> {
-  if (typeof input === 'object') return validateFigure(input);
+  if (typeof input === 'object') return resolveSoundSources(validateFigure(input), globalThis.document?.baseURI);
   if (Object.hasOwn(PRESETS, input)) return PRESETS[input as PresetId];
-  if (FIGURE_ID.test(input)) return validateFigure(await fetchJson(`${input}.json`, catalog));
-  return validateFigure(await fetchJson(input, document.baseURI));
+  const loaded = FIGURE_ID.test(input) ? await fetchJson(`${input}.json`, catalog) : await fetchJson(input, document.baseURI);
+  return resolveSoundSources(validateFigure(loaded.data), loaded.url);
 }
 
 /** Lists the figures in a catalog, e.g. for a character picker. */
 export async function listFigures(catalog = FIGURE_CATALOG): Promise<CatalogEntry[]> {
-  const data = await fetchJson('index.json', catalog) as { format?: unknown; figures?: unknown };
+  const { data } = await fetchJson('index.json', catalog) as { data: { format?: unknown; figures?: unknown } };
   if (data?.format !== CATALOG_FORMAT || !Array.isArray(data.figures)) throw new Error('Not a Peetty figure catalog.');
   return data.figures.filter((e): e is CatalogEntry =>
     !!e && typeof e === 'object' && typeof e.id === 'string' && FIGURE_ID.test(e.id) && typeof e.url === 'string'
