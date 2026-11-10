@@ -1,1 +1,3 @@
-cdn/** linguist-generated=true
+cdn/** text eol=lf linguist-generated=true
+licenses/*.LICENSE text eol=lf
+LICENSE text eol=lf

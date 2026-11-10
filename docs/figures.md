@@ -34,7 +34,7 @@ Every loaded figure is validated first. A figure on another site must be served 
 
 ## The catalog and contributing a figure
 
-`figures/` is the catalog: one `<id>.json` per figure, plus `index.json`, which `npm run figures` generates with each figure's id, name, description, author, license and relative URL. Both the ESM and classic browser entries resolve this catalog beside their own `cdn/` (or `sdk/`) directory, retaining the host and version when served through jsDelivr or another static host. Package consumers default to the release-pinned jsDelivr catalog. Only the presets are bundled into the SDK; the rest load on demand, so the catalog can grow without making the script larger.
+`figures/` is the catalog: one `<id>.json` per figure, plus `index.json`, which `npm run figures` generates with each figure's id, name, description, author, license and relative URL. The CDN and website ESM and classic entries resolve this catalog beside their own `cdn/` (or `sdk/`) directory, retaining the host and version when served through jsDelivr or another static host. Package consumers, including the npm classic build, default to the release-pinned jsDelivr catalog. Website assembly writes absolute URLs into the historical `peetty.idy.dev/figures/index.json` endpoint so existing SDK 0.3.0 clients still list figures; the repository index served by the CDN keeps its relative URLs. Only the presets are bundled into the SDK; the rest load on demand, so the catalog can grow without making the script larger.
 
 To contribute a figure:
 

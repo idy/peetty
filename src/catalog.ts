@@ -4,7 +4,7 @@
  */
 
 /** Default catalog for package consumers; browser entries follow their own CDN URL. */
-export let FIGURE_CATALOG = 'https://cdn.jsdelivr.net/gh/idy/peetty@v0.3.1/figures/';
+export let FIGURE_CATALOG = 'https://cdn.jsdelivr.net/gh/idy/peetty@v0.3.2/figures/';
 
 /** Browser bundles live in cdn/ (or sdk/), alongside the figures/ directory. */
 export function setFigureScriptSource(source: string): void {

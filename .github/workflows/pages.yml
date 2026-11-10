@@ -37,18 +37,32 @@ jobs:
           node --check site/shared/header.js
           node --check site/translations.js
           node --check site/script.js
-          mkdir -p site/sdk site/figures site/schema
-          cp -R dist/. site/sdk/
-          find site/sdk -name '*.map' -delete
-          cp figures/*.json site/figures/
-          cp schema/*.json site/schema/
+          npm run build:site
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         with:
           path: site
 
+  windows-check:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm run build
+      - run: npm run build:site
+      - run: node scripts/verify-package.mjs
+
   deploy:
-    needs: check
+    needs: [check, windows-check]
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 10

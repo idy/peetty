@@ -32,6 +32,10 @@ describe('figure resolution', () => {
         { id: 'miru', url: 'https://another.example/figures/miru.json' },
         { id: 'bad', url: 'javascript:alert(1)' },
         { id: 'missing' },
+        { id: 'empty', url: '' },
+        { id: 'whitespace', url: String.fromCharCode(32, 9, 10) },
+        { id: 'fragment', url: '#shiori' },
+        { id: 'spaced-fragment', url: '  #miru' },
       ] }));
       Object.defineProperty(response, 'url', { value: 'https://cdn.example/pinned/v9/figures/index.json' });
       return response;

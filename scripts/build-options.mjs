@@ -19,3 +19,6 @@ export const global = {
     },
   }],
 };
+export const browserGlobal = {
+  ...global, entryPoints: ['src/browser-global.ts'],
+};

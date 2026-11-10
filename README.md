@@ -124,7 +124,7 @@ When embedded through the SDK, settings and any saved key live in that website's
 
 ## Use from a CDN (no installation)
 
-Load the prebuilt browser distribution from jsDelivr, without requests to `peetty.idy.dev`. No npm install, GitHub login or build step is needed, and no separate stylesheet is required. The `v0.3.1` URLs below become available after that release tag is pushed; older tags do not contain the `cdn/` distribution.
+Load the prebuilt browser distribution from jsDelivr, without requests to `peetty.idy.dev`. No npm install, GitHub login or build step is needed, and no separate stylesheet is required. The `v0.3.1` URLs below are already published; older tags do not contain the `cdn/` distribution. The working tree prepares v0.3.2 compatibility and third-party license fixes, which require a new release tag and do not modify the published v0.3.1 assets.
 
 For an automatically mounted companion, add a classic script tag:
 
@@ -148,7 +148,9 @@ For JavaScript control, import the browser ES module directly:
 
 The classic script also exposes `window.Peetty.createPeetty()` for manual setup when `data-peetty-auto` is omitted. Use `cdn/index.js` for named ES module imports and `cdn/peetty.global.js` for classic scripts. Dependencies, styles and six preset figures are bundled. Chat modules and extra figures load from the same CDN host and version as the entry script; the catalog contains portable relative URLs.
 
-The generated `cdn/` directory is checked into Git so jsDelivr can read a version tag directly. GitHub Packages is optional and is not involved in CDN downloads. To self-host a fixed build, copy the complete `cdn/` and `figures/` directories as siblings, preserving `cdn/chat/` and `cdn/chunks/`.
+The generated `cdn/` directory is checked into Git so jsDelivr can read a version tag directly. GitHub Packages is optional and is not involved in CDN downloads. To self-host a CDN build, copy the complete `cdn/` and `figures/` directories as siblings, preserving `cdn/chat/`, `cdn/chunks/` and `cdn/THIRD_PARTY_NOTICES.txt`. The npm `dist/peetty.global.js` keeps its public catalog fallback for existing deployments without local figures; the CDN and website classic entries use their sibling catalog.
+
+Both CDN and npm distributions include `THIRD_PARTY_NOTICES.txt` with licenses and notices for the dependencies present in their bundle graph. Per-file license comments are retained. The website assembly uses the CDN browser entries and writes an absolute-URL catalog at its historical `figures/index.json` endpoint, preserving SDK 0.3.0 clients; the repository's portable CDN index remains relative.
 
 ## Install from GitHub Packages (optional)
 
@@ -188,7 +190,7 @@ npm test
 npm run check
 ```
 
-`npm run dev` serves the figure sheet at `http://127.0.0.1:4180/dev/figures.html` and the website at `http://127.0.0.1:4180/site/`, rebuilding on each change. `npm run build` writes `dist/index.js` (ESM), `dist/peetty.global.js` (a `Peetty` global for script tags), and the checked-in `cdn/` browser distribution without source maps. `npm run build:cdn` regenerates only the CDN files. `npm run figures` regenerates the preset JSON from its sources; `npm run check` type-checks and verifies that generated figure JSON and the checked-in CDN build are current.
+`npm run dev` serves the figure sheet at `http://127.0.0.1:4180/dev/figures.html` and the website at `http://127.0.0.1:4180/site/`, rebuilding on each change. `npm run build` writes `dist/index.js` (ESM), `dist/peetty.global.js` (a `Peetty` global for script tags), and the checked-in `cdn/` browser distribution without source maps. `npm run build:cdn` regenerates only the CDN files. `npm run build:site` assembles the production website assets from `cdn/`, with a legacy-compatible website catalog. `npm run figures` regenerates the preset JSON from its sources; `npm run check` type-checks and verifies that generated figure JSON and the checked-in CDN build are current.
 
 | Path | Purpose |
 | --- | --- |
@@ -202,7 +204,9 @@ npm run check
 | `figures/*.json` | Generated preset figure packs |
 | `schema/figure-v1.json` | JSON Schema for editors |
 | `src/pet/` | The companion: perch finding, jump physics, behaviour, dragging, hover menu, bubble and action sounds |
-| `src/global.ts` | Script-tag build with `data-peetty-auto` |
+| `src/global.ts` | npm classic entry with automatic mounting and a public catalog fallback |
+| `src/browser-global.ts` | CDN/website classic entry with a sibling catalog |
+| `scripts/site.mjs` | Assemble production browser assets and the legacy website catalog |
 | `src/browser.ts` | CDN ES module entry with a catalog relative to its own URL |
 | `cdn/` | Checked-in browser distribution served directly by jsDelivr |
 | `scripts/cdn.mjs` | Generate and verify the browser distribution |
