@@ -1,3 +1,9 @@
+/** Opens have no record-size cost, but may wait for the browser's storage process. */
+export const IDB_OPEN_TIMEOUT_MS = 30_000;
+/** Full profile records can contain 100,000 entries or a 50 MiB import. Allow
+ * structured cloning and disk commits on slower devices, while bounding stalls. */
+export const IDB_TRANSACTION_TIMEOUT_MS = 120_000;
+
 /** Settle one transaction once, including timeouts and synchronous setup failures.
  * Callers retain ownership of domain errors and their RAM fallback policy. */
 export function stateTransaction(database: IDBDatabase, write: boolean,
@@ -12,7 +18,7 @@ export function stateTransaction(database: IDBDatabase, write: boolean,
       resolve(success);
     };
     const abort = () => { try { transaction?.abort(); } catch { /* Already complete. */ } finish(false); };
-    const timer = setTimeout(abort, 2_000);
+    const timer = setTimeout(abort, IDB_TRANSACTION_TIMEOUT_MS);
     try {
       transaction = database.transaction('state', write ? 'readwrite' : 'readonly');
       transaction.oncomplete = () => finish(true);
@@ -42,7 +48,7 @@ export function openStateDatabase(name: string, owner: DatabaseOwner): Promise<I
       else owner.onFailure();
       resolve(database);
     };
-    const timer = setTimeout(() => finish(), 2_000);
+    const timer = setTimeout(() => finish(), IDB_OPEN_TIMEOUT_MS);
     try {
       const request = globalThis.indexedDB.open(name, 1);
       request.onupgradeneeded = () => {

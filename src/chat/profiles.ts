@@ -335,16 +335,13 @@ export class BrowserProfileStore {
     this.queue = operation.then(() => {}, () => {});
     return operation;
   }
-  private async open(name = `${this.namespace}:profiles`): Promise<IDBDatabase | undefined> {
+  private async open(): Promise<IDBDatabase | undefined> {
     if (!this.persist || this.failed || this.closed) return undefined;
-    if (name === `${this.namespace}:profiles` && this.db) return this.db;
-    if (name === `${this.namespace}:profiles` && this.opening) return this.opening;
-    const opening = openStateDatabase(name, { isClosed: () => this.closed, onFailure: () => this.fail() });
-    if (name === `${this.namespace}:profiles`) {
-      this.opening = opening;
-      this.db = await opening;
-    }
-    return opening;
+    if (this.db) return this.db;
+    if (this.opening) return this.opening;
+    this.opening = openStateDatabase(`${this.namespace}:profiles`, { isClosed: () => this.closed, onFailure: () => this.fail() });
+    this.db = await this.opening;
+    return this.db;
   }
 
   /** Read/modify/write within ONE transaction; only dirty records are written, never a cached directory. */
@@ -415,8 +412,12 @@ export class BrowserProfileStore {
 
   /** Read raw legacy records without applying the runtime's history truncation policy. */
   private async legacy(): Promise<StoredChat & { used: boolean }> {
-    const db = await this.open(`${this.namespace}:chat`);
-    if (!db) return { entries: [], used: false };
+    if (!this.persist || this.failed || this.closed) return { entries: [], used: false };
+    // Migration is optional and owns its connection. Its failure must not close
+    // healthy profile storage or bypass the authoritative initialization recheck.
+    const db = await openStateDatabase(`${this.namespace}:chat`, { isClosed: () => this.closed, onFailure: () => {} });
+    // Unreadable legacy data is not evidence of an unused bootstrap profile.
+    if (!db) return { entries: [], used: true };
     try {
       let entries: unknown;
       let connection: unknown;
@@ -429,7 +430,7 @@ export class BrowserProfileStore {
         const barrier = store.get('entriesEpoch');
         barrier.onsuccess = () => { epoch = barrier.result; };
       });
-      if (!ok) { this.fail(); return { entries: [], used: true }; }
+      if (!ok) return { entries: [], used: true };
       // Legacy data was less strict: salvage each valid entry independently and
       // never disable healthy profile persistence because one old record is malformed.
       const salvaged: ChatEntry[] = [];
@@ -512,7 +513,15 @@ export class BrowserProfileStore {
   }
   async update(profileId: string, patch: SettingsInput): Promise<void> {
     const settings = settingsFrom(patch);
-    return this.queued([profileId], true, (draft) => { Object.assign(touch(draft, profileId).profile, settings); });
+    return this.queued([profileId], true, (draft) => {
+      const profile = getRecord(draft, profileId).profile;
+      const changed = (Object.keys(settings) as (keyof Settings)[]).some((field) => {
+        const value = settings[field];
+        return field === 'figure' && typeof value === 'object' && typeof profile.figure === 'object'
+          ? JSON.stringify(value) !== JSON.stringify(profile.figure) : value !== profile[field];
+      });
+      if (changed) Object.assign(touch(draft, profileId).profile, settings);
+    });
   }
   remove(profileId: string): Promise<void> {
     return this.enqueue(async () => {

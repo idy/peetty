@@ -6,7 +6,7 @@ import type { Figure } from '../src/figure/types.ts';
 import { BrowserProfileStore, PROFILE_LIMITS } from '../src/chat/profiles.ts';
 import type { BackupSession, MemoryEntry, ProfileRecord } from '../src/chat/profiles.ts';
 import { BrowserChatStore, boundedEntries } from '../src/chat/store.ts';
-import { openStateDatabase } from '../src/chat/idb.ts';
+import { IDB_OPEN_TIMEOUT_MS, IDB_TRANSACTION_TIMEOUT_MS, openStateDatabase, stateTransaction } from '../src/chat/idb.ts';
 import type { StoredConnection } from '../src/chat/store.ts';
 import type { ChatEntry } from '../src/chat/types.ts';
 import { installChatIndexedDB } from './helpers/chat-storage.ts';
@@ -524,13 +524,25 @@ describe('shared state database opening', () => {
       t.mock.timers.enable({ apis: ['setTimeout'] });
       let failures = 0; let ready = false;
       const opening = openStateDatabase('shared-open', { isClosed: () => false, onFailure: () => { failures++; }, onReady: () => { ready = true; } });
-      if (ending === 'timeout') t.mock.timers.tick(2_000);
+      if (ending === 'timeout') t.mock.timers.tick(IDB_OPEN_TIMEOUT_MS);
       else fixture.event(ending === 'blocked' ? 'onblocked' : 'onerror');
       assert.equal(await opening, undefined);
       fixture.event('onsuccess');
       assert.equal(fixture.closes, 1); assert.equal(failures, 1); assert.equal(ready, false);
     });
   }
+
+  it('allows a slow successful open beyond the former two-second deadline', async (t) => {
+    const fixture = requestFixture(t);
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    let failures = 0;
+    const opening = openStateDatabase('shared-open', { isClosed: () => false, onFailure: () => { failures++; } });
+    t.mock.timers.tick(5_000);
+    fixture.event('onsuccess');
+    assert.equal(await opening, fixture.database);
+    t.mock.timers.tick(IDB_OPEN_TIMEOUT_MS);
+    assert.equal(fixture.closes, 0); assert.equal(failures, 0);
+  });
 
   it('closes an arriving connection without warning or cache publication after its owner closes', async (t) => {
     const fixture = requestFixture(t);
@@ -542,7 +554,127 @@ describe('shared state database opening', () => {
   });
 });
 
+describe('bounded archive transactions', () => {
+  function transactionFixture() {
+    let aborts = 0;
+    let saved: unknown;
+    const request = {} as IDBRequest;
+    const store = { get: () => request, put: (value: unknown) => { saved = structuredClone(value); } } as unknown as IDBObjectStore;
+    const transaction = { objectStore: () => store, abort() { aborts++; transaction.onabort?.call(transaction, new Event('abort')); } } as unknown as IDBTransaction;
+    const database = { transaction: () => transaction } as unknown as IDBDatabase;
+    return { database, transaction, request, get aborts() { return aborts; }, get saved() { return saved; } };
+  }
+
+  it('reads and commits a 100,000-entry record beyond two seconds without truncation or abort', async (t) => {
+    const fixture = transactionFixture();
+    const record = { profile: profile('large', { entries: Array.from({ length: 100_000 }, (_, i) => entry(`large-${i}`, 'x'.repeat(400))) }), epoch: 'large-epoch' };
+    const bytes = new TextEncoder().encode(JSON.stringify(record)).length;
+    assert.ok(bytes > 40 * 1024 * 1024 && bytes < PROFILE_LIMITS.fileBytes);
+    Object.defineProperty(fixture.request, 'result', { value: structuredClone(record) });
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    let result: boolean | undefined;
+    const operation = stateTransaction(fixture.database, true, (store) => {
+      const request = store.get('profile:large');
+      request.onsuccess = () => { store.put(request.result, 'profile:large'); };
+    }).then((success) => { result = success; return success; });
+    t.mock.timers.tick(5_000);
+    assert.equal(result, undefined); assert.equal(fixture.aborts, 0);
+    fixture.request.onsuccess?.call(fixture.request, new Event('success'));
+    t.mock.timers.tick(5_000);
+    fixture.transaction.oncomplete?.call(fixture.transaction, new Event('complete'));
+    assert.equal(await operation, true);
+    t.mock.timers.tick(IDB_TRANSACTION_TIMEOUT_MS);
+    assert.equal(fixture.aborts, 0);
+    assert.deepEqual(fixture.saved, record);
+  });
+
+  for (const ending of ['timeout', 'setup failure'] as const) {
+    it(`aborts and settles a transaction once after ${ending}`, async (t) => {
+      const fixture = transactionFixture();
+      t.mock.timers.enable({ apis: ['setTimeout'] });
+      let settlements = 0;
+      const operation = stateTransaction(fixture.database, false, () => {
+        if (ending === 'setup failure') throw new Error('synthetic setup failure');
+      }).then((success) => { settlements++; return success; });
+      t.mock.timers.tick(IDB_TRANSACTION_TIMEOUT_MS);
+      assert.equal(await operation, false);
+      fixture.transaction.oncomplete?.call(fixture.transaction, new Event('complete'));
+      t.mock.timers.tick(IDB_TRANSACTION_TIMEOUT_MS);
+      assert.equal(fixture.aborts, 1); assert.equal(settlements, 1);
+    });
+  }
+});
+
 describe('full-archive sanitation and tolerant legacy migration', () => {
+  for (const failure of ['throw', 'blocked', 'timeout', 'read error', 'read timeout'] as const) {
+    for (const peerCommitted of [false, true]) {
+      it(`isolates legacy ${failure} with a peer initialization ${peerCommitted}`, async (t) => {
+        const idb = installChatIndexedDB(t);
+        const namespace = `legacy-failure-${failure}-${peerCommitted}`;
+        const legacy = new Map<string, unknown>([['entries', [entry('preserved-legacy')]]]);
+        idb.databases.set(`${namespace}:chat`, legacy);
+        const peer = profile('peer', { name: 'Existing peer', entries: [entry('peer-entry')], memories: [fact('peer-memory')] });
+        const records = new Map<string, unknown>([
+          ['directory', { version: 1, ids: [peer.id], activeProfileId: peer.id }],
+          [`profile:${peer.id}`, { profile: peer, epoch: 'peer-epoch' }],
+        ]);
+        let closes = 0;
+        const transaction = { objectStore: () => ({ get: () => ({} as IDBRequest) }), abort() { transaction.onabort?.call(transaction, new Event('abort')); } } as unknown as IDBTransaction;
+        const database = {
+          transaction: () => {
+            queueMicrotask(() => {
+              if (failure === 'read timeout') t.mock.timers.tick(IDB_TRANSACTION_TIMEOUT_MS);
+              else transaction.onerror?.call(transaction, new Event('error'));
+            });
+            return transaction;
+          },
+          close: () => { closes++; },
+        } as unknown as IDBDatabase;
+        const request = { result: database } as IDBOpenDBRequest;
+        const open = globalThis.indexedDB.open.bind(globalThis.indexedDB);
+        t.mock.timers.enable({ apis: ['setTimeout'] });
+        t.mock.method(globalThis.indexedDB, 'open', (name: string, version?: number) => {
+          if (name !== `${namespace}:chat`) return open(name, version);
+          // A peer commits after the initial empty-directory read, before migration settles.
+          if (peerCommitted) for (const [key, value] of records) idb.databases.get(`${namespace}:profiles`)!.set(key, structuredClone(value));
+          if (failure === 'throw') throw new Error('synthetic legacy open failure');
+          queueMicrotask(() => {
+            if (failure === 'timeout') t.mock.timers.tick(IDB_OPEN_TIMEOUT_MS);
+            else if (failure === 'blocked') request.onblocked?.call(request, new Event('blocked') as IDBVersionChangeEvent);
+            else request.onsuccess?.call(request, new Event('success'));
+          });
+          return request;
+        });
+        const manager = await store(t, namespace);
+        assert.equal(manager.persistenceWarning, false);
+        if (peerCommitted) assert.deepEqual(manager.profiles, [peer]);
+        else {
+          assert.equal(manager.listProfiles().length, 1);
+          assert.equal(manager.activeProfile.name, 'Miru');
+          await assert.rejects(manager.restore(fullBackup()), /storage limit/u, 'unknown legacy contents must not authorize bootstrap replacement');
+        }
+        const id = manager.activeProfileId;
+        await manager.update(id, { name: 'Persisted after migration failure' });
+        await manager.storage(id).saveEntries([entry('new-after-failure')], ['new-after-failure']);
+        const reopened = await store(t, namespace);
+        assert.equal(reopened.activeProfileId, id);
+        assert.equal(reopened.profileInfo(id)!.name, 'Persisted after migration failure');
+        assert.equal(reopened.sourceText(id, 'new-after-failure'), 'new-after-failure');
+        if (peerCommitted) {
+          assert.equal(reopened.sourceText(id, 'peer-entry'), 'peer-entry');
+          assert.deepEqual(reopened.activeProfile.memories, peer.memories);
+        }
+        assert.equal(reopened.persistenceWarning, false);
+        assert.deepEqual(legacy.get('entries'), [entry('preserved-legacy')]);
+        if (failure === 'blocked' || failure === 'timeout') {
+          request.onsuccess?.call(request, new Event('success'));
+          assert.equal(closes, 1, 'close a late legacy connection');
+        } else if (failure.startsWith('read')) assert.equal(closes, 1, 'close a failed legacy read connection');
+        assert.equal(manager.persistenceWarning, false);
+      });
+    }
+  }
+
   it('sanitizes current full text despite mutation masks without overwriting peer edits or crossing a clear barrier', async (t) => {
     installChatIndexedDB(t);
     const manager = await store(t, 'sanitize-current-archive');
@@ -591,6 +723,48 @@ describe('full-archive sanitation and tolerant legacy migration', () => {
 });
 
 describe('verified pristine bootstrap capacity', () => {
+  for (const persist of [false, true]) {
+    it(`keeps empty and unchanged saves pristine for the full first restore with persistence ${persist}`, async (t) => {
+      const idb = installChatIndexedDB(t);
+      const figure = JSON.parse(await readFile(new URL('../figures/miru.json', import.meta.url), 'utf8')) as Figure;
+      const namespace = `no-op-save-${persist}`;
+      const manager = new BrowserProfileStore(namespace, persist); t.after(() => manager.close());
+      await manager.initialize({ figure });
+      const bootstrap = manager.activeProfileId;
+      const before = manager.activeProfile;
+      const persisted = structuredClone(idb.databases.get(`${namespace}:profiles`));
+      t.mock.method(Date, 'now', () => before.updatedAt + 1_000);
+      for (const patch of [
+        {},
+        { name: ` ${before.name} `, personality: ' ', useMemories: true, autoRemember: false },
+        { figure: structuredClone(figure) },
+      ]) {
+        await manager.update(bootstrap, patch);
+        assert.deepEqual(manager.activeProfile, before);
+        assert.deepEqual(idb.databases.get(`${namespace}:profiles`), persisted);
+        if (persist) assert.deepEqual(idb.writes.at(-1)!.keys, []);
+      }
+      await manager.restore(fullBackup());
+      assert.equal(manager.listProfiles().length, PROFILE_LIMITS.profiles);
+      assert.equal(manager.profileInfo(bootstrap), undefined);
+      assert.equal(manager.persistenceWarning, false);
+    });
+  }
+
+  it('validates no-op owners and compares unchanged values against the current peer record', async (t) => {
+    installChatIndexedDB(t);
+    const manager = await store(t, 'no-op-owner');
+    const id = manager.activeProfileId;
+    const peer = await store(t, 'no-op-owner');
+    await peer.update(id, { name: 'Peer edit' });
+    await manager.update(id, { name: 'Miru' });
+    assert.equal((await store(t, 'no-op-owner')).profileInfo(id)!.name, 'Miru');
+    await peer.create({ name: 'Retained' }); await peer.remove(id);
+    await assert.rejects(manager.update(id, {}), /no longer exists/u);
+    await assert.rejects(manager.update(id, { name: 'Miru' }), /no longer exists/u);
+    assert.equal(manager.persistenceWarning, false);
+  });
+
   it('atomically replaces an untouched bootstrap when restoring a valid 100-profile file', async (t) => {
     const idb = installChatIndexedDB(t);
     const manager = await store(t, 'full-restore');

@@ -7,6 +7,13 @@ import { PROFILE_LIMITS } from './limits.ts';
 
 const HISTORY_PREVIEW_CHARS = 4_000;
 
+function scheduleDownloadRevocation(url: string) {
+  // Keep downloads available for large files and save dialogs, even after iframe teardown.
+  // The module realm's timer retains only the URL, independently of management's lifetime.
+  const timer = setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  (timer as { unref?: () => void }).unref?.();
+}
+
 const COPY = {
   en: {
     profile: 'Profile', profiles: 'Profiles', memory: 'Memory', history: 'History', connection: 'Connection', data: 'Data',
@@ -179,7 +186,6 @@ export function createManagement(options: Options) {
   const views = new Map<string, ViewState>();
   const fieldBases = new WeakMap<Control, string>();
   const locked = new Map<Disableable, boolean>();
-  const downloads = new Map<ReturnType<typeof setTimeout>, string>();
   let tab: Tab = 'connection';
   let boundProfileId = '';
   let visible = false;
@@ -638,9 +644,7 @@ export function createManagement(options: Options) {
   function download(text: string, name: string, type = 'application/json') {
     if (destroyed) return;
     const blob = new Blob([text], { type }); const url = URL.createObjectURL(blob);
-    // Use the module's realm: an iframe timer disappears when its document is removed.
-    const timer = setTimeout(() => { URL.revokeObjectURL(url); downloads.delete(timer); }, 1_000);
-    downloads.set(timer, url);
+    scheduleDownloadRevocation(url);
     const link = el('a'); link.href = url; link.download = name; root.append(link);
     try { link.click(); } finally { link.remove(); }
   }
@@ -713,8 +717,6 @@ export function createManagement(options: Options) {
     focus() { (page.querySelector<HTMLElement>('input,textarea,select,button') ?? selector).focus(); },
     destroy() {
       destroyed = true; releaseBusy(); views.clear();
-      for (const [timer, url] of downloads) { clearTimeout(timer); URL.revokeObjectURL(url); }
-      downloads.clear();
     },
   };
 }

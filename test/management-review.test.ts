@@ -447,24 +447,31 @@ describe('management custom figures and authoritative exports', () => {
     assert.equal(ui.store.profileInfo(ui.store.activeProfileId)!.figure, url);
   });
 
-  for (const cleanup of ['timer', 'destroy'] as const) {
-    it(`revokes every export URL when its document disappears (${cleanup})`, async (t) => {
+  for (const cleanup of ['iframe', 'management', 'both'] as const) {
+    it(`keeps C22 export URLs usable for 60 seconds then revokes them after ${cleanup} destruction`, async (t) => {
       installChatIndexedDB(t);
       const ui = await mount(t); ui.tab('data');
-      const revoked: string[] = []; let created = 0;
-      t.mock.method(URL, 'createObjectURL', () => `blob:export-${++created}`);
-      t.mock.method(URL, 'revokeObjectURL', (url: string) => { revoked.push(url); });
+      const created: string[] = []; const revoked: string[] = [];
+      const createObjectURL = URL.createObjectURL.bind(URL); const revokeObjectURL = URL.revokeObjectURL.bind(URL);
+      t.mock.method(URL, 'createObjectURL', (blob: Blob) => { const url = createObjectURL(blob); created.push(url); return url; });
+      t.mock.method(URL, 'revokeObjectURL', (url: string) => { revoked.push(url); revokeObjectURL(url); });
+      t.after(() => { for (const url of created) revokeObjectURL(url); });
       ui.root.addEventListener('click', (event) => { if ((event.target as Element).closest('a[download]')) event.preventDefault(); });
       t.mock.timers.enable({ apis: ['setTimeout'] });
       // A child realm's timers are canceled by iframe teardown; downloads must not use them.
       t.mock.method(ui.document.defaultView!, 'setTimeout', () => { throw new Error('Document timer cannot own export cleanup'); });
       ui.click('Download memory JSON'); await flush(); ui.click('Download memory Markdown'); await flush();
-      assert.equal(created, 2); assert.deepEqual(revoked, []);
-      if (cleanup === 'destroy') ui.management.destroy(); else { await ui.window.happyDOM.abort(); ui.window.close(); }
-      if (cleanup === 'destroy') assert.deepEqual(revoked, ['blob:export-1', 'blob:export-2'], 'destroy revokes pending URLs immediately');
-      t.mock.timers.tick(1_000);
-      assert.deepEqual(revoked, ['blob:export-1', 'blob:export-2'], 'parent timer survives document destruction without leaking or revoking twice');
-      ui.management.destroy(); t.mock.timers.tick(1_000); assert.equal(revoked.length, 2);
+      assert.equal(created.length, 2); assert.deepEqual(revoked, []);
+      const contents = await Promise.all(created.map(async (url) => (await fetch(url)).text()));
+      if (cleanup !== 'iframe') ui.management.destroy();
+      if (cleanup !== 'management') { await ui.window.happyDOM.abort(); ui.window.close(); }
+      t.mock.timers.tick(59_999);
+      assert.deepEqual(revoked, [], 'teardown must not shorten the download retention period');
+      assert.deepEqual(await Promise.all(created.map(async (url) => (await fetch(url)).text())), contents, 'download URLs still serve their contents during retention');
+      t.mock.timers.tick(1);
+      assert.deepEqual(revoked, created, 'module timers revoke every URL after retention despite teardown');
+      for (const url of created) await assert.rejects(fetch(url), 'revoked URLs no longer serve downloads');
+      ui.management.destroy(); t.mock.timers.tick(60_000); assert.equal(revoked.length, 2, 'URLs are revoked only once');
     });
   }
 
