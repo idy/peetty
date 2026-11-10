@@ -74,7 +74,7 @@ export function buildChatView(panel: HTMLElement, copy: () => ChatCopy): { trans
   const field = (key: TextKey, input: HTMLElement) => el('label', 'pc-field', {}, el('span', '', {}, text(key)), input);
 
   const header = el('header', 'pc-header', {},
-    el('div', 'pc-mark', {}, icon('spark', document)),
+    el('div', 'pc-avatar', { 'aria-hidden': 'true' }),
     el('div', 'pc-heading', {}, el('h2', 'pc-name'), el('div', 'pc-status')),
     iconButton('pc-icon pc-settings', 'settings', 'settings'),
     iconButton('pc-icon pc-close', 'close', 'close'),
@@ -96,6 +96,7 @@ export function buildChatView(panel: HTMLElement, copy: () => ChatCopy): { trans
       button('pc-small pc-magpie', 'magpie'),
       el('p', 'pc-note pc-magpie-note', { hidden: true }, text('magpieHint'), document.createTextNode(' '), el('code', 'pc-magpie-origin'), el('br'), text('magpieAuth')),
     ),
+    field('provider', el('input', 'pc-input', { name: 'provider', maxlength: 200, placeholder: 'OpenAI / Magpie / …', autocomplete: 'off' })),
     field('url', el('input', 'pc-input', { name: 'url', type: 'url', placeholder: 'https://api.example.com/v1', required: true, autocomplete: 'off', spellcheck: 'false' })),
     el('label', 'pc-field', {}, el('span', 'pc-key-label'),
       el('div', 'pc-key', {}, keyInput, el('button', 'pc-show-key', { type: 'button' }))),
@@ -116,7 +117,7 @@ export function buildChatView(panel: HTMLElement, copy: () => ChatCopy): { trans
     header,
     el('p', 'pc-storage', { hidden: true }, text('storage')),
     el('div', 'pc-content', {}, setup,
-      el('div', 'pc-empty', {}, el('h3', '', {}, text('empty')), el('p', '', {}, text('emptyBody'))),
+      el('div', 'pc-empty', {}, el('div', 'pc-hero', { 'aria-hidden': 'true' }), el('h3', '', {}, text('empty')), el('p', '', {}, text('emptyBody'))),
       labelled(el('div', 'pc-messages', { role: 'log', 'aria-live': 'off' }), 'chat')),
     el('p', 'pc-error', { role: 'alert', hidden: true }),
     el('div', 'pc-tools', {}, el('span', 'pc-activity'), button('pc-link pc-clear', 'clear'),

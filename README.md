@@ -6,14 +6,14 @@ Peetty is an open-source, local-first browser pet. The idea is simple: a small c
 
 Bring your own AI API key, shape its personality, and take its memories with you.
 
-> **Status: early development.** The companion, chat and connection settings work: six animated presets, a JSON figure format, one-script embedding, OpenAI-compatible models and AI-triggered actions. Editable long-term memory and a dedicated management page are planned. Released versions are published to GitHub Packages.
+> **Status: early development.** Six animated presets, one-script embedding, OpenAI-compatible chat, independent Profiles, editable memories and history, and complete backup/restore are available. Released versions are published to GitHub Packages.
 
 ## The experience
 
 - **At home on the page.** Rest on the edges of suitable visible elements, walk around, and occasionally jump to another spot. Keep text and important controls clear, and adapt when the page scrolls or changes.
 - **Easy to reach.** Hover to reveal a small interaction area; click to open a chat window that stays open while you talk.
 - **A little awareness.** Use lightweight, permitted page context to get a rough sense of what you are reading or doing, without needing to understand every action.
-- **A familiar companion.** Keep the same personality, memories, and conversations as you move between websites.
+- **A familiar companion.** Back up your Profiles and restore their personalities, memories, conversations and model connections on another website or device.
 - **Quiet company.** Run movement and idle behavior locally, with configurable activity and interruptions. An AI connection is for conversation, not every animation frame.
 
 ## Chat and model configuration
@@ -44,7 +44,7 @@ const pet = createPeetty({
     name: 'Miru',
     personality: 'A warm, curious companion who keeps replies concise.',
     storageKey: 'my-companion',
-    // persist: false disables saving the connection and conversation.
+    // persist: false keeps all Profile data in memory for this visit.
   },
 });
 await pet.mount();
@@ -60,36 +60,49 @@ pet.closeChat();
 
 Mounting the companion makes no AI requests. Chat, Markdown tokenization and provider code load on demand. Script-tag embeds load the adjacent `chat/` and `chunks/` directories; self-host the complete `dist/` directory, not just `peetty.global.js`.
 
+The chat popup automatically chooses a matching gradient family from the host page's theme colours or visible primary controls. Neutral pages fall back to the character's image colour. It refreshes when opened, when the host's root theme changes, or when the viewport changes; scrolling does not continuously change the palette. Detection reads only local visual styles, not page text or images, and does not make network or model requests. The existing light/dark palettes retain readable contrast.
+
 The chat UI uses a same-origin initial `about:blank` iframe built with DOM APIs, keeping typing and pointer events out of the embedding document's event path, including earlier capture listeners. Escape keeps focus inside that frame until key release, then restores the previous host focus. This is an event boundary; trusted scripts on the same origin can still access the UI and credentials.
 
-Injected connections override saved settings for the current session. SDK `setModel()` calls leave the saved connection intact. Remembering an injected key defaults to off; saving it requires the user to check **Remember my key on this device** and submit the setup form. Invalid `setModel()` replacements reject with a sanitized error and leave the last valid connection intact. Older asynchronous replacements are discarded after destruction or a newer replacement. Optional model headers apply to chat and model discovery only at the configured endpoint. Entering a replacement key overrides conflicting SDK authentication headers; explicitly clearing the key also disables the previous SDK credential callback for that setup connection. Header records must contain strings with valid HTTP names and values; they are normalized before replacing an active model. The setup form offers an explicit **Remember my key on this device** checkbox. Saved settings and conversations use this origin's IndexedDB and fall back to memory when storage is unavailable. Instances sharing a storage key merge message changes transactionally, refresh shared history before each turn, and reject stale writes after history is cleared. Same-origin scripts can access browser-stored credentials: only enter a personal key on a website you trust. Never put a shared production secret in a public bundle, HTML attribute or example. Use a backend proxy when the embedding site supplies credentials for its visitors. `chat: false` disables chat entry points.
+Injected connections override saved settings for the current session. SDK `setModel()` calls leave the saved connection intact. Remembering an injected key defaults to off; saving it requires the user to check **Remember authentication on this device** and submit the setup form. Invalid `setModel()` replacements reject with a sanitized error and leave the last valid connection intact. Older asynchronous replacements are discarded after destruction or a newer replacement. Optional model headers apply to chat and model discovery only at the configured endpoint. Entering a replacement key overrides conflicting SDK authentication headers; explicitly clearing the key also disables the previous SDK credential callback for that setup connection. Header records must contain strings with valid HTTP names and values; they are normalized before replacing an active model. The setup form offers an explicit **Remember authentication on this device** checkbox. Saved settings and conversations use this origin's IndexedDB and fall back to memory when storage is unavailable. Instances sharing a storage key merge message changes transactionally, refresh shared history before each turn, and reject stale writes after history is cleared. Same-origin scripts can access browser-stored credentials: only enter a personal key on a website you trust. Never put a shared production secret in a public bundle, HTML attribute or example. Use a backend proxy when the embedding site supplies credentials for its visitors. `chat: false` disables chat entry points.
 
 Thinking effort is configurable in setup and through `model.effort`: `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. Leave it at **Model default** to send no explicit effort. The selected model and endpoint must support the chosen level; existing request, output and timeout limits still apply.
 
 Assistant replies render lightweight Markdown, including line breaks, lists, quotes, tables, inline code and fenced code blocks. Short speech-bubble replies share that formatting. Rendering builds DOM nodes without HTML string sinks: raw HTML stays literal, remote images stay alt text, and links accept only HTTP(S) destinations with no referrer. User messages and persisted history retain their original text.
 
-Chat supports streaming, stopping a response, clearing history, and model-selected actions (`wave`, `sit`, `lie`, `sleep`, `move`, `idle`). For models without tool-calling support, uncheck **Let the model control companion actions** in setup or inject `model: { ..., tools: false }` to send plain text chat without tools. Requests suppress the embedding page's referrer and omit browser cookies. If a credential callback is still pending when a turn is canceled or fails, its optimistic input is discarded before persistence because the callback's secret is not yet available for redaction. Canceled replies remain in history when safe to save, without a new speech bubble or completion announcement. Pi runs the tool loop; the local companion controls animation and finds safe landing spots. Action tools wait for their animation or clear landing before the next action starts; interrupted moves report failure, and stopping a reply cancels unfinished tools. Model requests have a time limit and a tool-call budget. Ordinary movement never calls the model, and no page text is automatically sent. Automatic long-term memory and proactive conversations are not implemented yet.
+Chat supports streaming, stopping a response, clearing history, and model-selected actions (`wave`, `sit`, `lie`, `sleep`, `move`, `idle`). For models without tool-calling support, uncheck **Let the model control companion actions** in setup or inject `model: { ..., tools: false }` to send plain text chat without tools. Requests suppress the embedding page's referrer and omit browser cookies. If a credential callback is still pending when a turn is canceled or fails, its optimistic input is discarded before persistence because the callback's secret is not yet available for redaction. Canceled replies remain in history when safe to save, without a new speech bubble or completion announcement. Pi runs the tool loop; the local companion controls animation and finds safe landing spots. Action tools wait for their animation or clear landing before the next action starts; interrupted moves report failure, and stopping a reply cancels unfinished tools. Model requests have a time limit and a tool-call budget. Ordinary movement never calls the model, and no page text is automatically sent. Profile settings provide optional model-generated memories through a bounded `remember_fact` tool. This requires tool calling and companion tools to be enabled. Proactive conversations are not implemented.
 
-## Make it yours
+## Profiles and settings
 
-A dedicated management page is planned for:
+Open **Settings** from chat or the companion menu. Choose an existing Profile at the top, or create one in the Profile section. Each Profile has independent character selection, personality, memories, history and model connection. Selecting the same character in two Profiles does not share their data. Changing a Profile's character keeps its memories and history. Switching Profiles stops the previous reply, discards its unsent composer draft and prevents late callbacks from entering the new Profile.
 
 | Area | Controls |
 | --- | --- |
-| Personality | Name, personality prompt, tone, and interaction preferences |
-| AI connection | Provider, endpoint, model, and your own API key |
-| Conversations | Browse, search, edit, and delete conversation history |
-| Memory | Inspect, add, edit, and delete remembered facts and preferences |
-| Page awareness | Control access to page context and disable it for individual websites |
-| Data | Export, import, back up, and clear local data |
+| Profile | Create and switch independent Profiles; edit their names, characters and personalities; delete a Profile after confirmation |
+| Memory | Search, add, edit and delete memories; inspect source messages; toggle recall and optional automatic memory |
+| History | Search, edit and delete conversation messages; expand long-message previews on demand |
+| Connection | Provider name, API endpoint, model, API key, effort and tool preferences |
+| Data | Complete backup/restore, memory JSON import/export and readable memory Markdown download |
+
+Conversation archives are capped at 100,000 entries per Profile. A turn that cannot fit is rejected with an explicit capacity error before calling the model; export or remove history to continue. If another tab fills the archive during a reply, the unsaved turn remains visible with an error instead of disappearing on the next refresh.
+
+Existing connection settings and history migrate automatically into the first Profile. The legacy database is left untouched. Data uses this origin's IndexedDB and the SDK's `chat.storageKey` namespace; `chat.persist: false` keeps it in memory for the visit. No backend, account or automatic cross-site synchronization is required.
 
 ## Memory you can manage
 
-Conversation history, long-term memory, and pet settings are separate parts of the intended data model. You should be able to inspect what Peetty remembers and correct it directly.
+Memories are separate from conversation history and personality. Enabled memories are supplied as a bounded block of user-editable data in model context. Automatic memory is off initially; when enabled, the model may use `remember_fact` to save stable facts explicitly stated in the current message. Old history is not scanned, and known connection credentials are rejected as model-generated memories. Manually edited memories are protected against automatic overwrites. Automatic writes recheck the latest opt-in and source message inside the storage transaction, so another tab's opt-out or source correction takes effect before a fact can be saved. Known authentication values are redacted before memory context is clipped; a per-Profile redaction registry remains in memory across runtime replacements and is cleared when that Profile or panel is removed.
 
-Automatically extracted memories should retain a reference to their source conversation. Editing or deleting history should let you review and update related memories and summaries, so an old belief does not silently outlive its source.
+Memories retain a source message reference and, when available, a source-text snapshot. Editing or deleting a source message leaves its memory available for inspection and correction. The settings interface explicitly asks you to review related memories. Memory imports deduplicate text and remove source IDs that would refer to another Profile.
 
-Portable JSON exports are planned for pet settings, memories, and optional conversation history. API keys are excluded from exports by default.
+## Backup and migration
+
+**Data → Download full backup** produces version 2 `peetty-backup` JSON containing all Profiles, string references or inline character packs, personalities, memories, full stored history, Provider endpoints, model parameters, API keys and connection headers. Remembered connections and session-only overrides are separate records, so an SDK override cannot erase a saved Provider from the backup. Explicit backup resolves independent SDK credential callbacks concurrently; the callback functions themselves cannot be serialized. **The backup contains credentials in plain text. Keep it private.** Ordinary setup saves honor the authentication checkbox for both saved API keys and restored authentication headers. Unchanged non-authentication headers stay with their endpoint when a key is rotated; new SDK headers are not automatically persisted.
+
+**Restore backup** accepts versions 1 and 2, validates the complete file before writing, creates fresh Profile and entry IDs, reconnects memory sources, and selects the restored active Profile. Existing Profiles are preserved; only a verified untouched bootstrap placeholder may be replaced when importing the maximum 100 Profiles into a fresh site. Restored session-only connections retain their original in-memory lifetime; save them with **Remember authentication on this device** to retain them on later visits. Remembered connections remain persisted independently. Restoring a connection does not call its model endpoint. Remote character loading has a 20-second deadline covering both the request and JSON body. An unavailable character leaves settings and data recovery accessible after the load fails. Memory source details retain the original evidence and indicate when the linked history message was edited. Files with unknown versions, invalid values or excessive sizes are rejected without partial imports.
+
+Backup/import files have a 50 MiB limit. This is a file ceiling rather than a total storage quota: archives exceeding it currently cannot be exported as one complete backup. Persistence still uses one IndexedDB record per Profile, so large histories incur whole-record I/O; bounded paging and narrow memory reads avoid extra full-archive copies but do not split that storage record.
+
+**Download memory JSON** and **Import memory JSON** transfer only the current Profile's memories using the `peetty-memories` format. JSON and Markdown downloads wait for queued writes and read the latest committed memories. Imports merge without overwriting existing memories or connections. **Download memory Markdown** provides a readable copy. To migrate to another website or device, download a complete backup there and restore it in the destination's Data settings.
 
 ## Local-first, with clear boundaries
 

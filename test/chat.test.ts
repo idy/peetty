@@ -62,6 +62,53 @@ function heldProvider() {
   return { calls, streamFn, partial, end };
 }
 
+describe('profile memory in model turns', () => {
+  it('includes enabled memories, redacts credentials and saves facts with the current user message as source', async () => {
+    const saved: { text: string; source: string }[] = [];
+    const contexts: TranscriptContext[] = [];
+    let calls = 0;
+    const runtime = new ChatRuntime({
+      model: MODEL,
+      memory: {
+        entries: [{ text: 'Prefers Chinese. secret-user-key' }], enabled: true,
+        remember: async (text, source) => { saved.push({ text, source }); },
+      },
+      _testing: { storage: new MemoryChatStorage(), streamFn: (_model, context) => {
+        contexts.push(structuredClone(context));
+        if (++calls !== 1) return finished(assistant('Remembered.'));
+        const message = assistant('', 'toolUse');
+        message.content = [{ type: 'toolCall', id: 'remember-1', name: 'remember_fact', arguments: { text: 'Likes green tea.' } }];
+        return finished(message);
+      } },
+    });
+    await runtime.send('Remember that I like green tea.');
+    assert.equal(runtime.error, null);
+    assert.match(JSON.stringify(contexts[0]!.messages.filter((entry) => entry.role === 'system')), /Prefers Chinese/);
+    assert.doesNotMatch(JSON.stringify(contexts), /secret-user-key/);
+    assert.deepEqual(saved, [{ text: 'Likes green tea.', source: runtime.entries.find((entry) => entry.role === 'user')!.id }]);
+    runtime.destroy();
+  });
+  it('omits disabled memory and never stores a tool argument containing known credentials', async () => {
+    let saved = false;
+    let context: TranscriptContext | undefined;
+    let calls = 0;
+    const runtime = new ChatRuntime({
+      model: MODEL,
+      memory: { entries: [{ text: 'A disabled private fact' }], enabled: false, remember: async () => { saved = true; } },
+      _testing: { storage: new MemoryChatStorage(), streamFn: (_model, incoming) => {
+        context = incoming;
+        if (++calls !== 1) return finished(assistant('Done.'));
+        const message = assistant('', 'toolUse');
+        message.content = [{ type: 'toolCall', id: 'remember-secret', name: 'remember_fact', arguments: { text: MODEL.apiKey! } }];
+        return finished(message);
+      } },
+    });
+    await runtime.send('Hello');
+    assert.doesNotMatch(JSON.stringify(context?.messages.filter((entry) => entry.role === 'system')), /A disabled private fact/);
+    assert.equal(saved, false); runtime.destroy();
+  });
+});
+
 describe('OpenAI-compatible endpoint setup', () => {
   it('normalizes API roots, preserves custom paths, and rejects URLs carrying credentials', () => {
     assert.equal(normalizeBaseUrl(' https://model.example/// '), 'https://model.example');
@@ -651,6 +698,17 @@ describe('Pi chat streaming and actions', () => {
     assert.equal(runtime.error, null);
     assert.equal(requests[2]?.url, 'https://root.example/chat/completions');
     assert.equal(requests[2]?.headers.get('Authorization'), 'Bearer root-key');
+    await runtime.configure({ id: 'gateway', baseUrl: 'https://gateway.example/v1', headers: { 'cf-aig-authorization': 'Bearer synthetic-gateway-only' } }, false);
+    await runtime.send('Gateway-only authentication');
+    assert.equal(runtime.error, null);
+    assert.equal(requests[3]?.headers.get('cf-aig-authorization'), 'Bearer synthetic-gateway-only');
+    assert.equal(requests[3]?.headers.get('Authorization'), null, 'gateway auth must never enable the sentinel upstream Bearer');
+    await runtime.configure({ id: 'gateway', baseUrl: 'https://gateway.example/v1', headers: {
+      'cf-aig-authorization': 'Bearer synthetic-gateway-only', Authorization: 'Bearer synthetic-explicit-upstream',
+    } }, false);
+    await runtime.send('Explicit upstream authentication');
+    assert.equal(runtime.error, null);
+    assert.equal(requests[4]?.headers.get('Authorization'), 'Bearer synthetic-explicit-upstream');
     runtime.destroy();
   });
 });

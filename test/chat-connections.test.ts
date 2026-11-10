@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { LOCAL_MAGPIE, localMagpieConnection, normalizeModelOptions } from '../src/chat/connections.ts';
+import { connectionIdentity, LOCAL_MAGPIE, localMagpieConnection, normalizeModelOptions, prepareSavedConnection, sameConnection, toStoredConnection } from '../src/chat/connections.ts';
 
 describe('model tool preference validation', () => {
   it('preserves boolean preferences and leaves the default optional', () => {
@@ -57,6 +57,53 @@ describe('model header validation', () => {
         return true;
       });
     }
+  });
+});
+
+describe('shared connection projections', () => {
+  const base = { id: 'model', baseUrl: 'https://api.example/v1', apiKey: 'fixture-connection-key' };
+
+  it('projects only transport data using the explicitly selected key', () => {
+    let calls = 0;
+    const model = { ...base, provider: 'Provider', headers: { 'x-project': 'project' }, tools: false, effort: 'high' as const,
+      getApiKey: () => { calls++; return 'must-not-be-resolved'; }, privateContext: { extra: true } };
+    const snapshot = toStoredConnection(model, undefined);
+    assert.deepEqual(snapshot, { id: base.id, baseUrl: base.baseUrl, provider: 'Provider', headers: { 'x-project': 'project' }, tools: false, effort: 'high' });
+    assert.equal(calls, 0);
+    assert.notEqual(snapshot.headers, model.headers);
+    snapshot.headers!['x-project'] = 'changed';
+    assert.equal(model.headers['x-project'], 'project');
+    assert.equal(toStoredConnection(model, 'selected-key').apiKey, 'selected-key');
+    assert.equal(toStoredConnection(model, '').apiKey, '', 'explicit keyless values retain their representation');
+  });
+
+  it('applies credential lifetime without dropping owned provider headers or retaining new SDK headers', () => {
+    const known = { ...base, headers: { Authorization: 'Bearer old', 'OpenAI-Project': 'project' } };
+    const chosen = { ...base, headers: { 'openai-project': 'project', 'x-sdk-only': 'not-owned' } };
+    const retained = prepareSavedConnection(chosen, known, true);
+    assert.deepEqual(retained.headers, { 'openai-project': 'project' });
+    assert.equal(retained.apiKey, base.apiKey);
+    const forgotten = prepareSavedConnection(known, known, false);
+    assert.deepEqual(forgotten.headers, { 'openai-project': 'project' });
+    assert.equal(forgotten.apiKey, undefined);
+    assert.equal(prepareSavedConnection({ ...chosen, baseUrl: 'https://another.example/v1' }, known).headers, undefined);
+    assert.deepEqual(known.headers, { Authorization: 'Bearer old', 'OpenAI-Project': 'project' });
+  });
+
+  it('uses the same effective identity for comparison and session deduplication', () => {
+    const first = { ...base, headers: { Authorization: 'Bearer token', 'X-Project': 'project' } };
+    const equivalent = { ...base, id: ' model ', baseUrl: `${base.baseUrl}/chat/completions`, tools: true,
+      headers: { 'x-project': ' project ', authorization: 'Bearer token' } };
+    assert.equal(connectionIdentity(first), connectionIdentity(equivalent));
+    assert.equal(sameConnection(first, equivalent), true);
+    assert.equal(sameConnection(first, { ...equivalent, effort: 'high' }), false);
+    assert.notEqual(connectionIdentity(first), connectionIdentity({ ...first, apiKey: 'rotated' }));
+    let calls = 0;
+    assert.equal(sameConnection(first, { ...first, getApiKey: () => { calls++; return base.apiKey; } }), false);
+    assert.equal(calls, 0);
+    assert.equal(sameConnection(first, { ...first, baseUrl: 'invalid' }), false);
+    const invalidEffort = { ...first, effort: NaN as never };
+    assert.equal(sameConnection(invalidEffort, invalidEffort), false);
   });
 });
 

@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import type { TestContext } from 'node:test';
 import type { ChatEntry } from '../../src/chat/types.ts';
 import type { ChatStorage, StoredChat, StoredConnection } from '../../src/chat/store.ts';
@@ -26,51 +27,80 @@ export class MemoryChatStorage implements ChatStorage {
   close(): void { this.closed = true; }
 }
 
-/** Minimal transactional IDB fixture: exercises production open/get/put/commit handling. */
+/** Serializes transactions across connections, stages writes, and discards aborted writes. */
 export function installChatIndexedDB(t: TestContext) {
   const original = Object.getOwnPropertyDescriptor(globalThis, 'indexedDB');
   const databases = new Map<string, Map<string, unknown>>();
+  const tails = new Map<string, Promise<void>>();
   const opened: string[] = [];
-  let failWrites = false;
+  const writes: { database: string; keys: string[] }[] = [];
+  let failure: 'none' | 'open' | 'write' | 'put' | 'commit' = 'none';
   const factory = {
     open(name: string) {
+      if (failure === 'open') throw new Error('fixture open failure');
       opened.push(name);
-      const request = { result: undefined, onupgradeneeded: undefined, onsuccess: undefined } as unknown as IDBOpenDBRequest;
+      const request = {} as IDBOpenDBRequest;
       queueMicrotask(() => {
         const fresh = !databases.has(name);
         const records = databases.get(name) ?? new Map<string, unknown>();
         databases.set(name, records);
         const db = {
           objectStoreNames: { contains: () => !fresh },
-          createObjectStore() {},
-          close() {},
-          transaction(_name: string, mode: IDBTransactionMode) {
+          createObjectStore() {}, close() {},
+          transaction(_store: string, mode: IDBTransactionMode) {
             const operations: (() => void)[] = [];
+            const dirty: string[] = [];
+            let staged: Map<string, unknown>;
+            let aborted = false;
             const tx = {
-              oncomplete: undefined, onabort: undefined, onerror: undefined,
-              abort() { tx.onabort?.(new Event('abort')); },
+              oncomplete: undefined, onerror: undefined, onabort: undefined,
+              abort() { aborted = true; tx.onabort?.call(tx, new Event('abort')); },
               objectStore() {
                 return {
                   get(key: string) {
-                    const get = {} as IDBRequest;
+                    const request = {} as IDBRequest;
                     operations.push(() => {
-                      Object.defineProperty(get, 'result', { value: structuredClone(records.get(key)) });
-                      get.onsuccess?.call(get, new Event('success'));
+                      Object.defineProperty(request, 'result', { value: structuredClone(staged.get(key)) });
+                      request.onsuccess?.call(request, new Event('success'));
                     });
-                    return get;
+                    return request;
                   },
                   put(value: unknown, key: string) {
-                    operations.push(() => { records.set(key, structuredClone(value)); });
+                    if (failure === 'put') throw new Error('fixture write failure');
+                    assert.equal(mode, 'readwrite');
+                    const copy = structuredClone(value);
+                    operations.push(() => { staged.set(key, copy); dirty.push(key); });
+                    return {} as IDBRequest;
+                  },
+                  delete(key: string) {
+                    assert.equal(mode, 'readwrite');
+                    operations.push(() => { staged.delete(key); dirty.push(key); });
                     return {} as IDBRequest;
                   },
                 };
               },
             } as unknown as IDBTransaction;
-            queueMicrotask(() => {
-              if (mode === 'readwrite' && failWrites) { tx.onerror?.call(tx, new Event('error')); return; }
-              for (const operation of operations) operation();
+            const previous = tails.get(name) ?? Promise.resolve();
+            const current = previous.then(() => {
+              staged = structuredClone(records);
+              if (mode === 'readwrite' && failure === 'write') {
+                tx.onerror?.call(tx, new Event('error'));
+                return;
+              }
+              for (const operation of operations) { if (aborted) return; operation(); }
+              if (aborted) return;
+              if (mode === 'readwrite' && failure === 'commit') {
+                tx.onabort?.call(tx, new Event('abort'));
+                return;
+              }
+              if (mode === 'readwrite') {
+                records.clear();
+                for (const [key, value] of staged) records.set(key, value);
+                writes.push({ database: name, keys: dirty });
+              }
               tx.oncomplete?.call(tx, new Event('complete'));
             });
+            tails.set(name, current);
             return tx;
           },
         } as unknown as IDBDatabase;
@@ -86,5 +116,9 @@ export function installChatIndexedDB(t: TestContext) {
     if (original) Object.defineProperty(globalThis, 'indexedDB', original);
     else Reflect.deleteProperty(globalThis, 'indexedDB');
   });
-  return { opened, databases, failWrites: () => { failWrites = true; } };
+  return {
+    opened, databases, writes,
+    fail: (value: typeof failure) => { failure = value; },
+    failWrites: () => { failure = 'write'; },
+  };
 }

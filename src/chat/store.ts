@@ -1,27 +1,52 @@
-import type { ChatEntry, PeettyReasoningEffort } from './types.ts';
-import { isReasoningEffort } from './connections.ts';
+import { COMPANION_ACTIONS, type ChatEntry, type PeettyReasoningEffort } from './types.ts';
+import { normalizeModelOptions, prepareSavedConnection } from './connections.ts';
+import { applyEntryChanges, entryChanges } from './history.ts';
+import { openStateDatabase, stateTransaction } from './idb.ts';
 
-/** Only an explicitly remembered setup key may be written here. Never store SDK headers. */
+/** Setup saves only opted-in keys. Explicit complete backups may also restore provider headers. */
 export interface StoredConnection {
   id: string;
   baseUrl: string;
+  provider?: string;
+  headers?: Record<string, string>;
   apiKey?: string;
   tools?: boolean;
   effort?: PeettyReasoningEffort;
 }
 
+export interface StoredSessionConnection {
+  connection: StoredConnection;
+  rememberKey: boolean;
+}
+
 export interface StoredChat {
   connection?: StoredConnection;
+  /** Restored ephemeral connections remain in this visit's memory; the last one is active. */
+  sessionConnections?: StoredSessionConnection[];
   entries: ChatEntry[];
+}
+
+/** Domain failures must not be mistaken for unavailable browser persistence. */
+export class ChatStorageError extends Error {
+  readonly code: 'missing-profile' | 'capacity';
+  constructor(code: 'missing-profile' | 'capacity', message: string) { super(message); this.code = code; this.name = 'ChatStorageError'; }
+}
+
+export interface HistoryProjection {
+  /** Register complete saved credentials before any history text is clipped. */
+  registerConnections?: (stored: Omit<StoredChat, 'entries'>) => void;
+  sanitizeText?: (text: string) => string;
 }
 
 /** Small storage seam for hosts and network-free tests. */
 export interface ChatStorage {
   readonly persistenceWarning: boolean;
-  load(): Promise<StoredChat>;
-  saveConnection(connection: StoredConnection): Promise<void>;
-  /** Merge changes since this client's last load/save; omission does not delete entries. */
-  saveEntries(entries: readonly ChatEntry[]): Promise<void>;
+  load(projection?: HistoryProjection): Promise<StoredChat>;
+  saveConnection(connection: StoredConnection, options?: { rememberCredentials: boolean }): Promise<StoredConnection | void>;
+  /** Merge client changes, then sanitize full current text independently of the mutation mask. */
+  saveEntries(entries: readonly ChatEntry[], changedIds?: readonly string[], sanitizeText?: (text: string) => string): Promise<void>;
+  /** Reject a turn before it is appended or sent if the complete archive cannot retain it. */
+  ensureCapacity?(additionalEntries: number): Promise<void>;
   /** Clear history and invalidate writes from clients that have not loaded the new history. */
   clearEntries(): Promise<void>;
   close(): void;
@@ -30,10 +55,10 @@ export interface ChatStorage {
 const MAX_ENTRIES = 200;
 const MAX_HISTORY_CHARS = 240_000;
 const MAX_ENTRY_CHARS = 16_000;
-const ACTIONS = new Set(['wave', 'sit', 'lie', 'sleep', 'move', 'idle']);
+const ACTIONS = new Set<string>(COMPANION_ACTIONS);
 
 /** Validate restored data and put a ceiling on local history, independent of model context. */
-export function boundedEntries(value: unknown): ChatEntry[] {
+export function boundedEntries(value: unknown, sanitizeText: (text: string) => string = (text) => text): ChatEntry[] {
   if (!Array.isArray(value)) return [];
   const entries: ChatEntry[] = [];
   let remaining = MAX_HISTORY_CHARS;
@@ -43,7 +68,7 @@ export function boundedEntries(value: unknown): ChatEntry[] {
       typeof entry.text !== 'string' || !Number.isFinite(entry.createdAt) ||
       (entry.role !== 'user' && entry.role !== 'assistant' && entry.role !== 'action')) continue;
     if (entry.role === 'action' && !ACTIONS.has(entry.text)) continue;
-    const text = entry.text.slice(0, Math.min(MAX_ENTRY_CHARS, remaining));
+    const text = sanitizeText(entry.text).slice(0, Math.min(MAX_ENTRY_CHARS, remaining));
     if (!text.trim()) continue;
     entries.push({ id: entry.id.slice(0, 200), role: entry.role, text, createdAt: entry.createdAt! });
     remaining -= text.length;
@@ -52,41 +77,18 @@ export function boundedEntries(value: unknown): ChatEntry[] {
 }
 
 function connectionFrom(value: unknown): StoredConnection | undefined {
-  if (!value || typeof value !== 'object') return;
-  const connection = value as Partial<StoredConnection>;
-  if (typeof connection.id !== 'string' || !connection.id.trim() || typeof connection.baseUrl !== 'string') return;
-  if (connection.tools !== undefined && typeof connection.tools !== 'boolean') return;
-  if (connection.effort !== undefined && !isReasoningEffort(connection.effort)) return;
-  return {
-    id: connection.id.slice(0, 200), baseUrl: connection.baseUrl,
-    ...(typeof connection.apiKey === 'string' && connection.apiKey ? { apiKey: connection.apiKey } : {}),
-    ...(connection.tools !== undefined ? { tools: connection.tools } : {}),
-    ...(connection.effort !== undefined ? { effort: connection.effort } : {}),
-  };
-}
-
-interface EntryChange { entry: ChatEntry; added: boolean }
-
-function entryChanges(previous: readonly ChatEntry[], next: readonly ChatEntry[]): EntryChange[] {
-  const known = new Map(previous.map((entry) => [entry.id, entry]));
-  return next.flatMap((entry) => {
-    const old = known.get(entry.id);
-    return old && old.role === entry.role && old.text === entry.text && old.createdAt === entry.createdAt
-      ? [] : [{ entry, added: !old }];
-  });
-}
-
-function mergeEntries(current: readonly ChatEntry[], changes: readonly EntryChange[]): ChatEntry[] {
-  const pending = new Map(changes.map((change) => [change.entry.id, change]));
-  const merged = current.map((entry) => {
-    const change = pending.get(entry.id);
-    pending.delete(entry.id);
-    return change?.entry ?? entry;
-  });
-  // Keep committed order, update entries in place, and append new entries in their local order.
-  // An edit to an entry already evicted by the bounds must not reinsert it at the end.
-  for (const { entry, added } of pending.values()) if (added) merged.push(entry);
-  return boundedEntries(merged);
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+  const connection = value as StoredConnection;
+  try {
+    return normalizeModelOptions({
+      id: connection.id, baseUrl: connection.baseUrl,
+      ...(connection.provider !== undefined ? { provider: connection.provider } : {}),
+      ...(connection.apiKey !== undefined ? { apiKey: connection.apiKey } : {}),
+      ...(connection.headers !== undefined ? { headers: connection.headers } : {}),
+      ...(connection.tools !== undefined ? { tools: connection.tools } : {}),
+      ...(connection.effort !== undefined ? { effort: connection.effort } : {}),
+    });
+  } catch { return; }
 }
 
 /** IndexedDB failures switch this instance to memory; no localStorage key fallback. */
@@ -121,31 +123,10 @@ export class BrowserChatStore implements ChatStorage {
     if (!this.persist || this.failed || this.closed) return Promise.resolve(undefined);
     if (this.db) return Promise.resolve(this.db);
     if (this.opening) return this.opening;
-    this.opening = new Promise((resolve) => {
-      let settled = false;
-      const finish = (db?: IDBDatabase) => {
-        if (settled) { db?.close(); return; }
-        settled = true;
-        clearTimeout(timer);
-        if (this.closed) { db?.close(); resolve(undefined); return; }
-        if (!db) this.fail();
-        else this.db = db;
-        resolve(db);
-      };
-      const timer = setTimeout(() => finish(), 2_000);
-      try {
-        const request = globalThis.indexedDB.open(`${this.namespace}:chat`, 1);
-        request.onupgradeneeded = () => {
-          if (!request.result.objectStoreNames.contains('state')) request.result.createObjectStore('state');
-        };
-        request.onsuccess = () => {
-          const db = request.result;
-          db.onversionchange = () => { db.close(); this.fail(); };
-          finish(db);
-        };
-        request.onerror = () => finish();
-        request.onblocked = () => finish();
-      } catch { finish(); }
+    this.opening = openStateDatabase(`${this.namespace}:chat`, {
+      isClosed: () => this.closed,
+      onFailure: () => this.fail(),
+      onReady: (db) => { this.db = db; },
     });
     return this.opening;
   }
@@ -153,34 +134,16 @@ export class BrowserChatStore implements ChatStorage {
   private async transact(write: boolean, action: (store: IDBObjectStore) => void): Promise<boolean> {
     const db = await this.open();
     if (!db || this.closed) return false;
-    return new Promise((resolve) => {
-      let settled = false;
-      let transaction: IDBTransaction | undefined;
-      const finish = (ok: boolean) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        if (!ok && !this.closed) this.fail();
-        resolve(ok);
-      };
-      const timer = setTimeout(() => {
-        try { transaction?.abort(); } catch { /* Already finished. */ }
-        finish(false);
-      }, 2_000);
-      try {
-        transaction = db.transaction('state', write ? 'readwrite' : 'readonly');
-        transaction.oncomplete = () => finish(true);
-        transaction.onerror = () => finish(false);
-        transaction.onabort = () => finish(false);
-        action(transaction.objectStore('state'));
-      } catch { finish(false); }
-    });
+    const ok = await stateTransaction(db, write, action);
+    if (!ok && !this.closed) this.fail();
+    return ok;
   }
 
-  load(): Promise<StoredChat> {
+  load(projection?: HistoryProjection): Promise<StoredChat> {
     if (this.closing) return Promise.resolve(structuredClone(this.state));
     return this.enqueue(async () => {
       const restored: StoredChat = { entries: [] };
+      let rawEntries: unknown;
       let epoch = '';
       const ok = await this.transact(false, (store) => {
         const connection = store.get('connection');
@@ -189,11 +152,15 @@ export class BrowserChatStore implements ChatStorage {
           if (value) restored.connection = value;
         };
         const entries = store.get('entries');
-        entries.onsuccess = () => { restored.entries = boundedEntries(entries.result); };
+        entries.onsuccess = () => { rawEntries = entries.result; };
         const barrier = store.get('entriesEpoch');
         barrier.onsuccess = () => { if (typeof barrier.result === 'string') epoch = barrier.result; };
       });
-      if (ok) { this.state = restored; this.epoch = epoch; }
+      projection?.registerConnections?.(ok ? restored : this.state);
+      if (ok) {
+        restored.entries = boundedEntries(rawEntries, projection?.sanitizeText);
+        this.state = restored; this.epoch = epoch;
+      } else this.state.entries = boundedEntries(this.state.entries, projection?.sanitizeText);
       this.snapshot = structuredClone(this.state.entries);
       return structuredClone(this.state);
     });
@@ -205,22 +172,32 @@ export class BrowserChatStore implements ChatStorage {
     return operation;
   }
 
-  saveConnection(connection: StoredConnection): Promise<void> {
+  saveConnection(connection: StoredConnection, options?: { rememberCredentials: boolean }): Promise<StoredConnection | void> {
     const copy = connectionFrom(connection);
     if (!copy || this.closing) return Promise.resolve();
     return this.enqueue(async () => {
-      this.state.connection = copy;
-      await this.transact(true, (store) => { store.put(copy, 'connection'); });
+      const retained = (known?: StoredConnection) => prepareSavedConnection(copy, known, options?.rememberCredentials);
+      let saved = retained(this.state.connection);
+      await this.transact(true, (store) => {
+        const request = store.get('connection');
+        request.onsuccess = () => {
+          saved = retained(connectionFrom(request.result));
+          store.put(saved, 'connection');
+        };
+      });
+      this.state.connection = saved;
+      return structuredClone(saved);
     });
   }
 
-  saveEntries(entries: readonly ChatEntry[]): Promise<void> {
+  saveEntries(entries: readonly ChatEntry[], changedIds?: readonly string[], sanitizeText?: (text: string) => string): Promise<void> {
     if (this.closing) return Promise.resolve();
-    const copy = boundedEntries(entries);
+    const copy = boundedEntries(entries, sanitizeText);
+    const selected = changedIds === undefined ? undefined : [...changedIds];
     return this.enqueue(async () => {
-      const changes = entryChanges(this.snapshot, copy);
+      const changes = entryChanges(this.snapshot, copy, selected);
       this.snapshot = copy;
-      let merged = mergeEntries(this.state.entries, changes);
+      let merged = boundedEntries(applyEntryChanges(this.state.entries, changes), sanitizeText);
       let epoch = this.epoch;
       const ok = await this.transact(true, (store) => {
         const barrier = store.get('entriesEpoch');
@@ -228,10 +205,10 @@ export class BrowserChatStore implements ChatStorage {
           const currentEpoch = typeof barrier.result === 'string' ? barrier.result : '';
           const entries = store.get('entries');
           entries.onsuccess = () => {
-            const current = boundedEntries(entries.result);
+            const current = boundedEntries(entries.result, sanitizeText);
             if (epoch === undefined || epoch === currentEpoch) {
               epoch = currentEpoch;
-              merged = mergeEntries(current, changes);
+              merged = boundedEntries(applyEntryChanges(current, changes));
               store.put(merged, 'entries');
             } else {
               // Keep the old epoch until load(): late replies and repeated stale saves
