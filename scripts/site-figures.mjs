@@ -11,8 +11,8 @@ export async function writeSiteFigures(source, target, catalogBase) {
   let output = index;
   if (catalogBase !== undefined) {
     const base = new URL(catalogBase);
-    if (!['http:', 'https:'].includes(base.protocol) || !base.pathname.endsWith('/')) {
-      throw new Error('Catalog base must be an HTTP(S) directory URL');
+    if (!['http:', 'https:'].includes(base.protocol) || !base.pathname.endsWith('/') || base.username || base.password) {
+      throw new Error('Catalog base must be an HTTP(S) directory URL without credentials');
     }
     output = { ...index, figures: index.figures.map(entry => ({
       ...entry, url: new URL(entry.url, base).href,

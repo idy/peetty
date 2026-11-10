@@ -61,6 +61,21 @@ describe('browser distribution compatibility', () => {
     });
   }
 
+  it('rejects credentials in catalog bases before writing a public index', async (t) => {
+    const { writeSiteFigures } = await import(new URL('../scripts/site-figures.mjs', import.meta.url).href);
+    for (const [username, password] of [['publisher', ''], ['', 'example-password'], ['publisher', 'example-password']]) {
+      const site = await mkdtemp(join(tmpdir(), 'peetty-catalog-auth-'));
+      t.after(() => rm(site, { recursive: true, force: true }));
+      const base = new URL('https://mirror.example/figures/');
+      base.username = username!;
+      base.password = password!;
+      await assert.rejects(writeSiteFigures(join(root, 'figures'), site, base.href), {
+        message: 'Catalog base must be an HTTP(S) directory URL without credentials',
+      });
+      await assert.rejects(readFile(join(site, 'index.json')), { code: 'ENOENT' });
+    }
+  });
+
   it('ships browser entries in production while preserving the legacy website catalog', async (t) => {
     const site = await mkdtemp(join(tmpdir(), 'peetty-site-'));
     t.after(() => rm(site, { recursive: true, force: true }));
