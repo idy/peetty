@@ -8,7 +8,8 @@ import { execFileSync } from 'node:child_process';
 import { runInNewContext } from 'node:vm';
 import { describe, it } from 'node:test';
 import { Window } from 'happy-dom';
-import { PRESETS, FIGURE_CATALOG } from '../src/presets.ts';
+import { PRESETS, FIGURE_CATALOG, listFigures } from '../src/presets.ts';
+import { stubGlobals } from './helpers/stubs.ts';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const { global, browserGlobal } = await import(new URL('../scripts/build-options.mjs', import.meta.url).href);
@@ -38,10 +39,32 @@ describe('browser distribution compatibility', () => {
     });
   }
 
+  for (const catalogBase of [undefined, 'https://mirror.example/companion/figures/']) {
+    it(`keeps catalog selections on ${catalogBase ? 'a configured mirror' : 'the local origin'} without production rewrites`, async (t) => {
+      const site = await mkdtemp(join(tmpdir(), 'peetty-site-origin-'));
+      t.after(() => rm(site, { recursive: true, force: true }));
+      t.after(stubGlobals({ document: { baseURI: 'http://localhost:8080/page/' } }));
+      const args = [join(root, 'scripts/site.mjs'), site];
+      if (catalogBase) args.push('--catalog-base', catalogBase);
+      execFileSync(process.execPath, args, { cwd: root });
+      const index = JSON.parse(await readFile(join(site, 'figures/index.json'), 'utf8'));
+      t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify(index)));
+      const base = catalogBase ?? 'http://localhost:8080/figures/';
+      const entries = await listFigures(base);
+      assert.equal(entries.length, index.figures.length);
+      assert.ok(entries.some(entry => entry.id === 'shiori'));
+      for (const entry of entries) {
+        assert.equal(entry.url, new URL(`${entry.id}.json`, base).href);
+        assert.equal(entry.url.includes('peetty.idy.dev'), false);
+      }
+      if (!catalogBase) assert.ok(index.figures.every((entry: { id: string; url: string }) => entry.url === `${entry.id}.json`));
+    });
+  }
+
   it('ships browser entries in production while preserving the legacy website catalog', async (t) => {
     const site = await mkdtemp(join(tmpdir(), 'peetty-site-'));
     t.after(() => rm(site, { recursive: true, force: true }));
-    execFileSync(process.execPath, [join(root, 'scripts/site.mjs'), site], { cwd: root });
+    execFileSync(process.execPath, [join(root, 'scripts/site.mjs'), site, '--catalog-base', 'https://peetty.idy.dev/figures/'], { cwd: root });
     for (const entry of ['index.js', 'peetty.global.js', 'chat/panel.js', 'THIRD_PARTY_NOTICES.txt']) {
       assert.equal(await readFile(join(site, 'sdk', entry), 'utf8'), await readFile(join(root, 'cdn', entry), 'utf8'));
     }

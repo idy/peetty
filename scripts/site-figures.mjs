@@ -1,15 +1,22 @@
-// Keep the historical website endpoint readable by SDK releases before 0.3.1.
+// Portable by default; official deployments can explicitly retain legacy URLs.
 import { cp, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-export async function writeSiteFigures(source, target) {
+export async function writeSiteFigures(source, target, catalogBase) {
   await mkdir(target, { recursive: true });
   for (const file of await readdir(source)) {
     if (file.endsWith('.json') && file !== 'index.json') await cp(join(source, file), join(target, file));
   }
   const index = JSON.parse(await readFile(join(source, 'index.json'), 'utf8'));
-  const legacy = { ...index, figures: index.figures.map(entry => ({
-    ...entry, url: new URL(entry.url, 'https://peetty.idy.dev/figures/').href,
-  })) };
-  await writeFile(join(target, 'index.json'), `${JSON.stringify(legacy, null, 2)}\n`);
+  let output = index;
+  if (catalogBase !== undefined) {
+    const base = new URL(catalogBase);
+    if (!['http:', 'https:'].includes(base.protocol) || !base.pathname.endsWith('/')) {
+      throw new Error('Catalog base must be an HTTP(S) directory URL');
+    }
+    output = { ...index, figures: index.figures.map(entry => ({
+      ...entry, url: new URL(entry.url, base).href,
+    })) };
+  }
+  await writeFile(join(target, 'index.json'), `${JSON.stringify(output, null, 2)}\n`);
 }

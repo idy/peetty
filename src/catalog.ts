@@ -3,8 +3,11 @@
  * data, so the generator can load it before the figure JSON exists.
  */
 
-/** Default catalog for package consumers; browser entries follow their own CDN URL. */
-export let FIGURE_CATALOG = 'https://cdn.jsdelivr.net/gh/idy/peetty@v0.3.2/figures/';
+// Browser builds replace this constant before bundling; package clients retain
+// their historical origin so existing connect-src policies keep working.
+declare const __PEETTY_BROWSER_CATALOG__: string;
+export let FIGURE_CATALOG = typeof __PEETTY_BROWSER_CATALOG__ === 'undefined'
+  ? 'https://peetty.idy.dev/figures/' : __PEETTY_BROWSER_CATALOG__;
 
 /** Browser bundles live in cdn/ (or sdk/), alongside the figures/ directory. */
 export function setFigureScriptSource(source: string): void {

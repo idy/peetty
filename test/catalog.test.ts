@@ -3,7 +3,6 @@ import { readdir, readFile } from 'node:fs/promises';
 import { describe, it } from 'node:test';
 import { validateFigure } from '../src/figure/validate.ts';
 import { PRESET_IDS, FIGURE_CATALOG } from '../src/presets.ts';
-import metadata from '../package.json' with { type: 'json' };
 
 const dir = new URL('../figures/', import.meta.url);
 
@@ -16,8 +15,8 @@ describe('figure catalog', async () => {
     assert.deepEqual(index.figures.map((e: { id: string }) => `${e.id}.json`).sort(), files);
   });
 
-  it('pins the package fallback catalog to its release version', () => {
-    assert.equal(FIGURE_CATALOG, `https://cdn.jsdelivr.net/gh/idy/peetty@v${metadata.version}/figures/`);
+  it('preserves the historical package catalog origin', () => {
+    assert.equal(FIGURE_CATALOG, 'https://peetty.idy.dev/figures/');
   });
 
   it('marks the bundled presets and keeps URLs portable across CDN hosts and tags', () => {

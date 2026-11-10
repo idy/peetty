@@ -37,7 +37,7 @@ jobs:
           node --check site/shared/header.js
           node --check site/translations.js
           node --check site/script.js
-          npm run build:site
+          npm run build:site -- --catalog-base https://peetty.idy.dev/figures/
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         with:
@@ -58,7 +58,7 @@ jobs:
       - run: npm run check
       - run: npm test
       - run: npm run build
-      - run: npm run build:site
+      - run: npm run build:site -- --catalog-base https://peetty.idy.dev/figures/
       - run: node scripts/verify-package.mjs
 
   deploy:

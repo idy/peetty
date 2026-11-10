@@ -148,9 +148,9 @@ For JavaScript control, import the browser ES module directly:
 
 The classic script also exposes `window.Peetty.createPeetty()` for manual setup when `data-peetty-auto` is omitted. Use `cdn/index.js` for named ES module imports and `cdn/peetty.global.js` for classic scripts. Dependencies, styles and six preset figures are bundled. Chat modules and extra figures load from the same CDN host and version as the entry script; the catalog contains portable relative URLs.
 
-The generated `cdn/` directory is checked into Git so jsDelivr can read a version tag directly. GitHub Packages is optional and is not involved in CDN downloads. To self-host a CDN build, copy the complete `cdn/` and `figures/` directories as siblings, preserving `cdn/chat/`, `cdn/chunks/` and `cdn/THIRD_PARTY_NOTICES.txt`. The npm `dist/peetty.global.js` keeps its public catalog fallback for existing deployments without local figures; the CDN and website classic entries use their sibling catalog.
+The generated `cdn/` directory is checked into Git so jsDelivr can read a version tag directly. GitHub Packages is optional and is not involved in CDN downloads. To self-host a CDN build, copy the complete `cdn/` and `figures/` directories as siblings, preserving `cdn/chat/`, `cdn/chunks/` and `cdn/THIRD_PARTY_NOTICES.txt`. The npm ESM and classic builds keep the historical `https://peetty.idy.dev/figures/` fallback so existing CSP allowlists and deployments without local figures continue working. CDN and website browser entries use their sibling catalog and do not contain that package fallback.
 
-Both CDN and npm distributions include `THIRD_PARTY_NOTICES.txt` with licenses and notices for the dependencies present in their bundle graph. Per-file license comments are retained. The website assembly uses the CDN browser entries and writes an absolute-URL catalog at its historical `figures/index.json` endpoint, preserving SDK 0.3.0 clients; the repository's portable CDN index remains relative.
+Both CDN and npm distributions include `THIRD_PARTY_NOTICES.txt` with licenses and notices for the dependencies present in their bundle graph. Per-file license comments are retained. Website assembly uses the CDN browser entries and retains portable catalog URLs by default, so development and mirrors resolve figures on their own origin. The official Pages workflow passes `--catalog-base https://peetty.idy.dev/figures/` to preserve absolute URLs for SDK 0.3.0 clients at its historical endpoint. Other deployments can pass their own catalog base. The repository's CDN index remains relative.
 
 ## Install from GitHub Packages (optional)
 
@@ -168,7 +168,7 @@ npm login --scope=@idy --auth-type=legacy --registry=https://npm.pkg.github.com
 npm install @idy/peetty
 ```
 
-Release workflow: set the version in `package.json` and `package-lock.json`, update the fallback catalog in `src/catalog.ts` and the pinned examples, run `npm run figures` and `npm run build`, and commit the source together with `cdn/` before pushing the matching tag, such as `v0.3.1`. The tag makes the prebuilt files publicly readable through jsDelivr. The package workflow checks that the tag matches `package.json`, runs the checks, tests and build, then publishes to GitHub Packages using `GITHUB_TOKEN` and reads the exact version back from the registry to verify publication. Publishing a new version and changing the package's visibility are separate GitHub operations.
+Release workflow: set the version in `package.json` and `package-lock.json`, update the pinned examples (the browser fallback is derived from the package version), run `npm run figures` and `npm run build`, and commit the source together with `cdn/` before pushing the matching tag, such as `v0.3.1`. The tag makes the prebuilt files publicly readable through jsDelivr. The package workflow checks that the tag matches `package.json`, runs the checks, tests and build, then publishes to GitHub Packages using `GITHUB_TOKEN` and reads the exact version back from the registry to verify publication. Publishing a new version and changing the package's visibility are separate GitHub operations.
 
 ## Development
 
@@ -190,7 +190,7 @@ npm test
 npm run check
 ```
 
-`npm run dev` serves the figure sheet at `http://127.0.0.1:4180/dev/figures.html` and the website at `http://127.0.0.1:4180/site/`, rebuilding on each change. `npm run build` writes `dist/index.js` (ESM), `dist/peetty.global.js` (a `Peetty` global for script tags), and the checked-in `cdn/` browser distribution without source maps. `npm run build:cdn` regenerates only the CDN files. `npm run build:site` assembles the production website assets from `cdn/`, with a legacy-compatible website catalog. `npm run figures` regenerates the preset JSON from its sources; `npm run check` type-checks and verifies that generated figure JSON and the checked-in CDN build are current.
+`npm run dev` serves the figure sheet at `http://127.0.0.1:4180/dev/figures.html` and the website at `http://127.0.0.1:4180/site/`, rebuilding on each change. `npm run build` writes `dist/index.js` (ESM), `dist/peetty.global.js` (a `Peetty` global for script tags), and the checked-in `cdn/` browser distribution without source maps. `npm run build:cdn` regenerates only the CDN files. `npm run build:site` assembles website assets from `cdn/` with portable catalogs; add `-- --catalog-base https://your-host.example/figures/` when an absolute legacy catalog is needed. `npm run figures` regenerates the preset JSON from its sources; `npm run check` type-checks and verifies that generated figure JSON and the checked-in CDN build are current.
 
 | Path | Purpose |
 | --- | --- |
