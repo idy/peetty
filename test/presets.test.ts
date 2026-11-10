@@ -6,6 +6,19 @@ import { deferred } from './helpers/pet-dom.ts';
 import { stubGlobals } from './helpers/stubs.ts';
 
 describe('figure resolution', () => {
+  it('loads bundled and remote figures without AbortSignal.throwIfAborted', async (t) => {
+    t.after(stubGlobals({ document: { baseURI: 'https://example.test/' } }));
+    const descriptor = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'throwIfAborted')!;
+    Object.defineProperty(AbortSignal.prototype, 'throwIfAborted', { ...descriptor, value: undefined });
+    t.after(() => Object.defineProperty(AbortSignal.prototype, 'throwIfAborted', descriptor));
+    const owner = new AbortController();
+    assert.equal(await resolveFigure('miru', undefined, owner.signal), PRESETS.miru);
+    t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify(PRESETS.elsie)));
+    assert.equal((await resolveFigure('/elsie.json', undefined, owner.signal)).id, 'elsie');
+    owner.abort();
+    await assert.rejects(resolveFigure('miru', undefined, owner.signal), { name: 'AbortError' });
+  });
+
   for (const stage of ['fetch', 'body'] as const) {
     it(`aborts a stalled ${stage} at the deadline and allows a fresh retry`, async (t) => {
       t.after(stubGlobals({ document: { baseURI: 'https://example.test/page/' } }));

@@ -28,6 +28,10 @@ export interface CatalogEntry {
 
 export const FIGURE_LOAD_TIMEOUT = 20_000;
 
+function checkAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw signal.reason ?? new DOMException('Figure loading aborted.', 'AbortError');
+}
+
 async function fetchJson(input: string, base: string, signal?: AbortSignal): Promise<{ data: unknown; url: string }> {
   // The base itself may be relative, e.g. a self-hosted catalog at '/figures/'.
   const url = new URL(input, new URL(base, document.baseURI));
@@ -41,17 +45,17 @@ async function fetchJson(input: string, base: string, signal?: AbortSignal): Pro
   try {
     return await Promise.race([
       new Promise<never>((_, reject) => {
-        interrupted = () => reject(controller.signal.reason);
+        interrupted = () => reject(controller.signal.reason ?? new DOMException('Figure loading aborted.', 'AbortError'));
         controller.signal.addEventListener('abort', interrupted, { once: true });
         if (controller.signal.aborted) interrupted();
       }),
       (async () => {
-        controller.signal.throwIfAborted();
+        checkAborted(controller.signal);
         const response = await fetch(url, { credentials: 'omit', signal: controller.signal });
-        controller.signal.throwIfAborted();
+        checkAborted(controller.signal);
         if (!response.ok) throw new Error(`Could not load ${url.href}: HTTP ${response.status}`);
         const data: unknown = await response.json();
-        controller.signal.throwIfAborted();
+        checkAborted(controller.signal);
         return { data, url: response.url || url.href };
       })(),
     ]);
@@ -71,7 +75,7 @@ async function fetchJson(input: string, base: string, signal?: AbortSignal): Pro
  * Everything loaded is validated before use.
  */
 export async function resolveFigure(input: string | object = 'miru', catalog = FIGURE_CATALOG, signal?: AbortSignal): Promise<Figure> {
-  signal?.throwIfAborted();
+  checkAborted(signal);
   if (typeof input === 'object') return resolveSoundSources(validateFigure(input), globalThis.document?.baseURI);
   if (Object.hasOwn(PRESETS, input)) return PRESETS[input as PresetId];
   const loaded = FIGURE_ID.test(input) ? await fetchJson(`${input}.json`, catalog, signal) : await fetchJson(input, document.baseURI, signal);

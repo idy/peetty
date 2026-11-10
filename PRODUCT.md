@@ -16,7 +16,7 @@ Peetty is a browser companion with selectable characters and conversations throu
 - A Profile is an independent companion archive, with its own character, personality, model connection, memories and conversation history. Choosing the same character does not share data between Profiles.
 - Settings must let the user create and switch Profiles, inspect and edit memories and history, and change character and personality.
 - Complete downloadable backups include every Profile, memory, history entry, Provider endpoint, model configuration and API key. Saved connections and session overrides are retained separately, preserving their credential lifetime on restore. Restore imports independent Profiles without overwriting existing ones; a verified unused bootstrap placeholder can be replaced for a full-capacity first restore.
-- Current limits: backup/import files are capped at 50 MiB, while accumulated local data may exceed that export ceiling. History remains in a single IndexedDB record per Profile; splitting persistence and multipart migration are unresolved architecture and capacity-policy decisions.
+- Backup/import files are capped at 50 MiB per file. Larger complete backups use numbered parts that are validated and restored together. History remains in a single IndexedDB record per Profile; splitting persistence remains a separate scaling decision.
 - Memory-only import and export are separate from complete backup and restore.
 - Data stays in this website's browser storage. Cross-site and cross-device migration uses downloaded backups; automatic cross-site sharing is outside this feature.
 

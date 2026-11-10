@@ -31,6 +31,8 @@ export interface ChatRuntimeOptions {
   chat?: PeettyChatOptions;
   onAction?: (action: CompanionAction, signal?: AbortSignal) => string | void | Promise<string | void>;
   onChange?: () => void;
+  /** Called after credential/capacity preflight and actual user append. Host exceptions are isolated. */
+  onInputAccepted?: (entry: ChatEntry) => void;
   /** Profile-owned storage; the runtime never switches its storage during a turn. */
   storage?: ChatStorage;
   /** Owned by the profile's panel when runtimes are replaced; never persisted. */
@@ -519,10 +521,6 @@ export class ChatRuntime {
         await abortable(this.storage.ensureCapacity(selected.tools === false ? 2 : 1 + MAX_REQUESTS + MAX_ACTIONS), run.controller.signal);
         if (!this.live(run)) return;
       }
-      const messagesBeforeInput = this.history.length;
-      run.credentialsKnown = !selected.getApiKey;
-      run.inputId = this.append('user', text).id;
-      this.changed();
       let key: string;
       try {
         key = (await abortable(Promise.resolve().then(() => selected.getApiKey ? selected.getApiKey() : selected.apiKey ?? ''), run.controller.signal)).trim();
@@ -534,6 +532,12 @@ export class ChatRuntime {
       if (key) this.secrets.add(key);
       this.replaceHistory(this.history.map((entry) => ({ ...entry, text: this.redact(entry.text) })));
       run.credentialsKnown = true;
+      const messagesBeforeInput = this.history.length;
+      const accepted = this.append('user', text);
+      run.inputId = accepted.id;
+      try { this.options.onInputAccepted?.({ ...accepted }); } catch { /* Host draft handling must not break turn cleanup. */ }
+      this.changed();
+      if (!this.live(run)) return;
       const [{ Agent }, { createModels, createProvider }, { openAICompletionsApi }] = await abortable(Promise.all([
         import('@earendil-works/pi-agent-core'),
         import('@earendil-works/pi-ai/models'),

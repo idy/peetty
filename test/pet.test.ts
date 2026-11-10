@@ -162,6 +162,38 @@ async function mountProfileChatPet(t: Parameters<typeof installPetDOM>[0], optio
 }
 
 describe('Pet profile figure integration', () => {
+  it('restores skipped saved artwork after an SDK request fails during panel construction', async (t) => {
+    installChatIndexedDB(t);
+    const namespace = 'sdk-figure-init-failed-restore';
+    const seed = new BrowserProfileStore(namespace); await seed.initialize({ name: 'Saved Elsie', figure: 'elsie' }); t.after(() => seed.close());
+    const savedId = seed.activeProfileId;
+    const mounted = await seed.create({ name: 'Mounted Miru', figure: 'miru' }); await seed.select(savedId);
+    const { pet, state, query, settle, window } = await mountProfileChatPet(t, { chat: { storageKey: namespace } });
+    assert.equal(state.view.renderer.figure.id, 'miru');
+    const entered = deferred<void>(); const release = deferred<void>(); const response = deferred<Response>();
+    const initialize = BrowserProfileStore.prototype.initialize;
+    mock.method(BrowserProfileStore.prototype, 'initialize', async function(this: BrowserProfileStore, ...args: Parameters<typeof initialize>) {
+      await initialize.apply(this, args); entered.resolve(); await release.promise;
+    });
+    mock.method(globalThis, 'fetch', () => response.promise);
+    const opening = pet.openChat(); await entered.promise;
+    const changing = pet.setFigure('/synthetic-failed-sdk.json');
+    const failed = assert.rejects(changing, /HTTP 503/);
+    release.resolve(); await opening; await settle();
+    assert.equal(query('.pc-name').textContent, 'Saved Elsie');
+    response.resolve(new Response('', { status: 503 })); await failed; await settle();
+    assert.equal(state.view.renderer.figure.id, 'elsie', 'the actual saved figure replaces the old mounted artwork');
+    assert.equal(query('.peetty-chat').dataset.color, 'blue');
+    assert.equal(seed.activeProfile.figure, 'elsie');
+    await pet.configure();
+    const selector = query<HTMLSelectElement>('.pc-profile-select'); selector.value = mounted.id;
+    selector.dispatchEvent(new window.Event('change') as unknown as Event);
+    for (let i = 0; i < 1_000 && selector.disabled; i++) await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(selector.disabled, false); await settle();
+    assert.equal(state.view.renderer.figure.id, 'miru', 'retry updates panel bookkeeping before a later profile switch');
+    assert.equal(query('.pc-name').textContent, 'Mounted Miru');
+  });
+
   it('invalidates an SDK load when switching to another profile with the same current figure', async (t) => {
     installChatIndexedDB(t);
     const namespace = 'sdk-figure-initiating-owner';

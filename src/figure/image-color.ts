@@ -31,10 +31,11 @@ export function imageColorById(id: string): ImageColor {
 }
 
 /** The colour a character is remembered by: her eyes first, then her hair. */
-export function imageColorOf(figure: Pick<Figure, 'id' | 'palette'>): ImageColor {
-  if (Object.hasOwn(BUNDLED, figure.id)) return BUNDLED[figure.id]!;
+export function imageColorOf(figure: Pick<Figure, 'id' | 'palette'>, palette: Readonly<Record<string, string>> = figure.palette): ImageColor {
+  const unchanged = Object.keys(palette).every(key => palette[key] === figure.palette[key]);
+  if (unchanged && Object.hasOwn(BUNDLED, figure.id)) return BUNDLED[figure.id]!;
   for (const key of ['iris', 'hair', 'ribbon']) {
-    const rgba = parseCssColor(figure.palette[key] ?? '');
+    const rgba = parseCssColor(palette[key] ?? '');
     if (!rgba || rgba[3] === 0) continue;
     const color = imageColorFromRgb(rgba[0], rgba[1], rgba[2]);
     if (color) return color;

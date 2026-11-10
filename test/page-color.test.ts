@@ -5,6 +5,9 @@ import { pageColor } from '../src/chat/page-color.ts';
 import { imageColorById, imageColorOf } from '../src/figure/image-color.ts';
 import { PRESETS } from '../src/presets.ts';
 import { validateFigure } from '../src/figure/validate.ts';
+import { createPortrait } from '../src/figure/portrait.ts';
+import { parseCssColor } from '../src/figure/color.ts';
+import { stubGlobals } from './helpers/stubs.ts';
 
 function fixture(t: TestContext) {
   const window = new Window({ url: 'https://host.example/' });
@@ -49,6 +52,52 @@ describe('shared page and character colour parsing', () => {
     assert.equal(imageColorOf({ id, palette: { iris: 'hsl(120 0% 50%)', hair: 'rgb(0 204 0)' } }), 'green');
     assert.equal(imageColorOf({ id, palette: { iris: '#00cc0000', hair: '#888888', ribbon: 'rgba(0, 204, 0, 0)' } }), imageColorById(id));
     assert.equal(imageColorOf({ id, palette: {} }), imageColorById(id));
+  });
+});
+
+describe('portrait colour and cleanup', () => {
+  function portraitDOM(t: TestContext) {
+    const { document, window } = fixture(t);
+    const media = window.matchMedia('(prefers-reduced-motion: reduce)');
+    t.after(stubGlobals({ document, matchMedia: () => media }));
+    return { document, media };
+  }
+
+  it('falls back from valid figures with overflowing HSL channels and releases portrait listeners', (t) => {
+    const { document, media } = portraitDOM(t);
+    const addDocument = t.mock.method(document, 'addEventListener');
+    const removeDocument = t.mock.method(document, 'removeEventListener');
+    const addMedia = t.mock.method(media, 'addEventListener');
+    const removeMedia = t.mock.method(media, 'removeEventListener');
+    const figure = structuredClone(PRESETS.miru); figure.id = 'giant-hue-portrait';
+    figure.palette.iris = `hsl(${'9'.repeat(400)} 100% 50%)`; figure.palette.hair = '#00cc00';
+    const valid = validateFigure(figure);
+    assert.equal(parseCssColor(figure.palette.iris), undefined);
+    const portrait = createPortrait(valid)!;
+    assert.equal(portrait.color, 'green'); portrait.setLive(true); portrait.destroy();
+    const documentCallbacks = (calls: typeof addDocument.mock.calls) => calls.filter(call => call.arguments[0] === 'visibilitychange').map(call => call.arguments[1]);
+    assert.deepEqual(documentCallbacks(removeDocument.mock.calls), documentCallbacks(addDocument.mock.calls));
+    assert.equal(addMedia.mock.callCount(), 1); assert.equal(removeMedia.mock.callCount(), 1);
+    assert.equal(removeMedia.mock.calls[0]!.arguments[1], addMedia.mock.calls[0]!.arguments[1]);
+    for (const value of [`rgb(${'9'.repeat(400)} 0 0)`, `hsl(120 ${'9'.repeat(400)}% 50%)`, `hsl(120 100% 50% / ${'9'.repeat(400)})`]) {
+      assert.equal(parseCssColor(value), undefined, 'all non-finite channels fall back safely');
+    }
+  });
+
+  it('uses exactly the valid effective renderer palette and retains bundled colours without overrides', (t) => {
+    portraitDOM(t);
+    const custom = structuredClone(PRESETS.miru); custom.id = 'overridden-portrait'; custom.palette.iris = '#cc0000';
+    const green = createPortrait(custom, { palette: { iris: '#00cc00', hair: '#0000cc', added: '#cc00cc' } })!;
+    assert.equal(green.color, 'green');
+    assert.ok(green.element.querySelector('[fill="#00cc00"], stop[stop-color="#00cc00"]'), 'the portrait renders the same overridden iris colour');
+    green.destroy();
+    const invalid = createPortrait(custom, { palette: { iris: 'url(https://invalid.test/color)' } })!;
+    assert.equal(invalid.color, 'red'); invalid.destroy();
+    const bundled = createPortrait(PRESETS.xiaoxiao)!; assert.equal(bundled.color, 'red'); bundled.destroy();
+    const unchanged = createPortrait(PRESETS.xiaoxiao, { palette: { unknown: '#00cc00', iris: 'invalid' } })!;
+    assert.equal(unchanged.color, 'red'); unchanged.destroy();
+    const overridden = createPortrait(PRESETS.xiaoxiao, { palette: { iris: '#00cc00' } })!;
+    assert.equal(overridden.color, 'green'); overridden.destroy();
   });
 });
 

@@ -45,7 +45,8 @@ describe('browser profile persistence', () => {
     assert.equal(second.activeProfile.id, first.activeProfile.id);
     assert.equal(second.profiles.length, 1);
     assert.equal(decode(await second.backup()).profiles[0]!.entries.length, 230);
-    assert.deepEqual(idb.databases.get('migration:chat')!.get('entries'), history);
+    assert.equal(idb.databases.get('migration:chat')!.has('entries'), false);
+    assert.equal(idb.databases.get('migration:chat')!.has('connection'), false);
     assert.ok(idb.opened.includes('migration:profiles'));
   });
 
@@ -452,7 +453,7 @@ describe('profile backup and memory portability', () => {
     assert.deepEqual(saved.connection, connection);
   });
 
-  it('exports portable source text, imports with fresh IDs, deduplicates, and ignores foreign source IDs', async (t) => {
+  it('exports memories without conversation evidence and accepts legacy source text on import', async (t) => {
     indexedDBFixture(t);
     const manager = await store(t, 'memory-export');
     const source = manager.activeProfile.id;
@@ -464,12 +465,16 @@ describe('profile backup and memory portability', () => {
     const document = JSON.parse(exported) as { format: string; version: number; memories: MemoryEntry[] };
     assert.equal(document.format, 'peetty-memories');
     assert.equal(document.version, 1);
-    assert.equal(document.memories[0]!.sourceText, 'I love jasmine tea.');
+    assert.equal(document.memories[0]!.sourceText, undefined);
     assert.equal(document.memories[0]!.sourceEntryId, undefined);
+    assert.equal(exported.includes('I love jasmine tea.'), false);
+    assert.equal((await manager.exportMemoryMarkdown(source)).includes('I love jasmine tea.'), false);
+    assert.equal(decode(await manager.backup()).profiles[0]!.memories[0]!.sourceText, 'I love jasmine tea.');
     const destination = await manager.create({ name: 'Destination' });
     // Even a coincidentally matching local entry ID cannot claim the imported source.
     await manager.storage(destination.id).saveEntries([entry('source-message', 'unrelated local text')]);
     document.memories[0]!.sourceEntryId = 'source-message';
+    document.memories[0]!.sourceText = 'I love jasmine tea.'; // Backward-compatible older export.
     await manager.importMemories(destination.id, JSON.stringify(document));
     await manager.importMemories(destination.id, exported);
     const imported = manager.activeProfile.memories;

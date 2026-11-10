@@ -185,6 +185,7 @@ describe('runtime archive and credential regressions', () => {
       ...MODEL, apiKey: 'fixture-opt-out-api-key', headers: {
         Authorization: 'Bearer fixture-opt-out-bearer', 'x-api-key': 'fixture-opt-out-header-key',
         'Ocp-Apim-Subscription-Key': 'synthetic-subscription-secret', 'OpenAI-Project': project,
+        'X-Auth': 'synthetic-x-auth', 'X-Access-Key': 'synthetic-access-key', 'Gateway-Pass': 'synthetic-unknown-secret',
       },
     }, rememberKey: true });
     const initial = createRuntime(t, { storage: manager.storage(restored.id) });
@@ -193,7 +194,10 @@ describe('runtime archive and credential regressions', () => {
     assert.equal(initial.sessionOverride, undefined, 'restored RAM sessions remain owned by the profile store');
     assert.ok(initial.model!.headers!.authorization);
     assert.equal(initial.entries[0]!.text, 'Echo [redacted]');
-    await initial.configure(initial.model!, false);
+    const live = initial.model!;
+    await initial.configure(live, false);
+    assert.deepEqual(initial.sessionOverride, { model: live, rememberKey: false }, 'stripped authentication must remain usable for the current visit');
+    assert.equal(initial.model!.headers!['gateway-pass'], 'synthetic-unknown-secret');
     initial.destroy();
     const reopened = await profileStore(t, namespace);
     assert.deepEqual(reopened.activeProfile.connection, { id: MODEL.id, baseUrl: MODEL.baseUrl, tools: false, headers: { 'openai-project': project } });
@@ -561,7 +565,7 @@ describe('core verified fix regressions', () => {
   it('keeps a live header override when authoritative storage strips a peer-removed header', async (t) => {
     installRuntimeFixture(t);
     const manager = await profileStore(t, 'normalized-save-result');
-    const restored = await restoreProfile(manager, { connection: { ...MODEL, headers: { 'x-routing': 'synthetic-route' } } });
+    const restored = await restoreProfile(manager, { connection: { ...MODEL, headers: { 'openai-project': 'synthetic-route' } } });
     const runtime = createRuntime(t, { storage: manager.runtimeStorage(restored.id) });
     await runtime.initialize();
     const live = runtime.model!;
@@ -670,6 +674,80 @@ describe('core verified fix regressions', () => {
     assert.equal(manager.memoryTexts(id).length, 0);
     assert.equal(manager.persistenceWarning, false);
     assert.equal(provider.calls.length, 1);
+  });
+});
+
+describe('input acceptance after preflight', () => {
+  it('does not accept before credentials resolve and supplies a detached redacted entry only after append', async (t) => {
+    installRuntimeFixture(t);
+    const manager = await profileStore(t, 'input-accepted');
+    const key = deferred<string>(); const resolving = deferred<void>();
+    const accepted: ChatEntry[] = [];
+    const provider = scripted({ message: assistant('Accepted reply.') });
+    const runtime = createRuntime(t, { storage: manager.runtimeStorage(manager.activeProfileId),
+      model: { ...MODEL, getApiKey: () => { resolving.resolve(); return key.promise; } },
+      onInputAccepted(entry) {
+        assert.ok(runtime.entries.some((value) => value.id === entry.id));
+        accepted.push({ ...entry });
+        entry.text = 'Host mutation must not affect history';
+        throw new Error('Host callback failure must be isolated.');
+      }, _testing: { streamFn: provider.streamFn },
+    });
+    const sending = runtime.send('Use synthetic-preflight-key');
+    await resolving.promise;
+    assert.equal(accepted.length, 0);
+    assert.equal(runtime.entries.length, 0);
+    key.resolve('synthetic-preflight-key');
+    await sending;
+    assert.equal(accepted.length, 1);
+    assert.equal(accepted[0]!.role, 'user');
+    assert.equal(accepted[0]!.text, 'Use [redacted]');
+    assert.equal(runtime.entries[0]!.text, 'Use [redacted]');
+    assert.equal(runtime.reply!.text, 'Accepted reply.');
+    assert.equal(runtime.error, null);
+    assert.equal(runtime.busy, false);
+    assert.equal(manager.profileInfo(manager.activeProfileId)!.entryCount, 2);
+  });
+
+  for (const failure of ['capacity', 'credentials', 'stop', 'missing model', 'oversized input'] as const) {
+    it(`does not notify acceptance after ${failure} preflight rejection`, async (t) => {
+      installRuntimeFixture(t);
+      const manager = await profileStore(t, `input-rejected-${failure}`);
+      const storage = manager.runtimeStorage(manager.activeProfileId);
+      const pending = deferred<string>(); const resolving = deferred<void>();
+      if (failure === 'capacity') storage.ensureCapacity = () => Promise.reject(new Error('Capacity unavailable.'));
+      let accepted = 0;
+      const provider = scripted({ message: assistant('Never reached.') });
+      const runtime = createRuntime(t, { storage,
+        ...(failure === 'missing model' ? {} : { model: { ...MODEL, getApiKey: () => {
+          if (failure === 'credentials') throw new Error('Secret lookup failed.');
+          if (failure === 'stop') { resolving.resolve(); return pending.promise; }
+          return MODEL.apiKey!;
+        } } }),
+        onInputAccepted: () => { accepted++; }, _testing: { streamFn: provider.streamFn },
+      });
+      const sending = runtime.send(failure === 'oversized input' ? 'x'.repeat(8_001) : 'Keep this draft');
+      if (failure === 'stop') { await resolving.promise; runtime.stop(); pending.resolve(MODEL.apiKey!); }
+      await sending;
+      assert.equal(accepted, 0);
+      assert.equal(runtime.entries.length, 0);
+      assert.equal(provider.calls.length, 0);
+      assert.equal(runtime.busy, false);
+    });
+  }
+
+  it('handles reentrant cancellation from the acceptance callback and archives the accepted input', async (t) => {
+    installRuntimeFixture(t);
+    const manager = await profileStore(t, 'input-accepted-stop');
+    const provider = scripted({ message: assistant('Never reached.') });
+    const runtime = createRuntime(t, { model: MODEL, storage: manager.runtimeStorage(manager.activeProfileId),
+      onInputAccepted: () => runtime.stop(), _testing: { streamFn: provider.streamFn },
+    });
+    await runtime.send('Accepted before stopping.');
+    await manager.backup(); // Wait for the synchronous stop flush.
+    assert.equal(provider.calls.length, 0);
+    assert.equal(runtime.busy, false);
+    assert.equal(manager.historyPage(manager.activeProfileId, '', 1).entries[0]!.text, 'Accepted before stopping.');
   });
 });
 

@@ -33,6 +33,7 @@ export interface Portrait {
 export function createPortrait(figure: Figure, options: RigOptions = {}): Portrait | null {
   if (figure.renderer !== 'rig') return null;
   const renderer = new RigRenderer(figure, options);
+  const color = imageColorOf(figure, renderer.palette);
   const svg = renderer.svg;
   const unit = unitOf(figure.viewBox);
   const [x, y] = figure.skeleton.head.pivot;
@@ -93,7 +94,7 @@ export function createPortrait(figure: Figure, options: RigOptions = {}): Portra
   defs.appendChild(symbol);
   return {
     element: svg,
-    color: imageColorOf(figure),
+    color,
     stamp() {
       const face = document.createElementNS(SVG, 'svg');
       for (const [key, value] of [['width', '100%'], ['height', '100%'], ['aria-hidden', 'true']] as const) face.setAttribute(key, value);

@@ -49,9 +49,16 @@ export function normalizeModelOptions(model: PeettyModelOptions): PeettyModelOpt
   } catch { throw new Error('Enter a valid API base URL and model ID.'); }
 }
 
-/** Authentication headers follow the same device-lifetime choice as an API key. */
+/** Only documented request metadata may outlive authentication consent. Unknown headers
+ * can carry credentials under arbitrary names and therefore default to sensitive. */
+const NONCREDENTIAL_HEADERS = new Set([
+  'accept', 'content-type',
+  'openai-organization', 'openai-project', 'openai-beta',
+  'anthropic-version', 'anthropic-beta', 'anthropic-dangerous-direct-browser-access',
+  'http-referer', 'x-title', // OpenRouter application attribution.
+]);
 export function isCredentialHeader(name: string): boolean {
-  return /authorization|api[-_]?key|subscription[-_]?key|token|secret/i.test(name);
+  return !NONCREDENTIAL_HEADERS.has(name.trim().toLowerCase());
 }
 
 /** Keep only headers already owned by this endpoint, including unchanged subsets after key rotation. */

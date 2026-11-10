@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { connectionIdentity, LOCAL_MAGPIE, localMagpieConnection, normalizeModelOptions, prepareSavedConnection, sameConnection, toStoredConnection } from '../src/chat/connections.ts';
+import { connectionIdentity, hasStoredCredentials, isCredentialHeader, LOCAL_MAGPIE, localMagpieConnection, normalizeModelOptions, prepareSavedConnection, sameConnection, toStoredConnection } from '../src/chat/connections.ts';
 
 describe('model tool preference validation', () => {
   it('preserves boolean preferences and leaves the default optional', () => {
@@ -65,14 +65,14 @@ describe('shared connection projections', () => {
 
   it('projects only transport data using the explicitly selected key', () => {
     let calls = 0;
-    const model = { ...base, provider: 'Provider', headers: { 'x-project': 'project' }, tools: false, effort: 'high' as const,
+    const model = { ...base, provider: 'Provider', headers: { 'openai-project': 'project' }, tools: false, effort: 'high' as const,
       getApiKey: () => { calls++; return 'must-not-be-resolved'; }, privateContext: { extra: true } };
     const snapshot = toStoredConnection(model, undefined);
-    assert.deepEqual(snapshot, { id: base.id, baseUrl: base.baseUrl, provider: 'Provider', headers: { 'x-project': 'project' }, tools: false, effort: 'high' });
+    assert.deepEqual(snapshot, { id: base.id, baseUrl: base.baseUrl, provider: 'Provider', headers: { 'openai-project': 'project' }, tools: false, effort: 'high' });
     assert.equal(calls, 0);
     assert.notEqual(snapshot.headers, model.headers);
-    snapshot.headers!['x-project'] = 'changed';
-    assert.equal(model.headers['x-project'], 'project');
+    snapshot.headers!['openai-project'] = 'changed';
+    assert.equal(model.headers['openai-project'], 'project');
     assert.equal(toStoredConnection(model, 'selected-key').apiKey, 'selected-key');
     assert.equal(toStoredConnection(model, '').apiKey, '', 'explicit keyless values retain their representation');
   });
@@ -90,10 +90,27 @@ describe('shared connection projections', () => {
     assert.deepEqual(known.headers, { Authorization: 'Bearer old', 'OpenAI-Project': 'project' });
   });
 
+  it('treats arbitrary unclassified headers as credentials while retaining documented metadata on opt-out', () => {
+    const { apiKey: _key, ...keyless } = base;
+    const metadata = { 'OpenAI-Organization': 'org', 'OpenAI-Project': 'project', 'OpenAI-Beta': 'feature',
+      'Anthropic-Version': '2023-06-01', 'Anthropic-Beta': 'feature', 'Anthropic-Dangerous-Direct-Browser-Access': 'true',
+      Accept: 'application/json', 'Content-Type': 'application/json', 'HTTP-Referer': 'https://app.example', 'X-Title': 'My app' };
+    const credentials = { 'X-Auth': 'auth', 'X-Access-Key': 'access', 'Gateway-Pass': 'arbitrary', 'X-Version': 'unclassified', Cookie: 'cookie' };
+    const known = { ...base, headers: { ...metadata, ...credentials } };
+    assert.deepEqual(prepareSavedConnection(known, known, false).headers, Object.fromEntries(new Headers(metadata)));
+    assert.deepEqual(prepareSavedConnection(known, known, true).headers, Object.fromEntries(new Headers(known.headers)));
+    for (const name of Object.keys(credentials)) {
+      assert.equal(isCredentialHeader(name), true);
+      assert.equal(hasStoredCredentials({ ...keyless, headers: { [name]: 'value' } }), true);
+    }
+    assert.equal(hasStoredCredentials({ ...keyless, headers: metadata }), false);
+    assert.equal(hasStoredCredentials({ ...keyless, headers: { 'X-Auth': '  ' } }), false);
+  });
+
   it('uses the same effective identity for comparison and session deduplication', () => {
-    const first = { ...base, headers: { Authorization: 'Bearer token', 'X-Project': 'project' } };
+    const first = { ...base, headers: { Authorization: 'Bearer token', 'OpenAI-Project': 'project' } };
     const equivalent = { ...base, id: ' model ', baseUrl: `${base.baseUrl}/chat/completions`, tools: true,
-      headers: { 'x-project': ' project ', authorization: 'Bearer token' } };
+      headers: { 'openai-project': ' project ', authorization: 'Bearer token' } };
     assert.equal(connectionIdentity(first), connectionIdentity(equivalent));
     assert.equal(sameConnection(first, equivalent), true);
     assert.equal(sameConnection(first, { ...equivalent, effort: 'high' }), false);

@@ -8,7 +8,7 @@ import { isSoundGesture, SOUND_GESTURES } from '../pet/activation.ts';
 import { COPY } from './copy.ts';
 import { buildChatView, icon, setIcon } from './view.ts';
 import { MARKDOWN_STYLE, renderMarkdown, renderMarkdownBubble } from './markdown.ts';
-import { BrowserProfileStore } from './profiles.ts';
+import { BrowserProfileStore, type BackupDownloadFile } from './profiles.ts';
 import { createManagement, MANAGEMENT_STYLE } from './management.ts';
 
 import { imageColorById, type ImageColor } from '../figure/image-color.ts';
@@ -18,12 +18,10 @@ import type { Portrait } from '../figure/portrait.ts';
 const STYLE = `
 .peetty-chat {
   --pc-color: #6a58e0; --pc-color-end: #9a4fd3; --pc-light: #b9afff;
-  --pc-bg: color-mix(in srgb, var(--pc-color) 5%, #fff); --pc-input: #fff;
-  --pc-ink: #2a2b47; --pc-muted: #636786; --pc-error: #b8203f;
-  --pc-accent: color-mix(in srgb, var(--pc-color) 80%, #17172e);
-  --pc-soft: color-mix(in srgb, var(--pc-color) 11%, #fff);
-  --pc-line: color-mix(in srgb, var(--pc-color) 18%, #e9e9f0);
-  --pc-line-strong: color-mix(in srgb, var(--pc-color) 35%, #9a9cb5);
+  --pc-bg: #f8f7fd; --pc-input: #fff;
+  --pc-ink: #2a2b47; --pc-muted: #636786; --pc-error: #b8203f; --pc-error-bg: #f9edf0;
+  --pc-accent: #594bbd; --pc-soft: #efedfc;
+  --pc-line: #d2cfee; --pc-line-strong: #8984c4;
   --pc-round: ui-rounded, 'Hiragino Maru Gothic ProN', 'Yuanti SC', system-ui, sans-serif;
   display: flex; flex-direction: column; width: 100%; height: 100%; box-sizing: border-box;
   background: var(--pc-bg); color: var(--pc-ink); border-radius: 22px;
@@ -85,7 +83,7 @@ textarea.pc-input { line-height: 1.65; }
 .pc-check input { accent-color: var(--pc-color); margin: 0; width: 17px; height: 17px; }
 .pc-note { color: var(--pc-muted); font-size: 12px; margin: 4px 0 16px; line-height: 1.65; }
 .pc-primary { display: inline-flex; justify-content: center; align-items: center; gap: 8px; width: 100%; padding: 12px 16px; min-height: 44px; border: 0; border-radius: 24px; color: #fff !important; background: var(--pc-color); font-weight: 650 !important; transition: background-color .15s; }
-.pc-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--pc-color) 85%, #17172e); }
+.pc-primary:hover:not(:disabled) { background: var(--pc-accent); }
 .pc-primary svg { width: 17px; height: 17px; }
 .pc-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 290px; height: 100%; padding: 28px; text-align: center; }
 .pc-hero { position: relative; width: 112px; height: 112px; margin-bottom: 22px; border-radius: 50%; background: var(--pc-soft); color: var(--pc-accent); }
@@ -122,11 +120,25 @@ textarea.pc-input { line-height: 1.65; }
 .pc-submit:hover:not(:disabled) { background: var(--pc-color-end); }
 .pc-submit:disabled { background: var(--pc-soft); color: var(--pc-muted) !important; opacity: 1; }
 .pc-foot { margin: 8px 0 0; color: var(--pc-muted); font-size: 10px; text-align: center; }
-.pc-error { font-size: 12px; color: var(--pc-error); padding: 10px 18px; margin: 0; overflow-wrap: anywhere; background: color-mix(in srgb, var(--pc-error) 8%, var(--pc-input)); }
+.pc-error { font-size: 12px; color: var(--pc-error); padding: 10px 18px; margin: 0; overflow-wrap: anywhere; background: var(--pc-error-bg); }
 .pc-storage { font-size: 12px; color: var(--pc-ink); padding: 8px 18px; margin: 0; background: var(--pc-soft); }
 .pc-sr { position: absolute; width: 1px; height: 1px; clip-path: inset(50%); overflow: hidden; }
 @media (prefers-color-scheme: dark) {
-  .peetty-chat { --pc-bg: color-mix(in srgb, var(--pc-color) 7%, #131322); --pc-input: color-mix(in srgb, var(--pc-color) 10%, #1d1d31); --pc-ink: #eeedf7; --pc-muted: #a5a7c4; --pc-error: #ff9db0; --pc-accent: var(--pc-light); --pc-soft: color-mix(in srgb, var(--pc-color) 22%, #1a1a2d); --pc-line: color-mix(in srgb, var(--pc-color) 24%, #303044); --pc-line-strong: color-mix(in srgb, var(--pc-light) 38%, #4a4c6c); color-scheme: dark; }
+  .peetty-chat { --pc-bg: #19182f; --pc-input: #25233f; --pc-ink: #eeedf7; --pc-muted: #a5a7c4; --pc-error: #ff9db0; --pc-error-bg: #372d48; --pc-accent: var(--pc-light); --pc-soft: #2c284f; --pc-line: #3e3a69; --pc-line-strong: #74729f; color-scheme: dark; }
+}
+@supports (color: color-mix(in srgb, #000, #fff)) {
+  .peetty-chat {
+    --pc-bg: color-mix(in srgb, var(--pc-color) 5%, #fff);
+    --pc-accent: color-mix(in srgb, var(--pc-color) 80%, #17172e);
+    --pc-soft: color-mix(in srgb, var(--pc-color) 11%, #fff);
+    --pc-line: color-mix(in srgb, var(--pc-color) 18%, #e9e9f0);
+    --pc-line-strong: color-mix(in srgb, var(--pc-color) 35%, #9a9cb5);
+    --pc-error-bg: color-mix(in srgb, var(--pc-error) 8%, var(--pc-input));
+  }
+  .pc-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--pc-color) 85%, #17172e); }
+  @media (prefers-color-scheme: dark) {
+    .peetty-chat { --pc-bg: color-mix(in srgb, var(--pc-color) 7%, #131322); --pc-input: color-mix(in srgb, var(--pc-color) 10%, #1d1d31); --pc-accent: var(--pc-light); --pc-soft: color-mix(in srgb, var(--pc-color) 22%, #1a1a2d); --pc-line: color-mix(in srgb, var(--pc-color) 24%, #303044); --pc-line-strong: color-mix(in srgb, var(--pc-light) 38%, #4a4c6c); }
+  }
 }
 .pc-mobile .pc-header { padding: 18px 12px; gap: 7px; }
 .pc-mobile .pc-avatar { width: 48px; height: 48px; }
@@ -149,6 +161,8 @@ export interface ChatPanel {
   setModel: (model: PeettyModelOptions) => Promise<void>;
   setLanguage: (language: Language) => void;
   setFigure?: (figure: string | object, current?: () => boolean) => Promise<void>;
+  /** Retry saved artwork when an SDK request had temporarily owned its restoration. */
+  retryProfileFigure?: () => Promise<void>;
   destroy: () => void;
 }
 interface PanelOptions {
@@ -286,6 +300,8 @@ export async function createChatPanel({
     });
     if (injectedModel) sessionModels.set(currentProfileId, { model: injectedModel, rememberKey: false });
     let runtime!: ChatRuntime;
+    let inputRevision = 0;
+    let pendingInput: { owner: ChatRuntime; profileId: string; revision: number; value: string } | undefined;
     cleanups.push(() => runtime?.destroy());
     let managementBusy = false;
     const modelChanges = new Set<number>();
@@ -325,6 +341,13 @@ export async function createChatPanel({
           get remember() { return profiles.autoRememberEnabled(profileId) ? rememberFact : undefined; },
         },
         onAction: onAction,
+        onInputAccepted: () => {
+          const pending = pendingInput;
+          if (!pending || pending.owner !== instance) return;
+          pendingInput = undefined;
+          if (disposed || runtime !== instance || currentProfileId !== pending.profileId || inputRevision !== pending.revision || input.value !== pending.value) return;
+          input.value = ''; input.style.height = ''; inputRevision++;
+        },
         onChange: () => {
           if (runtime === instance && !scheduled && !disposed) {
             scheduled = true;
@@ -359,6 +382,7 @@ export async function createChatPanel({
       const previousId = currentProfileId;
       cacheSession();
       canceledTurn = true; wasBusy = false; configuration++;
+      pendingInput = undefined;
       profileFigurePending = true;
       onFigureOwnershipChange?.();
       cancelDiscovery(); runtime.destroy();
@@ -381,7 +405,7 @@ export async function createChatPanel({
       profileFigurePending = false;
       render();
     }
-    async function backup(): Promise<string> {
+    async function backup(): Promise<string | BackupDownloadFile[]> {
       canceledTurn = true; runtime.stop(); cacheSession();
       const controller = new AbortController(); activeBackups.add(controller);
       const timer = setTimeout(() => controller.abort(), 20_000);
@@ -395,7 +419,7 @@ export async function createChatPanel({
           const connection = toStoredConnection(model, resolvedKey);
           return { profileId, connection, rememberKey: session.rememberKey && !model.getApiKey };
         }));
-        return await profiles.backup({ sessions });
+        return await profiles.backupDownload({ sessions });
       } finally { clearTimeout(timer); controller.abort(); activeBackups.delete(controller); }
     }
     const management = createManagement({
@@ -713,7 +737,7 @@ export async function createChatPanel({
       if (runtime.busy) { canceledTurn = true; runtime.stop(); return; }
       const text = input.value.trim();
       if (!text || !runtime.model) return;
-      input.value = ''; input.style.height = '';
+      pendingInput = { owner: runtime, profileId: currentProfileId, revision: inputRevision, value: input.value };
       showError();
       canceledTurn = false;
       find('.pc-announcement').textContent = '';
@@ -721,7 +745,7 @@ export async function createChatPanel({
       render(); content.scrollTop = content.scrollHeight; input.focus();
     }
     composer.addEventListener('submit', (event) => { event.preventDefault(); send(); });
-    input.addEventListener('input', () => { input.style.height = 'auto'; input.style.height = `${Math.min(126, input.scrollHeight)}px`; render(); });
+    input.addEventListener('input', () => { inputRevision++; input.style.height = 'auto'; input.style.height = `${Math.min(126, input.scrollHeight)}px`; render(); });
     input.addEventListener('keydown', (event) => { if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); if (!runtime.busy) send(); } });
     clear.addEventListener('click', () => { confirmation.hidden = false; clear.hidden = true; });
     find('.pc-cancel').addEventListener('click', () => { confirmation.hidden = true; render(); });
@@ -808,6 +832,11 @@ export async function createChatPanel({
       },
       close: () => close(),
       focus: focusCurrent,
+      async retryProfileFigure() {
+        if (disposed) return;
+        await applyProfileFigure(runtime, currentProfileId);
+        if (!disposed) render();
+      },
       async setFigure(figure, current = () => true) {
         if (disposed || !current()) return;
         const ownerId = currentProfileId;

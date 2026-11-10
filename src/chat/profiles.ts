@@ -37,12 +37,27 @@ export interface ProfileRecord {
 export type ProfileInfo = Omit<ProfileRecord, 'entries' | 'memories' | 'connection'> & { memoryCount: number; entryCount: number };
 export interface BackupSession extends StoredSessionConnection { profileId: string }
 type BackupOptions = { sessions: readonly BackupSession[] };
+export interface BackupDownloadFile { name: string; text: string }
+type BackupDownloadOptions = Partial<BackupOptions> & { _testing?: { fileBytes: number } };
+interface BackupPart { format: 'peetty-backup-part'; version: 1; backupId: string; index: number; count: number; digest: string; text: string }
 type Defaults = { name?: string; figure?: string | object; personality?: string };
 type Settings = Pick<ProfileRecord, 'name' | 'figure' | 'personality' | 'useMemories' | 'autoRemember'>;
 type SettingsInput = Omit<Partial<Settings>, 'figure'> & { figure?: string | object };
 interface Directory { version: 1; ids: string[]; activeProfileId: string; bootstrapProfileId?: string }
 interface RecordState { profile: ProfileRecord; epoch: string }
 interface State { directory: Directory; records: Map<string, RecordState> }
+interface LegacySnapshot { entries: unknown; connection: unknown; epoch: unknown }
+interface LegacyMigration extends StoredChat { used: boolean; retire?: LegacySnapshot }
+
+/** Snapshots eligible for retirement contain validated JSON-shaped records only. */
+function sameLegacyValue(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object' || Object.getPrototypeOf(a) !== Object.getPrototypeOf(b)) return false;
+  if (Array.isArray(a) && Array.isArray(b) && a.length !== b.length) return false;
+  const first = a as Record<string, unknown>; const second = b as Record<string, unknown>;
+  const fields = Object.keys(first);
+  return fields.length === Object.keys(second).length && fields.every((field) => Object.hasOwn(second, field) && sameLegacyValue(first[field], second[field]));
+}
 interface Draft extends State { dirty: Set<string>; isolated: Set<string>; isolatedMemories: Set<string>; directoryDirty: boolean }
 interface Backup { format: 'peetty-backup'; version: 1 | 2; createdAt: number; activeProfileId: string; profiles: ProfileRecord[]; sessions?: BackupSession[] }
 
@@ -55,7 +70,22 @@ const emptyState = (): State => ({ directory: { version: 1, ids: [], activeProfi
 const key = (profileId: string): string => `profile:${profileId}`;
 const freshId = (): string => Array.from(crypto.getRandomValues(new Uint32Array(4)), (part) => part.toString(36)).join('-');
 const normalizedText = (body: string): string => body.normalize('NFKC').toLocaleLowerCase('en-US').replace(/\s+/gu, ' ').trim();
-const sourceIndexes = new WeakMap<readonly ChatEntry[], ReadonlyMap<string, ChatEntry>>();
+// Integrity check over exact UTF-16 chunks, including split surrogate pairs. This is
+// accidental-corruption detection, not a signature or an authenticity guarantee.
+const CRC_TABLE = Uint32Array.from({ length: 256 }, (_, i) => {
+  let value = i;
+  for (let bit = 0; bit < 8; bit++) value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+  return value >>> 0;
+});
+function backupDigest(value: string): string {
+  let crc = 0xffffffff;
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    crc = CRC_TABLE[(crc ^ code) & 255]! ^ (crc >>> 8);
+    crc = CRC_TABLE[(crc ^ (code >>> 8)) & 255]! ^ (crc >>> 8);
+  }
+  return `crc32:${((crc ^ 0xffffffff) >>> 0).toString(16).padStart(8, '0')}:${value.length}`;
+}
 
 function check(condition: unknown, message = INVALID): asserts condition {
   if (!condition) throw new Error(message);
@@ -221,11 +251,6 @@ function touchMemories(draft: Draft, profileId: string): RecordState {
   }
   return record;
 }
-function entryIndex(entries: readonly ChatEntry[]): ReadonlyMap<string, ChatEntry> {
-  let index = sourceIndexes.get(entries);
-  if (!index) { index = new Map(entries.map((entry) => [entry.id, entry])); sourceIndexes.set(entries, index); }
-  return index;
-}
 function detachSources(profile: ProfileRecord, removed: readonly ChatEntry[]): void {
   const sources = new Map(removed.map((entry) => [entry.id, entry.text]));
   for (const memory of profile.memories) {
@@ -241,16 +266,9 @@ function addSession(sessions: Map<string, StoredSessionConnection>, incoming: St
   sessions.delete(identity);
   sessions.set(identity, incoming);
 }
+/** Memory-only sharing excludes conversation evidence; complete backups retain it. */
 function portableMemories(profile: ProfileRecord): MemoryEntry[] {
-  return profile.memories.map((value) => {
-    const memory = { ...value };
-    if (memory.sourceText === undefined && memory.sourceEntryId) {
-      const source = entryIndex(profile.entries).get(memory.sourceEntryId);
-      if (source) memory.sourceText = source.text;
-    }
-    delete memory.sourceEntryId;
-    return memory;
-  });
+  return profile.memories.map(({ sourceEntryId: _sourceId, sourceText: _sourceText, ...memory }) => memory);
 }
 /** Keep original text for CAS without retaining entries outside the runtime's bounded view. */
 function runtimeWindow(archive: readonly ChatEntry[], sanitizeText?: (text: string) => string): { entries: ChatEntry[]; originals: ChatEntry[] } {
@@ -411,7 +429,7 @@ export class BrowserProfileStore {
   }
 
   /** Read raw legacy records without applying the runtime's history truncation policy. */
-  private async legacy(): Promise<StoredChat & { used: boolean }> {
+  private async legacy(): Promise<LegacyMigration> {
     if (!this.persist || this.failed || this.closed) return { entries: [], used: false };
     // Migration is optional and owns its connection. Its failure must not close
     // healthy profile storage or bypass the authoritative initialization recheck.
@@ -443,8 +461,45 @@ export class BrowserProfileStore {
       }
       let saved: StoredConnection | undefined;
       try { if (connection !== undefined) saved = connectionFrom(connection, false); } catch { /* History can still migrate. */ }
-      return { entries: salvaged, used: entries !== undefined || connection !== undefined || epoch !== undefined,
-        ...(saved ? { connection: saved } : {}) };
+      // Partial salvage is useful, but does not authorize deleting any originals.
+      let complete = false;
+      try {
+        if (entries !== undefined) {
+          unique(array(entries, PROFILE_LIMITS.entries, entryFrom));
+          check(Array.isArray(entries) && entries.length === salvaged.length);
+        }
+        if (connection !== undefined) connectionFrom(connection);
+        check(epoch === undefined || typeof epoch === 'string');
+        complete = true;
+      } catch { /* Leave malformed/partially copied legacy data available for recovery. */ }
+      const used = entries !== undefined || connection !== undefined || epoch !== undefined;
+      return { entries: salvaged, used, ...(saved ? { connection: saved } : {}),
+        ...(complete && used ? { retire: { entries, connection, epoch } } : {}) };
+    } finally { db.close(); }
+  }
+
+  /** Retire only the exact records copied by our successful authoritative write.
+   * Read/compare/delete share a legacy transaction, so a concurrent old client wins. */
+  private async retireLegacy(snapshot: LegacySnapshot): Promise<void> {
+    if (!this.persist || this.failed || this.closed) return;
+    const db = await openStateDatabase(`${this.namespace}:chat`, { isClosed: () => this.closed, onFailure: () => {} });
+    if (!db) return;
+    try {
+      await stateTransaction(db, true, (store, abort) => {
+        const fields = [['entries', 'entries'], ['connection', 'connection'], ['entriesEpoch', 'epoch']] as const;
+        const current = {} as LegacySnapshot;
+        let remaining = fields.length;
+        for (const [recordKey, field] of fields) {
+          const request = store.get(recordKey);
+          request.onsuccess = () => {
+            try {
+              current[field] = request.result;
+              if (--remaining || !sameLegacyValue(current, snapshot)) return;
+              for (const [recordKey] of fields) store.delete(recordKey);
+            } catch { abort(); }
+          };
+        }
+      });
     } finally { db.close(); }
   }
 
@@ -454,20 +509,22 @@ export class BrowserProfileStore {
       if (this.initialized) return;
       await this.run('all', false, () => {});
       if (!this.state.directory.ids.length) {
-        const { used, ...legacy } = await this.legacy();
+        const { used, retire, ...legacy } = await this.legacy();
         const now = Date.now();
         const profile: ProfileRecord = {
           id: freshId(), name: settings.name ?? 'Miru', figure: settings.figure ?? 'miru', personality: settings.personality ?? '',
           useMemories: true, autoRemember: false, memories: [], ...legacy, createdAt: now, updatedAt: now,
         };
-        await this.run('all', true, (draft) => {
+        const migrated = await this.run('all', true, (draft) => {
           // Another tab may have completed migration while we read the legacy database.
-          if (draft.directory.ids.length) return;
+          if (draft.directory.ids.length) return false;
           draft.directory = { version: 1, ids: [profile.id], activeProfileId: profile.id, ...(!used ? { bootstrapProfileId: profile.id } : {}) };
           draft.records.set(profile.id, { profile, epoch: freshId() });
           draft.dirty.add(profile.id);
           draft.directoryDirty = true;
+          return true;
         });
+        if (migrated && !this.failed && retire) await this.retireLegacy(retire);
       }
       this.selectedId = this.state.directory.activeProfileId;
       this.initialized = true;
@@ -698,8 +755,34 @@ export class BrowserProfileStore {
     });
   }
 
+  /** Bounded legacy API. UI downloads use backupDownload to preserve larger archives. */
   async backup(options?: BackupOptions): Promise<string> {
-    const supplied = options?.sessions.map(sessionFrom) ?? [];
+    const result = await this.serializeBackup(options);
+    checkFile(result, LIMIT);
+    return result;
+  }
+
+  async backupDownload(options?: BackupDownloadOptions): Promise<string | BackupDownloadFile[]> {
+    const fileBytes = options?._testing?.fileBytes ?? PROFILE_LIMITS.fileBytes;
+    check(Number.isSafeInteger(fileBytes) && fileBytes >= 1_024 && fileBytes <= PROFILE_LIMITS.fileBytes);
+    const result = await this.serializeBackup(options);
+    if (result.length <= fileBytes && new TextEncoder().encode(result).length <= fileBytes) return result;
+    // JSON escaping can expand a UTF-16 code unit to six bytes. Keep ample room
+    // for the envelope, even when chunks split surrogate pairs or contain quotes.
+    const chunkSize = Math.floor((fileBytes - 512) / 6);
+    const count = Math.ceil(result.length / chunkSize);
+    const backupId = freshId(); const digest = backupDigest(result);
+    return Array.from({ length: count }, (_, index) => {
+      const part: BackupPart = { format: 'peetty-backup-part', version: 1, backupId, index, count, digest,
+        text: result.slice(index * chunkSize, (index + 1) * chunkSize) };
+      const serialized = stringify(part);
+      check(new TextEncoder().encode(serialized).length <= fileBytes, LIMIT);
+      return { name: `peetty-backup-${backupId}.part-${String(index + 1).padStart(String(count).length, '0')}-of-${count}.json`, text: serialized };
+    });
+  }
+
+  private async serializeBackup(options?: Partial<BackupOptions>): Promise<string> {
+    const supplied = options?.sessions?.map(sessionFrom) ?? [];
     return this.enqueue(async () => {
       this.ready();
       return this.run('all', false, (draft) => {
@@ -721,15 +804,42 @@ export class BrowserProfileStore {
           if (sessions) addSession(sessions, session);
         }
         const sessions = Array.from(byProfile, ([profileId, values]) => Array.from(values.values(), (session) => ({ profileId, ...session }))).flat();
-        return stringify({ format: 'peetty-backup', version: 2, createdAt: Date.now(),
+        return JSON.stringify({ format: 'peetty-backup', version: 2, createdAt: Date.now(),
           activeProfileId: this.selectedId && draft.directory.ids.includes(this.selectedId) ? this.selectedId : draft.directory.activeProfileId,
           profiles, ...(sessions.length ? { sessions } : {}) });
       });
     });
   }
   async restore(value: string): Promise<void> {
-    // Validate EVERY profile and session before enqueueing a mutation.
-    const backup = backupFrom(parseJSON(value));
+    return this.restoreFiles([value]);
+  }
+
+  async restoreFiles(texts: readonly string[]): Promise<void> {
+    check(Array.isArray(texts) && texts.length > 0);
+    // Each input retains the original file ceiling. Only a complete, consistent
+    // multipart envelope can authorize parsing a larger reconstructed document.
+    const values = Array.from(texts, parseJSON);
+    let value: unknown = values[0];
+    if (values.length > 1 || (value && typeof value === 'object' && 'format' in value && value.format === 'peetty-backup-part')) {
+      const parts = values.map((item) => {
+        const part = object(item, ['format', 'version', 'backupId', 'index', 'count', 'digest', 'text']);
+        check(part.format === 'peetty-backup-part' && part.version === 1);
+        check(Number.isSafeInteger(part.index) && Number.isSafeInteger(part.count));
+        const index = part.index as number; const count = part.count as number;
+        check(count > 1 && count === values.length && index >= 0 && index < count);
+        const digest = text(part.digest, 100);
+        check(/^crc32:[0-9a-f]{8}:[1-9][0-9]*$/.test(digest));
+        return { backupId: id(part.backupId), index, count, digest, text: text(part.text, PROFILE_LIMITS.fileBytes) };
+      });
+      const first = parts[0]!;
+      check(parts.every((part) => part.backupId === first.backupId && part.count === first.count && part.digest === first.digest));
+      check(new Set(parts.map((part) => part.index)).size === parts.length);
+      const reconstructed = parts.sort((a, b) => a.index - b.index).map((part) => part.text).join('');
+      check(backupDigest(reconstructed) === first.digest);
+      try { value = JSON.parse(reconstructed) as unknown; } catch { throw new Error(INVALID); }
+    } else check(values.length === 1);
+    // Validate EVERY reconstructed profile and session before enqueueing a mutation.
+    const backup = backupFrom(value);
     return this.enqueue(async () => {
       this.ready();
       const sessions = await this.run('all', true, (draft) => {
@@ -799,7 +909,6 @@ export class BrowserProfileStore {
     const result = [`# ${name} memories`, ...memories.map((memory, i) => [
       `## Memory ${i + 1}`, memory.text,
       `- ID: ${memory.id}\n- Saved: ${memory.manual ? 'Manually' : 'Automatically'}\n- Created (Unix ms): ${memory.createdAt}\n- Updated (Unix ms): ${memory.updatedAt}`,
-      ...(memory.sourceText !== undefined ? [`Source:\n\n${memory.sourceText.split('\n').map((line) => `> ${line}`).join('\n')}`] : []),
     ].join('\n\n'))].join('\n\n') + '\n';
     checkFile(result, LIMIT);
     return result;

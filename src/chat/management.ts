@@ -1,6 +1,6 @@
 import type { Language } from '../pet/i18n.ts';
 import { PRESET_IDS } from '../catalog.ts';
-import type { BrowserProfileStore, MemoryEntry, ProfileInfo } from './profiles.ts';
+import type { BackupDownloadFile, BrowserProfileStore, MemoryEntry, ProfileInfo } from './profiles.ts';
 import type { ChatEntry, CompanionAction } from './types.ts';
 import { COPY as CHAT_COPY } from './copy.ts';
 import { PROFILE_LIMITS } from './limits.ts';
@@ -31,8 +31,9 @@ const COPY = {
     edit: 'Edit', remove: 'Delete', confirm: 'Confirm deletion', cancel: 'Cancel', source: 'Source message', sourceMissing: 'Source message is no longer in history.',
     manual: 'Added or edited by you', automatic: 'Remembered from chat', you: 'You', companion: 'Companion', action: 'Action', more: 'Show more',
     backupTitle: 'Backup and restore', backupHint: 'Download all profiles, characters, memories, conversations, providers and model settings. API keys are included in plain text; keep this file private.',
-    backup: 'Download full backup', restore: 'Restore backup', restoreHint: 'Restore creates independent profiles and keeps your existing data. Connections are used only after you start chatting.',
-    memoryTitle: 'Import and export memory', memoryHint: 'Only the selected profile’s memories. No conversation history or API keys.',
+    backup: 'Download full backup', multipartDownloaded: 'Backup parts are ready. Allow multiple downloads in your browser and keep every part together. To restore, select all parts at once.',
+    restore: 'Restore backup', restoreHint: 'Restore creates independent profiles and keeps your existing data. Select the backup file, or all files of a multipart backup together. Connections are used only after you start chatting.',
+    memoryTitle: 'Import and export memory', memoryHint: 'Only the selected profile’s memories. Source messages, conversation history and API keys are omitted.',
     exportMemory: 'Download memory JSON', exportMarkdown: 'Download memory Markdown', importMemory: 'Import memory JSON',
     imported: 'Import complete.', saved: 'Changes saved.', downloaded: 'Download ready.', working: 'Working…', failed: 'Could not complete this operation. Check the file and try again.',
     lastProfile: 'Keep at least one profile.', required: 'Enter some text first.',
@@ -53,8 +54,9 @@ const COPY = {
     edit: '编辑', remove: '删除', confirm: '确认删除', cancel: '取消', source: '来源消息', sourceMissing: '来源消息已不在聊天历史中。',
     manual: '由你添加或修改', automatic: '从聊天中记住', you: '你', companion: '伙伴', action: '动作', more: '显示更多',
     backupTitle: '备份与恢复', backupHint: '下载全部档案、角色、记忆、聊天、Provider 和模型设置。文件包含明文 API Key，请妥善保管。',
-    backup: '下载完整备份', restore: '恢复备份', restoreHint: '恢复为独立的新档案，保留现有数据。只有你开始聊天后才会使用恢复的连接。',
-    memoryTitle: '导入与导出记忆', memoryHint: '只包含当前档案的记忆，不包含聊天历史或 API Key。',
+    backup: '下载完整备份', multipartDownloaded: '备份分卷已准备下载。请允许浏览器下载多个文件，并保留全部分卷。恢复时请一次选中所有分卷。',
+    restore: '恢复备份', restoreHint: '恢复为独立的新档案，保留现有数据。请选择备份文件，分卷备份需一次选中全部文件。只有你开始聊天后才会使用恢复的连接。',
+    memoryTitle: '导入与导出记忆', memoryHint: '只包含当前档案的记忆，不包含来源消息、聊天历史或 API Key。',
     exportMemory: '下载记忆 JSON', exportMarkdown: '下载记忆 Markdown', importMemory: '导入记忆 JSON',
     imported: '导入完成。', saved: '修改已保存。', downloaded: '已准备下载。', working: '正在处理…', failed: '操作未完成，请检查文件后重试。',
     lastProfile: '至少需要保留一份档案。', required: '请先填写内容。',
@@ -73,7 +75,7 @@ interface Options {
   onReload: () => Promise<void>;
   onTab: (connection: boolean) => void;
   onBusy?: (busy: boolean) => void;
-  backup: () => Promise<string>;
+  backup: () => Promise<string | BackupDownloadFile[]>;
 }
 interface TextDraft {
   value: string;
@@ -318,13 +320,13 @@ export function createManagement(options: Options) {
     locked.clear();
     options.onBusy?.(false);
   }
-  async function run(id: string, origin: HTMLElement, action: () => Promise<void>, success: CopyKey = 'saved') {
+  async function run(id: string, origin: HTMLElement, action: () => Promise<void>, success: CopyKey | (() => CopyKey) = 'saved') {
     if (busy || !owns(id, origin)) return;
     busy = true;
     options.onBusy?.(true);
     const focus = captureFocus();
     captureDrafts(); say('working'); lockControls();
-    try { await action(); if (!destroyed) say(success); }
+    try { await action(); if (!destroyed) say(typeof success === 'function' ? success() : success); }
     catch { if (!destroyed) say('failed', true); }
     finally {
       try {
@@ -648,14 +650,15 @@ export function createManagement(options: Options) {
     const link = el('a'); link.href = url; link.download = name; root.append(link);
     try { link.click(); } finally { link.remove(); }
   }
-  function fileButton(profileId: string, key: CopyKey, action: (text: string) => Promise<void>) {
-    const input = el('input'); input.type = 'file'; input.accept = '.json,application/json'; input.hidden = true;
+  function fileButton(profileId: string, key: CopyKey, action: (texts: string[]) => Promise<void>, multiple = false) {
+    const input = el('input'); input.type = 'file'; input.accept = '.json,application/json'; input.hidden = true; input.multiple = multiple;
     const trigger = button(key); trigger.dataset.focusKey = key; trigger.addEventListener('click', () => { if (!busy && owns(profileId, trigger)) input.click(); });
     input.addEventListener('change', () => {
-      const file = input.files?.[0]; input.value = ''; if (!file) return;
+      const files = Array.from(input.files ?? []).slice(0, multiple ? undefined : 1); input.value = ''; if (!files.length) return;
       void run(profileId, input, async () => {
-        if (file.size > PROFILE_LIMITS.fileBytes) throw new Error('File too large.');
-        const text = await file.text(); requireOwner(profileId, input); await action(text); if (!destroyed) refresh();
+        // Check every part before reading any, so an oversized later part does not allocate earlier bodies.
+        if (files.some(file => file.size > PROFILE_LIMITS.fileBytes)) throw new Error('File too large.');
+        const texts = await Promise.all(files.map(file => file.text())); requireOwner(profileId, input); await action(texts); if (!destroyed) refresh();
       }, 'imported');
     });
     const group = el('div', 'pc-row-actions'); group.append(trigger, input); return group;
@@ -664,14 +667,21 @@ export function createManagement(options: Options) {
     const profileId = info.id;
     page.append(copy('h3', 'backupTitle'), copy('p', 'backupHint', 'pc-note'));
     const backup = button('backup', 'pc-primary'); backup.classList.add('pc-backup'); backup.dataset.focusKey = 'backup';
-    backup.addEventListener('click', () => { void run(profileId, backup, async () => { download(await options.backup(), `peetty-backup-${new Date().toISOString().slice(0, 10)}.json`); }, 'downloaded'); });
-    page.append(backup, copy('p', 'restoreHint', 'pc-note'), fileButton(profileId, 'restore', (text) => transition(() => store.restore(text))));
+    backup.addEventListener('click', () => {
+      let multipart = false;
+      void run(profileId, backup, async () => {
+        const result = await options.backup();
+        if (typeof result === 'string') download(result, `peetty-backup-${new Date().toISOString().slice(0, 10)}.json`);
+        else { multipart = true; for (const file of result) download(file.text, file.name); }
+      }, () => multipart ? 'multipartDownloaded' : 'downloaded');
+    });
+    page.append(backup, copy('p', 'restoreHint', 'pc-note'), fileButton(profileId, 'restore', (texts) => transition(() => store.restoreFiles(texts)), true));
     page.append(copy('h4', 'memoryTitle'), copy('p', 'memoryHint', 'pc-note'));
     const actions = el('div', 'pc-row-actions'); const json = button('exportMemory'); const markdown = button('exportMarkdown');
     json.dataset.focusKey = 'exportMemory'; markdown.dataset.focusKey = 'exportMarkdown';
     json.addEventListener('click', () => { void run(profileId, json, async () => { download(await store.exportMemories(profileId), 'peetty-memories.json'); }, 'downloaded'); });
     markdown.addEventListener('click', () => { void run(profileId, markdown, async () => { download(await store.exportMemoryMarkdown(profileId), 'peetty-memories.md', 'text/markdown'); }, 'downloaded'); });
-    actions.append(json, markdown); page.append(actions, fileButton(profileId, 'importMemory', (text) => store.importMemories(profileId, text)));
+    actions.append(json, markdown); page.append(actions, fileButton(profileId, 'importMemory', ([text]) => store.importMemories(profileId, text!)));
   }
   function renderPage() {
     page.replaceChildren(); page.dataset.connection = String(tab === 'connection');

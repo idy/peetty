@@ -99,6 +99,63 @@ async function mountPanel(t: TestContext, model: PeettyModelOptions | undefined,
   return { panel, root: uiRoot, parentRoot: root, frame, window, query, htmlWrites: () => htmlWrites };
 }
 
+describe('composer acceptance ownership', () => {
+  for (const failure of ['archive', 'credential'] as const) {
+    it(`keeps the draft when ${failure} preflight rejects before input acceptance`, async (t) => {
+      if (failure === 'archive') {
+        const storage = BrowserProfileStore.prototype.runtimeStorage;
+        t.mock.method(BrowserProfileStore.prototype, 'runtimeStorage', function(this: BrowserProfileStore, id: string) {
+          return { ...storage.call(this, id), ensureCapacity: async () => { throw new Error('Archive capacity reached.'); } };
+        });
+      }
+      const { panel, query, window } = await mountPanel(t, { ...MODEL, ...(failure === 'credential' ? { getApiKey: async () => { throw new Error('Unavailable fixture credential'); } } : {}) });
+      panel.open(false);
+      const input = query<HTMLTextAreaElement>('[name="message"]'); input.value = '  Keep this unsent draft  ';
+      input.dispatchEvent(new window.Event('input') as unknown as Event); input.form!.requestSubmit();
+      await eventually(() => !query('.pc-error').hidden);
+      assert.equal(input.value, '  Keep this unsent draft  ');
+      assert.equal(query('.pc-messages').children.length, 0);
+      assert.equal(query<HTMLButtonElement>('.pc-submit').disabled, false);
+    });
+  }
+
+  for (const change of ['unchanged', 'edited', 'retyped', 'canceled'] as const) {
+    it(`clears only the accepted input revision after credential preflight (${change})`, async (t) => {
+      const credential = deferred<string>();
+      const { panel, query, window } = await mountPanel(t, { ...MODEL, getApiKey: () => credential.promise }); panel.open(false);
+      const network = t.mock.method(globalThis, 'fetch', async () => { throw new Error('Fixture network unavailable'); });
+      const input = query<HTMLTextAreaElement>('[name="message"]');
+      const edit = (value: string) => { input.value = value; input.dispatchEvent(new window.Event('input') as unknown as Event); };
+      edit('Original draft'); input.form!.requestSubmit(); await flush();
+      assert.equal(input.value, 'Original draft', 'pending credentials retain the draft');
+      if (change === 'edited') edit('New draft typed while waiting');
+      if (change === 'retyped') { edit(''); edit('Original draft'); }
+      if (change === 'canceled') { input.form!.requestSubmit(); await flush(); }
+      credential.resolve('fixture-acceptance-key');
+      if (change === 'canceled') { await flush(); assert.equal(network.mock.callCount(), 0); }
+      else await eventually(() => query('.pc-messages').children.length > 0);
+      assert.equal(input.value, change === 'unchanged' ? '' : change === 'edited' ? 'New draft typed while waiting' : 'Original draft');
+      assert.equal(query('.pc-messages').children.length > 0, change !== 'canceled');
+    });
+  }
+});
+
+describe('panel surface fallbacks', () => {
+  it('keeps literal light and dark surfaces outside color-mix support blocks', async (t) => {
+    const { root, window } = await mountPanel(t, MODEL);
+    const sheet = new window.CSSStyleSheet(); sheet.replaceSync(root.querySelector('style')!.textContent!);
+    const styles = [...sheet.cssRules];
+    const base = styles.find(rule => rule.cssText.startsWith('.peetty-chat {')) as unknown as CSSStyleRule;
+    for (const key of ['--pc-bg', '--pc-input', '--pc-accent', '--pc-soft', '--pc-line', '--pc-line-strong', '--pc-error-bg']) assert.match(base.style.getPropertyValue(key).trim(), /^#[a-f0-9]{3,8}$/i);
+    const dark = styles.find(rule => rule.cssText.startsWith('@media (prefers-color-scheme: dark)')) as unknown as CSSMediaRule;
+    assert.match((dark.cssRules[0] as CSSStyleRule).style.getPropertyValue('--pc-bg'), /^#[a-f0-9]{6}$/i);
+    for (const rule of styles) {
+      if (rule.cssText.includes('color-mix(')) assert.ok(rule.cssText.startsWith('@supports (color: color-mix('), 'mixed surfaces and hover enhancements require support');
+    }
+    assert.ok(styles.some(rule => rule.cssText.includes('background: linear-gradient(120deg, var(--pc-color), var(--pc-color-end))')), 'adaptive header gradient remains available');
+  });
+});
+
 describe('character portrait ownership', () => {
   function face(color: Portrait['color']) {
     let live = false;
@@ -383,9 +440,11 @@ describe('chat panel credential ownership', () => {
       assert.equal(query<HTMLInputElement>('[name="model"]').value, injected.id);
       assert.equal(query<HTMLInputElement>('[name="remember"]').checked, false);
       assert.equal(saves.mock.callCount(), 0);
-      assert.deepEqual(storage.databases.get('saved-connection:chat')?.get('connection'), saved);
+      assert.deepEqual(savedConnection(storage, 'saved-connection'), saved);
+      assert.equal(storage.databases.get('saved-connection:chat')?.get('connection'), undefined, 'migration retires the legacy credential');
       panel.destroy();
-      const restored = new ChatRuntime({ chat: { storageKey: 'saved-connection', persist: true } });
+      const profiles = new BrowserProfileStore('saved-connection'); await profiles.initialize(); t.after(() => profiles.close());
+      const restored = new ChatRuntime({ storage: profiles.runtimeStorage(profiles.activeProfileId) });
       t.after(() => restored.destroy());
       await restored.initialize();
       assert.deepEqual(restored.model, saved);
@@ -510,7 +569,7 @@ describe('setup drafts and credential replacement', () => {
     let lookups = 0;
     const { query, window } = await mountPanel(t, {
       ...MODEL, apiKey: 'fixture-original-key', getApiKey: () => { lookups++; return 'fixture-callback-key'; },
-      headers: { Authorization: 'Bearer fixture-expired', 'x-api-key': 'fixture-expired', 'api-key': 'fixture-expired', 'Cf-Aig-Authorization': 'Bearer fixture-expired', 'x-route': 'retained' },
+      headers: { Authorization: 'Bearer fixture-expired', 'x-api-key': 'fixture-expired', 'api-key': 'fixture-expired', 'Cf-Aig-Authorization': 'Bearer fixture-expired', 'OpenAI-Project': 'retained' },
     }, { onReply: () => reply.resolve() });
     const requests: Request[] = [];
     t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -531,7 +590,7 @@ describe('setup drafts and credential replacement', () => {
       assert.equal(request.headers.get('x-api-key'), null);
       assert.equal(request.headers.get('api-key'), null);
       assert.equal(request.headers.get('cf-aig-authorization'), null);
-      assert.equal(request.headers.get('x-route'), 'retained');
+      assert.equal(request.headers.get('openai-project'), 'retained');
     }
     assert.equal(lookups, 0);
   });
@@ -1063,6 +1122,38 @@ describe('reviewed profile ownership and recovery', () => {
     panel.open(true);
     assert.equal(query<HTMLInputElement>('[name="model"]').value, 'late-injected-model');
     assert.equal(query<HTMLInputElement>('[name="remember"]').checked, false);
+  });
+
+  it('downloads and restores all backup parts through the real panel with callback credentials', async (t) => {
+    installChatIndexedDB(t);
+    const download = BrowserProfileStore.prototype.backupDownload;
+    t.mock.method(BrowserProfileStore.prototype, 'backupDownload', function(this: BrowserProfileStore, options?: Parameters<typeof download>[0]) {
+      return download.call(this, { ...options, _testing: { fileBytes: 1_024 } });
+    });
+    const fixtureKey = `fixture-multipart-key-${'x'.repeat(1_100)}`;
+    let lookups = 0;
+    const { query, root, window } = await mountPanel(t, { ...MODEL, getApiKey: () => { lookups++; return fixtureKey; } }, { chat: { storageKey: 'multipart-panel-ui' } });
+    const blobs: Blob[] = []; const names: string[] = [];
+    t.mock.method(URL, 'createObjectURL', (blob: Blob) => { blobs.push(blob); return `blob:multipart-panel-${blobs.length}`; });
+    t.mock.method(URL, 'revokeObjectURL', () => {});
+    root.addEventListener('click', event => {
+      const link = (event.target as Element).closest<HTMLAnchorElement>('a[download]');
+      if (link) { event.preventDefault(); names.push(link.download); }
+    });
+    query<HTMLButtonElement>('[data-tab="data"]').click(); query<HTMLButtonElement>('.pc-backup').click();
+    await eventually(() => query('.pc-manage-status').textContent!.includes('Backup parts are ready'));
+    assert.ok(blobs.length > 1); assert.equal(lookups, 1); assert.equal(names.length, blobs.length);
+    const texts = await Promise.all(blobs.map(blob => blob.text()));
+    const restored = JSON.parse(texts.map(text => JSON.parse(text).text as string).join(''));
+    assert.equal(restored.sessions[0].connection.apiKey, fixtureKey);
+    const before = query<HTMLSelectElement>('.pc-profile-select').value;
+    const input = query<HTMLInputElement>('input[type="file"][multiple]');
+    Object.defineProperty(input, 'files', { configurable: true, value: texts.map((text, i) => new window.File([text], names[i]!)) });
+    input.dispatchEvent(new window.Event('change') as unknown as Event);
+    await eventually(() => query<HTMLSelectElement>('.pc-profile-select').options.length === 2 && !query<HTMLSelectElement>('.pc-profile-select').disabled);
+    assert.notEqual(query<HTMLSelectElement>('.pc-profile-select').value, before);
+    assert.equal(query<HTMLInputElement>('[name="key"]').value, fixtureKey, 'restored multipart session credentials reach the active connection');
+    assert.match(query('.pc-manage-status').textContent!, /Import complete/);
   });
 
   it('registers a backup-resolved callback key for later message and memory redaction', async (t) => {

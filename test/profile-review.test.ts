@@ -105,23 +105,23 @@ describe('saved and ephemeral connection regressions', () => {
   it('canonicalizes restored URLs and retains only headers owned by the latest restored session', async (t) => {
     installChatIndexedDB(t);
     const manager = await store(t);
-    const saved = { ...connection, baseUrl: 'https://EXAMPLE.test/v1/chat/completions/', headers: { 'x-api-key': 'saved-header', 'x-version': '1' } };
-    const session = { ...connection, baseUrl: 'https://example.test/v1/models', apiKey: 'ephemeral-key', headers: { Authorization: 'Bearer ephemeral-header', 'X-Version': '2' } };
+    const saved = { ...connection, baseUrl: 'https://EXAMPLE.test/v1/chat/completions/', headers: { 'x-api-key': 'saved-header', 'openai-project': '1' } };
+    const session = { ...connection, baseUrl: 'https://example.test/v1/models', apiKey: 'ephemeral-key', headers: { Authorization: 'Bearer ephemeral-header', 'OpenAI-Project': '2' } };
     await manager.restore(document([profile('original', { connection: saved })], [{ profileId: 'original', connection: session, rememberKey: false }]));
     const id = manager.activeProfileId;
     const adapter = manager.storage(id);
     const loaded = await adapter.load();
     assert.equal(loaded.connection!.baseUrl, connection.baseUrl);
     assert.equal(loaded.sessionConnections![0]!.connection.baseUrl, connection.baseUrl);
-    await adapter.saveConnection({ ...connection, headers: { authorization: 'Bearer ephemeral-header', 'x-version': '2', 'x-fresh': 'SDK-only' } });
+    await adapter.saveConnection({ ...connection, headers: { authorization: 'Bearer ephemeral-header', 'openai-project': '2', 'x-fresh': 'SDK-only' } });
     const accepted = await adapter.load();
-    assert.deepEqual(accepted.connection!.headers, { authorization: 'Bearer ephemeral-header', 'x-version': '2' });
+    assert.deepEqual(accepted.connection!.headers, { authorization: 'Bearer ephemeral-header', 'openai-project': '2' });
     assert.equal(accepted.sessionConnections, undefined);
-    await adapter.saveConnection({ ...connection, headers: { 'x-version': '2' }, effort: 'low' }, { rememberCredentials: true });
-    assert.deepEqual((await adapter.load()).connection!.headers, { 'x-version': '2' });
-    await adapter.saveConnection({ ...connection, headers: { 'x-version': '2', authorization: 'new SDK credential' } }, { rememberCredentials: false });
+    await adapter.saveConnection({ ...connection, headers: { 'openai-project': '2' }, effort: 'low' }, { rememberCredentials: true });
+    assert.deepEqual((await adapter.load()).connection!.headers, { 'openai-project': '2' });
+    await adapter.saveConnection({ ...connection, headers: { 'openai-project': '2', authorization: 'new SDK credential' } }, { rememberCredentials: false });
     assert.equal((await adapter.load()).connection!.apiKey, undefined);
-    assert.deepEqual((await adapter.load()).connection!.headers, { 'x-version': '2' });
+    assert.deepEqual((await adapter.load()).connection!.headers, { 'openai-project': '2' });
   });
 
   it('honors explicit credential removal for both stores and never persists fresh SDK headers', async (t) => {
@@ -130,15 +130,15 @@ describe('saved and ephemeral connection regressions', () => {
     const id = manager.activeProfileId;
     await manager.storage(id).saveConnection({ ...connection, headers: { authorization: 'fresh SDK header' } }, { rememberCredentials: true });
     assert.equal(manager.storedConnection(id)!.headers, undefined);
-    await manager.restore(document([profile('auth', { connection: { ...connection, headers: { authorization: 'Bearer restored', 'x-version': '1' } } })]));
+    await manager.restore(document([profile('auth', { connection: { ...connection, headers: { authorization: 'Bearer restored', 'openai-project': '1' } } })]));
     const restoredId = manager.activeProfileId;
-    await manager.storage(restoredId).saveConnection({ ...connection, headers: { authorization: 'Bearer restored', 'x-version': '1' } }, { rememberCredentials: false });
-    assert.deepEqual(manager.storedConnection(restoredId), { id: connection.id, baseUrl: connection.baseUrl, headers: { 'x-version': '1' } });
-    idb.databases.set('legacy-credentials:chat', new Map([['connection', { ...connection, baseUrl: 'https://example.test/v1/models', headers: { authorization: 'Bearer restored', 'x-version': '1' } }]]));
+    await manager.storage(restoredId).saveConnection({ ...connection, headers: { authorization: 'Bearer restored', 'openai-project': '1' } }, { rememberCredentials: false });
+    assert.deepEqual(manager.storedConnection(restoredId), { id: connection.id, baseUrl: connection.baseUrl, headers: { 'openai-project': '1' } });
+    idb.databases.set('legacy-credentials:chat', new Map([['connection', { ...connection, baseUrl: 'https://example.test/v1/models', headers: { authorization: 'Bearer restored', 'openai-project': '1' } }]]));
     const legacy = new BrowserChatStore('legacy-credentials'); t.after(() => legacy.close());
     await legacy.load();
-    await legacy.saveConnection({ ...connection, headers: { authorization: 'Bearer restored', 'x-version': '1' } }, { rememberCredentials: false });
-    assert.deepEqual((await legacy.load()).connection, { id: connection.id, baseUrl: connection.baseUrl, headers: { 'x-version': '1' } });
+    await legacy.saveConnection({ ...connection, headers: { authorization: 'Bearer restored', 'openai-project': '1' } }, { rememberCredentials: false });
+    assert.deepEqual((await legacy.load()).connection, { id: connection.id, baseUrl: connection.baseUrl, headers: { 'openai-project': '1' } });
   });
 
   it('preserves saved connections and every distinct RAM session through successive complete backups', async (t) => {
@@ -267,7 +267,7 @@ describe('figures, memories, and authoritative exports', () => {
     assert.deepEqual(manager.memoryTexts(id).map((memory) => memory.text), ['Manual while disabled', 'Imported while disabled', 'Likes coffee']);
   });
 
-  it('exports queued writes and latest peer changes with portable source metadata in JSON and Markdown', async (t) => {
+  it('exports queued writes and latest peer memories without source messages in JSON and Markdown', async (t) => {
     installChatIndexedDB(t);
     const manager = await store(t, 'fresh-memory-export');
     await manager.restore(document([profile('sourced', { entries: [entry('source', 'Original\nsource')], memories: [{ ...fact('memory', 'A sourced fact'), sourceEntryId: 'source' }] })]));
@@ -281,19 +281,22 @@ describe('figures, memories, and authoritative exports', () => {
     await peer.update(id, { name: 'Fresh name' });
     const fresh = JSON.parse(await manager.exportMemories(id)) as { memories: MemoryEntry[] };
     assert.deepEqual(fresh.memories.map((memory) => memory.text), ['A sourced fact', 'Queued memory', 'Peer memory']);
-    assert.equal(fresh.memories[0]!.sourceText, 'Original\nsource');
+    assert.equal(fresh.memories[0]!.sourceText, undefined);
     assert.equal(fresh.memories[0]!.sourceEntryId, undefined);
     assert.equal(fresh.memories[0]!.createdAt, 1);
     const markdown = await manager.exportMemoryMarkdown(id);
     assert.match(markdown, /^# Fresh name memories/u);
     assert.ok(markdown.includes('A sourced fact'));
-    assert.ok(markdown.includes('> Original\n> source'));
+    assert.equal(markdown.includes('Original'), false);
+    assert.equal(markdown.includes('sourceEntryId'), false);
+    assert.equal(markdown.includes('Source:'), false);
     assert.ok(markdown.includes('Peer memory'));
     const destination = await manager.create({ name: 'Destination' });
     await manager.importMemories(destination.id, JSON.stringify({ format: 'peetty-memories', version: 1, memories: fresh.memories }));
     await manager.importMemories(destination.id, JSON.stringify({ format: 'peetty-memories', version: 1, memories: [{ ...fact('duplicate', 'Ａ SOURCED FACT'), sourceText: 'Do not replace manual source' }] }));
     assert.equal(manager.memoryPage(destination.id, '', 10).entries.length, 3);
-    assert.equal(manager.memoryPage(destination.id, '', 10).entries[0]!.sourceText, 'Original\nsource');
+    assert.equal(manager.memoryPage(destination.id, '', 10).entries[0]!.sourceText, undefined);
+    assert.equal(manager.memoryPage(id, '', 10).entries[0]!.sourceEntryId, manager.historyPage(id, '', 1).entries[0]!.id);
     await peer.remove(id);
     await assert.rejects(manager.exportMemories(id), /no longer exists/u);
     await assert.rejects(manager.exportMemoryMarkdown(id), /no longer exists/u);
@@ -821,5 +824,167 @@ describe('verified pristine bootstrap capacity', () => {
     await assert.rejects(imported.restore(fullBackup()), { message: 'Profile storage limit reached.' });
     assert.equal(imported.activeProfileId, existing);
     assert.equal(imported.profileInfo(existing)!.name, 'empty-real-profile');
+  });
+});
+
+describe('complete multipart backup downloads', () => {
+  it('keeps ordinary downloads as plain version 2 JSON and accepts a single normal file', async (t) => {
+    const manager = await store(t, 'ordinary-download', false);
+    const output = await manager.backupDownload();
+    assert.equal(typeof output, 'string');
+    assert.equal(decode(output as string).version, 2);
+    await manager.restoreFiles([output as string]);
+    assert.equal(manager.listProfiles().length, 2);
+  });
+
+  it('validates every part before any writes, preserves evidence, keys and all sessions, and accepts unordered files', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const source = await store(t, 'multipart-source');
+    const id = source.activeProfileId;
+    const body = '雪😀 "quoted" \\ slash\n'.repeat(300);
+    await source.storage(id).saveEntries([entry('source', body)]);
+    await source.saveMemory(id, { text: 'A portable fact', sourceEntryId: 'source', sourceText: body });
+    await source.storage(id).saveConnection(connection);
+    const sessions = [{ profileId: id, connection: { ...connection, apiKey: 'session-key', headers: { 'x-auth': 'session-header' } }, rememberKey: false },
+      { profileId: id, connection: { ...connection, apiKey: 'second-session' }, rememberKey: true }];
+    const files = await source.backupDownload({ sessions, _testing: { fileBytes: 2_048 } });
+    assert.ok(Array.isArray(files) && files.length > 2);
+    assert.equal(new Set(files.map((file) => file.name)).size, files.length);
+    assert.ok(files.every((file) => new TextEncoder().encode(file.text).length <= 2_048));
+    const texts = files.map((file) => file.text);
+    const target = await store(t, 'multipart-target');
+    const before = target.profiles;
+    const writes = idb.writes.length;
+    const mutate = (index: number, patch: Record<string, unknown>): string[] => texts.map((text, i) => i === index ? JSON.stringify({ ...JSON.parse(text), ...patch }) : text);
+    const other = await source.backupDownload({ sessions, _testing: { fileBytes: 2_048 } });
+    assert.ok(Array.isArray(other));
+    for (const invalid of [
+      [], texts.slice(1), [texts[0]!], [...texts, texts[0]!], [texts[0]!, texts[0]!, ...texts.slice(2)],
+      mutate(0, { backupId: 'other-backup' }), mutate(0, { count: files.length + 1 }), mutate(0, { index: files.length }),
+      mutate(0, { index: 0.5 }), mutate(0, { version: 2 }), mutate(0, { unexpected: true }),
+      mutate(0, { text: `${JSON.parse(texts[0]!).text}altered` }), mutate(0, { digest: 'crc32:00000000:1' }),
+      [other[0]!.text, ...texts.slice(1)], [await source.backup(), ...texts.slice(1)],
+    ]) {
+      await assert.rejects(target.restoreFiles(invalid), { message: 'Invalid or unsupported profile data.' });
+      assert.deepEqual(target.profiles, before);
+      assert.equal(idb.writes.filter((write) => write.database === 'multipart-target:profiles').length, 1);
+    }
+    assert.ok(idb.writes.length >= writes);
+    await target.restoreFiles([...texts].reverse());
+    const restored = target.activeProfile;
+    assert.equal(restored.entries[0]!.text, body);
+    assert.notEqual(restored.entries[0]!.id, 'source');
+    assert.equal(restored.memories[0]!.sourceEntryId, restored.entries[0]!.id);
+    assert.equal(restored.memories[0]!.sourceText, body);
+    assert.deepEqual(restored.connection, connection);
+    assert.deepEqual((await target.storage(restored.id).load()).sessionConnections, sessions.map(({ profileId: _id, ...session }) => session));
+    const reopened = await store(t, 'multipart-target');
+    assert.deepEqual(reopened.activeProfile, restored);
+    assert.equal((await reopened.storage(restored.id).load()).sessionConnections, undefined);
+  });
+
+  it('validates the reconstructed backup schema even when every envelope and integrity check is consistent', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const source = await store(t, 'multipart-invalid-source', false);
+    await source.storage(source.activeProfileId).saveEntries([entry('body', 'x'.repeat(3_000))]);
+    // Simulate internal archive corruption so the exporter supplies consistent
+    // envelopes for a document that the full schema must still reject.
+    const internal = source as unknown as { state: { records: Map<string, { profile: ProfileRecord }> } };
+    internal.state.records.get(source.activeProfileId)!.profile.name = '';
+    const files = await source.backupDownload({ _testing: { fileBytes: 1_024 } });
+    assert.ok(Array.isArray(files));
+    const target = await store(t, 'multipart-invalid-target');
+    const before = target.profiles;
+    const writes = idb.writes.length;
+    await assert.rejects(target.restoreFiles(files.map((file) => file.text)), { message: 'Invalid or unsupported profile data.' });
+    assert.equal(idb.writes.length, writes);
+    assert.deepEqual(target.profiles, before);
+  });
+
+  it('downloads and atomically restores an actual archive larger than 50 MiB without deleting history', async (t) => {
+    const source = await store(t, 'large-download', false);
+    const id = source.activeProfileId;
+    const body = 'long archive '.repeat(40_000);
+    const entries = Array.from({ length: 110 }, (_, i) => entry(`large-${i}`, body));
+    await source.storage(id).saveEntries(entries);
+    await assert.rejects(source.backup(), /storage limit/u);
+    const files = await source.backupDownload();
+    assert.ok(Array.isArray(files) && files.length > 1);
+    assert.ok(files.every((file) => new TextEncoder().encode(file.text).length <= PROFILE_LIMITS.fileBytes));
+    assert.equal(source.profileInfo(id)!.entryCount, entries.length);
+    const target = await store(t, 'large-restore', false);
+    await assert.rejects(target.restoreFiles(files.slice(1).map((file) => file.text)), /Invalid/u);
+    assert.equal(target.profileInfo(target.activeProfileId)!.entryCount, 0);
+    await target.restoreFiles(files.map((file) => file.text));
+    assert.equal(target.profileInfo(target.activeProfileId)!.entryCount, entries.length);
+    assert.equal(target.sourceText(target.activeProfileId, target.historyPage(target.activeProfileId, '', 1).entries[0]!.id), body);
+  });
+});
+
+describe('safe legacy retirement after authoritative migration', () => {
+  it('removes copied legacy state so clear and credential opt-out leave no raw duplicates', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const legacy = new Map<string, unknown>([['entries', [entry('old', 'Private old conversation')]], ['connection', connection], ['entriesEpoch', 'old-epoch'], ['unrelated', 'retain']]);
+    idb.databases.set('retirement:chat', legacy);
+    const manager = await store(t, 'retirement');
+    assert.deepEqual(manager.activeProfile.entries, [entry('old', 'Private old conversation')]);
+    assert.deepEqual(manager.activeProfile.connection, connection);
+    assert.deepEqual([...legacy], [['unrelated', 'retain']]);
+    const adapter = manager.storage(manager.activeProfileId);
+    await adapter.clearEntries();
+    await adapter.saveConnection(connection, { rememberCredentials: false });
+    assert.equal(JSON.stringify([...idb.databases.values()].map((records) => [...records])).includes(connection.apiKey!), false);
+    assert.equal(JSON.stringify([...idb.databases.values()].map((records) => [...records])).includes('Private old conversation'), false);
+  });
+
+  for (const failure of ['write', 'put', 'commit'] as const) {
+    it(`preserves every legacy record when authoritative migration has a ${failure} failure`, async (t) => {
+      const idb = installChatIndexedDB(t);
+      const legacy = new Map<string, unknown>([['entries', [entry('old')]], ['connection', connection], ['entriesEpoch', 'old-epoch']]);
+      idb.databases.set(`retirement-${failure}:chat`, legacy);
+      const before = structuredClone(legacy);
+      idb.fail(failure);
+      const manager = await store(t, `retirement-${failure}`);
+      assert.equal(manager.persistenceWarning, true);
+      assert.deepEqual(manager.activeProfile.entries, [entry('old')]);
+      assert.deepEqual(legacy, before);
+      idb.fail('none');
+      const reopened = await store(t, `retirement-${failure}`);
+      assert.deepEqual(reopened.activeProfile.entries, [entry('old')]);
+      assert.equal(legacy.size, 0);
+    });
+  }
+
+  for (const changed of ['entries', 'connection', 'entriesEpoch'] as const) {
+    it(`preserves concurrently changed legacy ${changed} after committing the copied snapshot`, async (t) => {
+      const idb = installChatIndexedDB(t);
+      const namespace = `retirement-concurrent-${changed}`;
+      const legacy = new Map<string, unknown>([['entries', [entry('old')]], ['connection', connection], ['entriesEpoch', 'old-epoch']]);
+      idb.databases.set(`${namespace}:chat`, legacy);
+      const open = globalThis.indexedDB.open.bind(globalThis.indexedDB);
+      let legacyOpens = 0;
+      t.mock.method(globalThis.indexedDB, 'open', (name: string, version?: number) => {
+        if (name === `${namespace}:chat` && ++legacyOpens === 2) {
+          legacy.set(changed, changed === 'entries' ? [entry('old'), entry('concurrent')] : changed === 'connection' ? { ...connection, apiKey: 'new-secret' } : 'new-epoch');
+        }
+        return open(name, version);
+      });
+      const manager = await store(t, namespace);
+      assert.deepEqual(manager.activeProfile.entries, [entry('old')]);
+      assert.deepEqual(manager.activeProfile.connection, connection);
+      assert.equal(legacy.size, 3);
+      assert.equal(manager.persistenceWarning, false);
+    });
+  }
+
+  it('preserves a partially copied oversized legacy archive in full', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const entries = Array.from({ length: PROFILE_LIMITS.entries + 1 }, (_, i) => entry(`old-${i}`));
+    const legacy = new Map<string, unknown>([['entries', entries], ['connection', connection]]);
+    idb.databases.set('retirement-partial:chat', legacy);
+    const manager = await store(t, 'retirement-partial');
+    assert.equal(manager.profileInfo(manager.activeProfileId)!.entryCount, PROFILE_LIMITS.entries);
+    assert.equal((legacy.get('entries') as ChatEntry[]).length, PROFILE_LIMITS.entries + 1);
+    assert.deepEqual(legacy.get('connection'), connection);
   });
 });

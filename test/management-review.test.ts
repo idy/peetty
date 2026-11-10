@@ -4,7 +4,8 @@ import { Window } from 'happy-dom';
 import { createManagement } from '../src/chat/management.ts';
 import { COPY as CHAT_COPY } from '../src/chat/copy.ts';
 import { COMPANION_ACTIONS } from '../src/chat/types.ts';
-import { BrowserProfileStore } from '../src/chat/profiles.ts';
+import { BrowserProfileStore, type BackupDownloadFile } from '../src/chat/profiles.ts';
+import { PROFILE_LIMITS } from '../src/chat/limits.ts';
 import type { Language } from '../src/pet/i18n.ts';
 import type { Figure } from '../src/figure/types.ts';
 import { installChatIndexedDB } from './helpers/chat-storage.ts';
@@ -19,6 +20,7 @@ async function mount(t: TestContext, options: {
   onSelect?: () => Promise<void>;
   onReload?: () => Promise<void>;
   onBusy?: (busy: boolean) => void;
+  backup?: () => Promise<string | BackupDownloadFile[]>;
 } = {}) {
   const window = new Window({ url: 'https://host.example/' });
   const document = window.document as unknown as Document;
@@ -31,7 +33,7 @@ async function mount(t: TestContext, options: {
   let language: Language = 'en';
   const management = createManagement({
     document, store, language: () => language, onSelect: options.onSelect ?? (async () => {}), onReload: options.onReload ?? (async () => {}),
-    onTab() {}, ...(options.onBusy ? { onBusy: options.onBusy } : {}), backup: () => store.backup(),
+    onTab() {}, ...(options.onBusy ? { onBusy: options.onBusy } : {}), backup: options.backup ?? (() => store.backup()),
   });
   root.append(management.element); management.show(true);
   t.after(async () => { management.destroy(); store.close(); await window.happyDOM.abort(); window.close(); });
@@ -59,6 +61,56 @@ function forbidSnapshots(t: TestContext, store: BrowserProfileStore) {
     t.after(() => Reflect.deleteProperty(store, key));
   }
 }
+
+describe('multipart backup UI', () => {
+  it('downloads every named part, localizes retention instructions and keeps URL cleanup independent', async (t) => {
+    installChatIndexedDB(t);
+    const parts = [{ name: 'fixture-part-1.json', text: 'fixture first part' }, { name: 'fixture-part-2.json', text: 'fixture second part' }];
+    const ui = await mount(t, { backup: async () => parts }); ui.tab('data');
+    const blobs: Blob[] = []; const revoked: string[] = []; const names: string[] = [];
+    t.mock.method(URL, 'createObjectURL', (blob: Blob) => { blobs.push(blob); return `blob:fixture-part-${blobs.length}`; });
+    t.mock.method(URL, 'revokeObjectURL', (url: string) => { revoked.push(url); });
+    ui.root.addEventListener('click', event => {
+      const link = (event.target as Element).closest<HTMLAnchorElement>('a[download]');
+      if (link) { event.preventDefault(); names.push(link.download); }
+    });
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    ui.click('Download full backup'); await flush();
+    assert.deepEqual(names, parts.map(file => file.name));
+    assert.deepEqual(await Promise.all(blobs.map(blob => blob.text())), parts.map(file => file.text));
+    assert.match(ui.query('.pc-manage-status').textContent!, /Allow multiple downloads.*keep every part.*select all parts at once/);
+    ui.language('zh'); assert.match(ui.query('.pc-manage-status').textContent!, /允许浏览器下载多个文件.*保留全部分卷.*一次选中所有分卷/);
+    ui.management.destroy(); ui.window.close();
+    t.mock.timers.tick(59_999); assert.deepEqual(revoked, []);
+    t.mock.timers.tick(1); assert.deepEqual(revoked, ['blob:fixture-part-1', 'blob:fixture-part-2']);
+  });
+
+  it('reads all selected restore parts together and retains single-file memory import', async (t) => {
+    installChatIndexedDB(t); const ui = await mount(t); ui.tab('data');
+    const restore = t.mock.method(ui.store, 'restoreFiles', async (_texts: readonly string[]) => {});
+    const input = ui.query<HTMLInputElement>('input[type="file"][multiple]');
+    assert.equal(input.multiple, true);
+    const files = [new ui.window.File(['first fixture part'], 'part-1.json'), new ui.window.File(['second fixture part'], 'part-2.json')];
+    Object.defineProperty(input, 'files', { configurable: true, value: files });
+    input.dispatchEvent(new ui.window.Event('change') as unknown as Event); await flush();
+    assert.equal(restore.mock.callCount(), 1);
+    assert.deepEqual(restore.mock.calls[0]!.arguments[0], ['first fixture part', 'second fixture part']);
+    assert.equal(ui.query<HTMLInputElement>('input[type="file"]:not([multiple])').multiple, false);
+    assert.match(ui.query('.pc-manage-status').textContent!, /Import complete/);
+  });
+
+  it('validates every restore part size before reading any file', async (t) => {
+    installChatIndexedDB(t); const ui = await mount(t); ui.tab('data');
+    let reads = 0;
+    const file = (size: number) => ({ size, text: async () => { reads++; return '{}'; } });
+    const input = ui.query<HTMLInputElement>('input[type="file"][multiple]');
+    Object.defineProperty(input, 'files', { configurable: true, value: [file(2), file(PROFILE_LIMITS.fileBytes + 1)] });
+    const restore = t.mock.method(ui.store, 'restoreFiles', async (_texts: readonly string[]) => {});
+    input.dispatchEvent(new ui.window.Event('change') as unknown as Event); await flush();
+    assert.equal(reads, 0); assert.equal(restore.mock.callCount(), 0);
+    assert.equal(ui.query('.pc-manage-status').hasAttribute('data-error'), true);
+  });
+});
 
 describe('management draft and language continuity', () => {
   it('translates profile controls in place and preserves unsaved fields, selection and scroll through refresh', async (t) => {
