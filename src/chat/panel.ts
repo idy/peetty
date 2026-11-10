@@ -4,6 +4,7 @@ import { SecretRegistry } from './secrets.ts';
 import { PROFILE_LIMITS } from './limits.ts';
 import type { ChatEntry, CompanionAction, PeettyChatOptions, PeettyModelOptions, PeettyReasoningEffort, SessionModel } from './types.ts';
 import type { Language } from '../pet/i18n.ts';
+import { isSoundGesture, SOUND_GESTURES } from '../pet/activation.ts';
 import { COPY } from './copy.ts';
 import { buildChatView, icon, setIcon } from './view.ts';
 import { MARKDOWN_STYLE, renderMarkdown, renderMarkdownBubble } from './markdown.ts';
@@ -164,12 +165,14 @@ interface PanelOptions {
   onFigure?: (figure: string | object) => Promise<void | boolean>;
   /** Invalidate SDK figure work before a profile runtime is replaced, even for identical figures. */
   onFigureOwnershipChange?: () => void;
+  /** Synchronous callback in this frame's trusted activation event. */
+  onGesture?: () => void;
 }
 
 export async function createChatPanel({
   root: parentRoot, language: initialLanguage, model: injectedModel, chat,
   figure: appliedFigure = 'miru', portrait: makePortrait, onFigure, onFigureOwnershipChange,
-  onAction, onReply, onState, onClose,
+  onAction, onReply, onState, onClose, onGesture,
 }: PanelOptions): Promise<ChatPanel> {
   let language = initialLanguage;
   let t = COPY[language];
@@ -243,6 +246,9 @@ export async function createChatPanel({
     const remember = find<HTMLInputElement>('[name="remember"]');
     // A host-supplied connection is ephemeral until the user opts in to saving its key.
     if (injectedModel) remember.checked = false;
+    const gesture = (event: Event) => { if (visible && isSoundGesture(event)) onGesture?.(); };
+    for (const type of SOUND_GESTURES) document.addEventListener(type, gesture, true);
+    cleanups.push(() => { for (const type of SOUND_GESTURES) document.removeEventListener(type, gesture, true); });
     const input = find<HTMLTextAreaElement>('[name="message"]');
     const messages = find<HTMLDivElement>('.pc-messages');
     const content = find<HTMLDivElement>('.pc-content');

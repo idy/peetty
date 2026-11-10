@@ -7,6 +7,7 @@ import xiaoxiao from '../figures/xiaoxiao.json' with { type: 'json' };
 import { CATALOG_FORMAT, FIGURE_CATALOG, type PresetId } from './catalog.ts';
 import type { Figure, LocalizedText } from './figure/types.ts';
 import { FIGURE_ID, validateFigure } from './figure/validate.ts';
+import { resolveSoundSources } from './figure/sources.ts';
 
 export { FIGURE_CATALOG, PRESET_IDS, type PresetId } from './catalog.ts';
 
@@ -27,7 +28,7 @@ export interface CatalogEntry {
 
 export const FIGURE_LOAD_TIMEOUT = 20_000;
 
-async function fetchJson(input: string, base: string, signal?: AbortSignal): Promise<unknown> {
+async function fetchJson(input: string, base: string, signal?: AbortSignal): Promise<{ data: unknown; url: string }> {
   // The base itself may be relative, e.g. a self-hosted catalog at '/figures/'.
   const url = new URL(input, new URL(base, document.baseURI));
   if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error('Figure URLs must use https: or http:.');
@@ -51,7 +52,7 @@ async function fetchJson(input: string, base: string, signal?: AbortSignal): Pro
         if (!response.ok) throw new Error(`Could not load ${url.href}: HTTP ${response.status}`);
         const data: unknown = await response.json();
         controller.signal.throwIfAborted();
-        return data;
+        return { data, url: response.url || url.href };
       })(),
     ]);
   } finally {
@@ -64,24 +65,33 @@ async function fetchJson(input: string, base: string, signal?: AbortSignal): Pro
 /**
  * Resolves a figure option:
  * - a bundled preset id (`miru`), used directly;
- * - any other catalog id (`xiaoxiao`), loaded from {@link FIGURE_CATALOG};
+ * - any other catalog id (`shiori`), loaded from {@link FIGURE_CATALOG};
  * - a URL or relative path to a figure JSON file;
  * - figure data.
  * Everything loaded is validated before use.
  */
 export async function resolveFigure(input: string | object = 'miru', catalog = FIGURE_CATALOG, signal?: AbortSignal): Promise<Figure> {
   signal?.throwIfAborted();
-  if (typeof input === 'object') return validateFigure(input);
+  if (typeof input === 'object') return resolveSoundSources(validateFigure(input), globalThis.document?.baseURI);
   if (Object.hasOwn(PRESETS, input)) return PRESETS[input as PresetId];
-  if (FIGURE_ID.test(input)) return validateFigure(await fetchJson(`${input}.json`, catalog, signal));
-  return validateFigure(await fetchJson(input, document.baseURI, signal));
+  const loaded = FIGURE_ID.test(input) ? await fetchJson(`${input}.json`, catalog, signal) : await fetchJson(input, document.baseURI, signal);
+  return resolveSoundSources(validateFigure(loaded.data), loaded.url);
 }
 
 /** Lists the figures in a catalog, e.g. for a character picker. */
 export async function listFigures(catalog = FIGURE_CATALOG): Promise<CatalogEntry[]> {
-  const data = await fetchJson('index.json', catalog) as { format?: unknown; figures?: unknown };
+  const { data, url } = await fetchJson('index.json', catalog) as { data: { format?: unknown; figures?: unknown }; url: string };
   if (data?.format !== CATALOG_FORMAT || !Array.isArray(data.figures)) throw new Error('Not a Peetty figure catalog.');
-  return data.figures.filter((e): e is CatalogEntry =>
-    !!e && typeof e === 'object' && typeof e.id === 'string' && FIGURE_ID.test(e.id) && typeof e.url === 'string'
-    && /^https?:\/\//.test(e.url));
+  const entries = data.figures.filter((e): e is CatalogEntry =>
+    !!e && typeof e === 'object' && typeof e.id === 'string' && FIGURE_ID.test(e.id) && typeof e.url === 'string');
+  const resolved: CatalogEntry[] = [];
+  for (const entry of entries) {
+    try {
+      const reference = entry.url.trim();
+      if (!reference || reference.startsWith('#')) continue;
+      const address = new URL(reference, url);
+      if (address.protocol === 'https:' || address.protocol === 'http:') resolved.push({ ...entry, url: address.href });
+    } catch { /* Invalid catalog destinations are omitted. */ }
+  }
+  return resolved;
 }

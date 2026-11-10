@@ -142,28 +142,20 @@
     <section class="embed-section wrap" id="embed" aria-labelledby="embed-title">
       <div class="section-heading">
         <h2 id="embed-title" data-i18n="embedTitle">One script tag.</h2>
-        <p data-i18n="embedIntro">Add this to any page. Mark good spots with data-peetty="perch" and keep her away from an area with data-peetty="avoid".</p>
+        <p data-i18n="embedIntro">Load Peetty directly from jsDelivr. No npm install or build step. Mark good spots with data-peetty="perch" and keep her away from an area with data-peetty="avoid".</p>
       </div>
-      <pre class="code"><code>&lt;script src="https://peetty.idy.dev/sdk/peetty.global.js"
+      <pre class="code"><code>&lt;script src="https://cdn.jsdelivr.net/gh/idy/peetty@v0.4.0/cdn/peetty.global.js"
         data-peetty-auto data-figure="shiori" defer&gt;&lt;/script&gt;</code></pre>
       <p class="code-note" data-i18n="embedOptions">Options: data-figure (a character id such as miru or amara, or a figure JSON URL), data-size (height in pixels), data-activity (calm, normal, lively), data-language (en, zh), data-greet="false".</p>
-      <p class="code-note" data-i18n="npmNote">Use GitHub Packages for @idy and sign in there. Other dependencies use your default npm registry.</p>
-      <pre class="code"><code>npm config set @idy:registry https://npm.pkg.github.com</code></pre>
-      <pre class="code"><code>npm login --scope=@idy --auth-type=legacy --registry=https://npm.pkg.github.com</code></pre>
-      <pre class="code"><code>npm install @idy/peetty</code></pre>
-      <pre class="code"><code>import { createPeetty } from '@idy/peetty'
+      <p class="code-note" data-i18n="moduleNote">For JavaScript control, import directly in a browser module. Styles and dependencies are included.</p>
+      <pre class="code"><code>&lt;script type="module"&gt;
+  import { createPeetty } from 'https://cdn.jsdelivr.net/gh/idy/peetty@v0.4.0/cdn/index.js';
 
-const pet = createPeetty({
-  figure: 'koharu',
-  model: {
-    baseUrl: 'https://your-api.example/v1',
-    id: 'your-model-id',
-    getApiKey: () => yourUserProvidedKey
-  }
-})
-await pet.mount()
-// Optional: open chat immediately.
-await pet.openChat()</code></pre>
+  const pet = createPeetty({ figure: 'koharu' });
+  await pet.mount();
+  // Optional: open chat and configure your own model.
+  // await pet.openChat();
+&lt;/script&gt;</code></pre>
     </section>
 
     <section class="questions-section wrap" aria-labelledby="questions-title">

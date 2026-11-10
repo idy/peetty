@@ -31,6 +31,18 @@ export default {
   height: 120,
   anchor: [100, 256],
   behavior: { weights: { walk: 4, jump: 3, wave: 2, sit: 2, sleep: 1 }, walkSpeed: 1.25, jumpPower: 1.15, idleProp: 'none' },
+  sounds: {
+    volume: 0.35, cooldown: 0.7,
+    events: {
+      wave: [{ notes: [659, 880, 988], duration: 0.07 }, { notes: [784, 988, 1175], duration: 0.06 }],
+      jump: [{ notes: [330, 660, 990], duration: 0.045, waveform: 'triangle' }],
+      land: [{ notes: [220, 165], duration: 0.04, volume: 0.55 }],
+      drag: [{ notes: [784, 659], duration: 0.055 }],
+      sleep: [{ notes: [440, 330, 262], duration: 0.13, volume: 0.6 }],
+      wake: [{ notes: [330, 494, 659], duration: 0.08 }],
+      talk: [{ notes: [659, 784], duration: 0.045, volume: 0.45 }],
+    },
+  },
   palette: {
     skin: '#fff3ec', skinShade: '#f5d2c7', skinLine: '#e0a596', blush: '#ff8fa3', blushLine: '#f06f88',
     lash: '#3b2d58', sclera: '#ffffff', eyeShade: '#d8d2f6',

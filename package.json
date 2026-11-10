@@ -1,6 +1,6 @@
 {
   "name": "@idy/peetty",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "description": "A local-first web companion that perches on page elements and chats with your own AI key.",
   "license": "MIT",
   "type": "module",
@@ -37,11 +37,13 @@
     "node": ">=22.19"
   },
   "scripts": {
-    "build": "node scripts/build.mjs && tsc -p tsconfig.build.json && node scripts/fix-declarations.mjs",
+    "build": "node scripts/build.mjs && tsc -p tsconfig.build.json && node scripts/fix-declarations.mjs && node scripts/cdn.mjs",
+    "build:cdn": "node scripts/cdn.mjs",
+    "build:site": "node scripts/site.mjs",
     "dev": "node scripts/dev.mjs",
     "figures": "node scripts/figures.mjs",
     "test": "node --test \"test/**/*.test.ts\"",
-    "check": "tsc -p tsconfig.json && node scripts/figures.mjs --check"
+    "check": "tsc -p tsconfig.json && node scripts/figures.mjs --check && node scripts/cdn.mjs --check"
   },
   "devDependencies": {
     "@types/node": "24.19.2",

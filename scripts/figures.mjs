@@ -7,7 +7,7 @@
 //
 // `--check` writes nothing and fails if any generated file is out of date.
 import { readdir, readFile, writeFile } from 'node:fs/promises';
-import { CATALOG_FORMAT, FIGURE_CATALOG, PRESET_IDS } from '../src/catalog.ts';
+import { CATALOG_FORMAT, PRESET_IDS } from '../src/catalog.ts';
 import { validateFigure } from '../src/figure/validate.ts';
 
 const check = process.argv.includes('--check');
@@ -57,7 +57,8 @@ for (const file of files) {
     renderer: figure.renderer,
     // Bundled into the SDK; every other catalog figure loads on demand.
     bundled: PRESET_IDS.includes(figure.id),
-    url: `${FIGURE_CATALOG}${file}`,
+    // Resolve against the fetched index, preserving its CDN host and version.
+    url: file,
   });
 }
 // Bundled presets first in their own order, then the rest by id.

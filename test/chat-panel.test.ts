@@ -32,6 +32,7 @@ async function mountPanel(t: TestContext, model: PeettyModelOptions | undefined,
   onFigure?: (figure: string | object) => Promise<void | boolean>;
   onReply?: (text: string, render?: (target: HTMLElement) => void) => void;
   onState?: (busy: boolean, speaking: boolean) => void;
+  onGesture?: () => void;
   rejectHTML?: boolean;
   beforeMount?: (window: Window) => void;
 } = {}) {
@@ -89,6 +90,7 @@ async function mountPanel(t: TestContext, model: PeettyModelOptions | undefined,
     ...(options.figure !== undefined ? { figure: options.figure } : {}), ...(options.onFigure ? { onFigure: options.onFigure } : {}),
     ...(options.portrait ? { portrait: options.portrait } : {}),
     onAction() {}, onReply: options.onReply ?? (() => {}), onState: options.onState ?? (() => {}), onClose() {},
+    ...(options.onGesture ? { onGesture: options.onGesture } : {}),
   }));
   panel.open(true);
   const frame = root.querySelector('iframe')!;
@@ -304,6 +306,35 @@ describe('profile management and migration UI', () => {
     query<HTMLButtonElement>('[data-tab="connection"]').click();
     assert.equal(query<HTMLInputElement>('[name="key"]').value, '');
     assert.equal(query<HTMLInputElement>('[name="model"]').value, '');
+  });
+});
+
+describe('chat frame sound activation', () => {
+  it('forwards trusted frame gestures synchronously without exposing them to the host', async (t) => {
+    let activations = 0;
+    const { panel, frame, query, window } = await mountPanel(t, undefined, { onGesture: () => { activations++; } });
+    const field = query<HTMLInputElement>('[name="url"]');
+    let hostEvents = 0;
+    window.addEventListener('keydown', () => { hostEvents++; });
+    const child = frame.contentWindow! as unknown as typeof globalThis;
+    const trusted = (type: string, extra: Record<string, unknown> = {}) => {
+      const event = new child.Event(type, { bubbles: true, composed: true });
+      Object.defineProperty(event, 'isTrusted', { value: true });
+      Object.assign(event, extra);
+      return event;
+    };
+    field.dispatchEvent(new child.Event('click', { bubbles: true, composed: true }));
+    assert.equal(activations, 0, 'synthetic clicks cannot unlock sound');
+    field.dispatchEvent(trusted('keydown', { key: 'a' }));
+    assert.equal(activations, 1, 'callback runs during the keyboard event');
+    assert.equal(hostEvents, 0, 'frame typing remains isolated');
+    field.dispatchEvent(trusted('pointerdown', { pointerType: 'touch' }));
+    assert.equal(activations, 1);
+    field.dispatchEvent(trusted('pointerup', { pointerType: 'touch' }));
+    assert.equal(activations, 2);
+    panel.destroy();
+    field.dispatchEvent(trusted('keydown', { key: 'b' }));
+    assert.equal(activations, 2, 'removed panels no longer forward gestures');
   });
 });
 
