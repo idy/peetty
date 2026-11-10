@@ -62,6 +62,41 @@ function heldProvider() {
   return { calls, streamFn, partial, end };
 }
 
+describe('explicit nonsecret runtime headers', () => {
+  for (const classified of [false, true]) {
+    it(`keeps routing metadata ${classified ? 'public and persistable with an explicit marker' : 'sensitive for unmarked old data'}`, async (t) => {
+      installChatIndexedDB(t);
+      const namespace = `runtime-routing-${classified}`;
+      const storage = new BrowserChatStore(namespace); t.after(() => storage.close());
+      const names = classified ? ['X-Route'] : [];
+      const chosen = { ...MODEL, headers: { 'X-Route': 'fixture-public-route', 'X-Unclassified': 'fixture-unknown-secret' }, nonCredentialHeaders: names };
+      let context: TranscriptContext | undefined;
+      const runtime = new ChatRuntime({ model: chosen, storage, _testing: { streamFn: (_model, next) => { context = structuredClone(next); return finished(assistant('Done.')); } } });
+      t.after(() => runtime.destroy());
+      names.push('X-Unclassified');
+      const returned = runtime.model!; returned.nonCredentialHeaders?.push('X-Unclassified'); returned.headers!['x-route'] = 'changed';
+      assert.equal(runtime.model!.headers!['x-route'], 'fixture-public-route');
+      assert.deepEqual(runtime.model!.nonCredentialHeaders, classified ? ['x-route'] : undefined);
+      await runtime.configure(runtime.model!, false);
+      const saved = (await storage.load()).connection!;
+      assert.equal(saved.apiKey, undefined);
+      assert.deepEqual(saved.headers, classified ? { 'x-route': 'fixture-public-route' } : undefined);
+      assert.deepEqual(saved.nonCredentialHeaders, classified ? ['x-route'] : undefined);
+      await runtime.send(`Route fixture-public-route; credential fixture-unknown-secret; key ${MODEL.apiKey}`);
+      assert.equal(runtime.error, null);
+      assert.equal(runtime.entries[0]!.text.includes('fixture-public-route'), classified);
+      assert.doesNotMatch(runtime.entries[0]!.text, /fixture-unknown-secret|secret-user-key/);
+      assert.equal(JSON.stringify(context).includes('fixture-public-route'), classified);
+      assert.doesNotMatch(JSON.stringify(context), /fixture-unknown-secret|secret-user-key/);
+      const reader = new BrowserChatStore(namespace); const restored = new ChatRuntime({ storage: reader }); t.after(() => restored.destroy());
+      await restored.initialize();
+      assert.deepEqual(restored.model?.headers, classified ? { 'x-route': 'fixture-public-route' } : undefined);
+      assert.deepEqual(restored.model?.nonCredentialHeaders, classified ? ['x-route'] : undefined);
+      assert.equal(restored.rememberKey, false);
+    });
+  }
+});
+
 describe('profile memory in model turns', () => {
   it('includes enabled memories, redacts credentials and saves facts with the current user message as source', async () => {
     const saved: { text: string; source: string }[] = [];
@@ -400,6 +435,8 @@ describe('local persistence and credential ownership', () => {
       { ...MODEL, headers: { Authorization: 123 } as unknown as Record<string, string> },
       { ...MODEL, headers: { 'x-api-key': null } as unknown as Record<string, string> },
       { ...MODEL, headers: { 'bad header': 'private-secret' } },
+      { ...MODEL, headers: { Authorization: 'Bearer private-secret' }, nonCredentialHeaders: ['Authorization'] },
+      { ...MODEL, headers: { 'X-Route': 'private-secret' }, nonCredentialHeaders: ['X-Missing'] },
       { ...MODEL, headers: { Authorization: 'Bearer private-secret\r\nX-Injected: true' } },
     ]) {
       await assert.rejects(runtime.configure(replacement, true), (error: Error) => {

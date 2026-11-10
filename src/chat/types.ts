@@ -9,6 +9,9 @@ export interface PeettyModelOptions {
   apiKey?: string;
   getApiKey?: () => string | Promise<string>;
   headers?: Record<string, string>;
+  /** Explicitly nonsecret header names that may persist without authentication consent.
+   * Names must exist in headers; authentication headers cannot be exempted. */
+  nonCredentialHeaders?: string[];
   /** Enable companion action tools. Defaults to true. */
   tools?: boolean;
   /** Explicit reasoning effort. Omit to leave the provider's default unchanged. */

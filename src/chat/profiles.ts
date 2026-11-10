@@ -7,6 +7,7 @@ import { connectionIdentity, normalizeModelOptions, prepareSavedConnection } fro
 import { applyEntryChanges, entryChanges, sanitizeEntries } from './history.ts';
 import { openStateDatabase, stateTransaction } from './idb.ts';
 import { PROFILE_LIMITS } from './limits.ts';
+import { jsonChunks, jsonFingerprint, parseJSONChunks } from './bounded-json.ts';
 
 export { PROFILE_LIMITS } from './limits.ts';
 
@@ -48,6 +49,14 @@ interface RecordState { profile: ProfileRecord; epoch: string }
 interface State { directory: Directory; records: Map<string, RecordState> }
 interface LegacySnapshot { entries: unknown; connection: unknown; epoch: unknown }
 interface LegacyMigration extends StoredChat { used: boolean; retire?: LegacySnapshot }
+interface LegacyProof { version: 1; entries: string[]; connections: string[] }
+function legacyProofFrom(value: unknown): LegacyProof | undefined {
+  if (value === undefined) return;
+  const proof = object(value, ['version', 'entries', 'connections']);
+  check(proof.version === 1);
+  const hashes = (value: unknown) => array(value, Number.MAX_SAFE_INTEGER, (hash) => { check(typeof hash === 'string' && /^[0-9a-f]{64}$/.test(hash)); return hash; });
+  return { version: 1, entries: hashes(proof.entries), connections: hashes(proof.connections) };
+}
 
 /** Snapshots eligible for retirement contain validated JSON-shaped records only. */
 function sameLegacyValue(a: unknown, b: unknown): boolean {
@@ -58,7 +67,7 @@ function sameLegacyValue(a: unknown, b: unknown): boolean {
   const fields = Object.keys(first);
   return fields.length === Object.keys(second).length && fields.every((field) => Object.hasOwn(second, field) && sameLegacyValue(first[field], second[field]));
 }
-interface Draft extends State { dirty: Set<string>; isolated: Set<string>; isolatedMemories: Set<string>; directoryDirty: boolean }
+interface Draft extends State { dirty: Set<string>; isolated: Set<string>; isolatedMemories: Set<string>; directoryDirty: boolean; legacyProof: LegacyProof | undefined; legacyDirty: boolean }
 interface Backup { format: 'peetty-backup'; version: 1 | 2; createdAt: number; activeProfileId: string; profiles: ProfileRecord[]; sessions?: BackupSession[] }
 
 const ACTIONS = new Set<string>(COMPANION_ACTIONS);
@@ -77,14 +86,17 @@ const CRC_TABLE = Uint32Array.from({ length: 256 }, (_, i) => {
   for (let bit = 0; bit < 8; bit++) value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
   return value >>> 0;
 });
-function backupDigest(value: string): string {
-  let crc = 0xffffffff;
-  for (let i = 0; i < value.length; i++) {
-    const code = value.charCodeAt(i);
-    crc = CRC_TABLE[(crc ^ code) & 255]! ^ (crc >>> 8);
-    crc = CRC_TABLE[(crc ^ (code >>> 8)) & 255]! ^ (crc >>> 8);
+function backupDigest(chunks: Iterable<string>): string {
+  let crc = 0xffffffff; let length = 0;
+  for (const value of chunks) {
+    length += value.length;
+    for (let i = 0; i < value.length; i++) {
+      const code = value.charCodeAt(i);
+      crc = CRC_TABLE[(crc ^ code) & 255]! ^ (crc >>> 8);
+      crc = CRC_TABLE[(crc ^ (code >>> 8)) & 255]! ^ (crc >>> 8);
+    }
   }
-  return `crc32:${((crc ^ 0xffffffff) >>> 0).toString(16).padStart(8, '0')}:${value.length}`;
+  return `crc32:${((crc ^ 0xffffffff) >>> 0).toString(16).padStart(8, '0')}:${length}`;
 }
 
 function check(condition: unknown, message = INVALID): asserts condition {
@@ -140,7 +152,7 @@ function figureFrom(value: unknown): string | Figure {
 }
 /** One transport codec for persisted, restored, and explicit session connections. */
 function connectionFrom(value: unknown, strict = true): StoredConnection {
-  const connection = strict ? object(value, ['id', 'baseUrl', 'apiKey', 'tools', 'effort', 'provider', 'headers']) : value as Record<string, unknown>;
+  const connection = strict ? object(value, ['id', 'baseUrl', 'apiKey', 'tools', 'effort', 'provider', 'headers', 'nonCredentialHeaders']) : value as Record<string, unknown>;
   check(connection !== null && typeof connection === 'object' && !Array.isArray(connection));
   try {
     const normalized = normalizeModelOptions({
@@ -148,6 +160,7 @@ function connectionFrom(value: unknown, strict = true): StoredConnection {
       ...(connection.apiKey !== undefined ? { apiKey: text(connection.apiKey, PROFILE_LIMITS.fileBytes, true) } : {}),
       ...(connection.provider !== undefined ? { provider: text(connection.provider, 200, true) } : {}),
       ...(connection.headers !== undefined ? { headers: connection.headers as Record<string, string> } : {}),
+      ...(connection.nonCredentialHeaders !== undefined ? { nonCredentialHeaders: connection.nonCredentialHeaders as string[] } : {}),
       ...(connection.tools !== undefined ? { tools: boolean(connection.tools) } : {}),
       ...(connection.effort !== undefined ? { effort: connection.effort as StoredConnection['effort'] & string } : {}),
     });
@@ -308,6 +321,8 @@ export class BrowserProfileStore {
   private closing = false;
   private closed = false;
   private failed = false;
+  private legacyProof: LegacyProof | undefined;
+  private reconcilingLegacy = false;
 
   constructor(namespace = 'peetty', persist = true) { this.namespace = namespace; this.persist = persist; }
   get persistenceWarning(): boolean { return this.failed; }
@@ -364,14 +379,16 @@ export class BrowserProfileStore {
 
   /** Read/modify/write within ONE transaction; only dirty records are written, never a cached directory. */
   private async run<T>(selection: readonly string[] | 'all', write: boolean, action: (draft: Draft) => T): Promise<T> {
+    if (write && this.initialized && !this.reconcilingLegacy) await this.reconcileLegacy();
     const db = await this.open();
+    let proof = this.legacyProof;
     let draft: Draft | undefined;
     let result!: T;
     let completedAction = false;
     let domainError: unknown;
     const apply = (current: State, isolated = new Set<string>()) => {
       draft = { directory: { ...current.directory, ids: [...current.directory.ids] }, records: new Map(current.records), dirty: new Set(), isolated,
-        isolatedMemories: new Set(isolated), directoryDirty: false };
+        isolatedMemories: new Set(isolated), directoryDirty: false, legacyProof: proof, legacyDirty: false };
       result = action(draft);
       completedAction = true;
     };
@@ -384,6 +401,8 @@ export class BrowserProfileStore {
               abort();
             }
           };
+          const proofRequest = store.get('legacyMigration');
+          proofRequest.onsuccess = () => { try { proof = legacyProofFrom(proofRequest.result); } catch { proof = undefined; } };
           const directoryRequest = store.get('directory');
           directoryRequest.onsuccess = () => guard(() => {
             const directory = directoryFrom(directoryRequest.result);
@@ -402,6 +421,7 @@ export class BrowserProfileStore {
                   else store.delete(key(profileId));
                 }
                 if (draft!.directoryDirty) store.put(draft!.directory, 'directory');
+                if (draft!.legacyDirty) store.put(draft!.legacyProof, 'legacyMigration');
               }
             };
             if (!remaining) finishRead();
@@ -419,6 +439,7 @@ export class BrowserProfileStore {
     }
     if (!completedAction) apply(this.state);
     this.state = { directory: draft!.directory, records: draft!.records };
+    this.legacyProof = draft!.legacyProof;
     for (const profileId of this.sessions.keys()) if (!this.state.records.has(profileId)) this.sessions.delete(profileId);
     return result;
   }
@@ -480,8 +501,14 @@ export class BrowserProfileStore {
 
   /** Retire only the exact records copied by our successful authoritative write.
    * Read/compare/delete share a legacy transaction, so a concurrent old client wins. */
-  private async retireLegacy(snapshot: LegacySnapshot): Promise<void> {
+  private async retireLegacy(snapshot: LegacySnapshot, proof: LegacyProof): Promise<void> {
     if (!this.persist || this.failed || this.closed) return;
+    const knownEntries = new Set(proof.entries); const knownConnections = new Set(proof.connections);
+    const original = snapshot.entries === undefined ? undefined : array(snapshot.entries, PROFILE_LIMITS.entries, entryFrom);
+    const remainingEntries = original?.filter((entry) => !knownEntries.has(jsonFingerprint(entry)));
+    const changedEntries = original !== undefined && (original.length === 0 || remainingEntries!.length !== original.length);
+    const removeConnection = snapshot.connection !== undefined && knownConnections.has(jsonFingerprint(connectionFrom(snapshot.connection)));
+    if (!changedEntries && !removeConnection) return;
     const db = await openStateDatabase(`${this.namespace}:chat`, { isClosed: () => this.closed, onFailure: () => {} });
     if (!db) return;
     try {
@@ -495,12 +522,49 @@ export class BrowserProfileStore {
             try {
               current[field] = request.result;
               if (--remaining || !sameLegacyValue(current, snapshot)) return;
-              for (const [recordKey] of fields) store.delete(recordKey);
+              if (changedEntries) {
+                if (remainingEntries!.length) store.put(remainingEntries, 'entries');
+                else store.delete('entries');
+              }
+              if (removeConnection) store.delete('connection');
+              if ((!original || changedEntries && !remainingEntries!.length) && (snapshot.connection === undefined || removeConnection)) store.delete('entriesEpoch');
             } catch { abort(); }
           };
         }
       });
     } finally { db.close(); }
+  }
+
+  /** Establish proof from actual authoritative correspondence before user deletion,
+   * then retry CAS cleanup. Previously copied digests survive clear/key opt-out. */
+  private async reconcileLegacy(): Promise<void> {
+    if (!this.persist || this.failed || this.closed || this.reconcilingLegacy) return;
+    this.reconcilingLegacy = true;
+    try {
+      const legacy = await this.legacy();
+      if (!legacy.retire) return;
+      const candidates = legacy.entries.map((entry) => ({ entry, digest: jsonFingerprint(entry) }));
+      const connectionDigest = legacy.connection ? jsonFingerprint(legacy.connection) : undefined;
+      const proof = await this.run('all', true, (draft) => {
+        const entries = new Set(draft.legacyProof?.entries); const connections = new Set(draft.legacyProof?.connections);
+        let changed = false;
+        for (const record of draft.records.values()) {
+          const current = new Map(record.profile.entries.map((entry) => [entry.id, entry]));
+          for (const candidate of candidates) if (!entries.has(candidate.digest) && sameLegacyValue(candidate.entry, current.get(candidate.entry.id))) {
+            entries.add(candidate.digest); changed = true;
+          }
+          if (connectionDigest && !connections.has(connectionDigest) && sameLegacyValue(legacy.connection, record.profile.connection)) {
+            connections.add(connectionDigest); changed = true;
+          }
+        }
+        if (changed) {
+          draft.legacyProof = { version: 1, entries: [...entries], connections: [...connections] };
+          draft.legacyDirty = true;
+        }
+        return draft.legacyProof;
+      });
+      if (!this.failed && proof) await this.retireLegacy(legacy.retire, proof);
+    } finally { this.reconcilingLegacy = false; }
   }
 
   async initialize(defaults: Defaults = {}): Promise<void> {
@@ -510,6 +574,8 @@ export class BrowserProfileStore {
       await this.run('all', false, () => {});
       if (!this.state.directory.ids.length) {
         const { used, retire, ...legacy } = await this.legacy();
+        const proof: LegacyProof | undefined = retire ? { version: 1, entries: legacy.entries.map(jsonFingerprint),
+          connections: legacy.connection ? [jsonFingerprint(legacy.connection)] : [] } : undefined;
         const now = Date.now();
         const profile: ProfileRecord = {
           id: freshId(), name: settings.name ?? 'Miru', figure: settings.figure ?? 'miru', personality: settings.personality ?? '',
@@ -522,10 +588,12 @@ export class BrowserProfileStore {
           draft.records.set(profile.id, { profile, epoch: freshId() });
           draft.dirty.add(profile.id);
           draft.directoryDirty = true;
+          if (proof) { draft.legacyProof = proof; draft.legacyDirty = true; }
           return true;
         });
-        if (migrated && !this.failed && retire) await this.retireLegacy(retire);
-      }
+        if (migrated && !this.failed && retire && proof) await this.retireLegacy(retire, proof);
+        else if (!migrated) await this.reconcileLegacy();
+      } else await this.reconcileLegacy();
       this.selectedId = this.state.directory.activeProfileId;
       this.initialized = true;
     });
@@ -757,31 +825,38 @@ export class BrowserProfileStore {
 
   /** Bounded legacy API. UI downloads use backupDownload to preserve larger archives. */
   async backup(options?: BackupOptions): Promise<string> {
-    const result = await this.serializeBackup(options);
-    checkFile(result, LIMIT);
-    return result;
+    const backup = await this.backupSnapshot(options);
+    const chunks: string[] = []; let bytes = 0;
+    for (const chunk of jsonChunks(backup, 1_048_576)) {
+      bytes += new TextEncoder().encode(chunk).length;
+      check(bytes <= PROFILE_LIMITS.fileBytes, LIMIT);
+      chunks.push(chunk);
+    }
+    return chunks.join('');
   }
 
   async backupDownload(options?: BackupDownloadOptions): Promise<string | BackupDownloadFile[]> {
     const fileBytes = options?._testing?.fileBytes ?? PROFILE_LIMITS.fileBytes;
     check(Number.isSafeInteger(fileBytes) && fileBytes >= 1_024 && fileBytes <= PROFILE_LIMITS.fileBytes);
-    const result = await this.serializeBackup(options);
-    if (result.length <= fileBytes && new TextEncoder().encode(result).length <= fileBytes) return result;
-    // JSON escaping can expand a UTF-16 code unit to six bytes. Keep ample room
-    // for the envelope, even when chunks split surrogate pairs or contain quotes.
+    const backup = await this.backupSnapshot(options);
+    // Only individual metadata/string tokens and bounded transport chunks are
+    // serialized. A profile archive can exceed the engine's maximum string length.
     const chunkSize = Math.floor((fileBytes - 512) / 6);
-    const count = Math.ceil(result.length / chunkSize);
-    const backupId = freshId(); const digest = backupDigest(result);
-    return Array.from({ length: count }, (_, index) => {
-      const part: BackupPart = { format: 'peetty-backup-part', version: 1, backupId, index, count, digest,
-        text: result.slice(index * chunkSize, (index + 1) * chunkSize) };
+    const chunks = Array.from(jsonChunks(backup, chunkSize));
+    let bytes = 0;
+    for (const chunk of chunks) bytes += new TextEncoder().encode(chunk).length;
+    if (bytes <= fileBytes) return chunks.join(''); // Proven bounded single-file path only.
+    const count = chunks.length;
+    const backupId = freshId(); const digest = backupDigest(chunks);
+    return chunks.map((text, index) => {
+      const part: BackupPart = { format: 'peetty-backup-part', version: 1, backupId, index, count, digest, text };
       const serialized = stringify(part);
       check(new TextEncoder().encode(serialized).length <= fileBytes, LIMIT);
       return { name: `peetty-backup-${backupId}.part-${String(index + 1).padStart(String(count).length, '0')}-of-${count}.json`, text: serialized };
     });
   }
 
-  private async serializeBackup(options?: Partial<BackupOptions>): Promise<string> {
+  private async backupSnapshot(options?: Partial<BackupOptions>): Promise<Backup> {
     const supplied = options?.sessions?.map(sessionFrom) ?? [];
     return this.enqueue(async () => {
       this.ready();
@@ -804,9 +879,9 @@ export class BrowserProfileStore {
           if (sessions) addSession(sessions, session);
         }
         const sessions = Array.from(byProfile, ([profileId, values]) => Array.from(values.values(), (session) => ({ profileId, ...session }))).flat();
-        return JSON.stringify({ format: 'peetty-backup', version: 2, createdAt: Date.now(),
+        return { format: 'peetty-backup', version: 2, createdAt: Date.now(),
           activeProfileId: this.selectedId && draft.directory.ids.includes(this.selectedId) ? this.selectedId : draft.directory.activeProfileId,
-          profiles, ...(sessions.length ? { sessions } : {}) });
+          profiles, ...(sessions.length ? { sessions } : {}) };
       });
     });
   }
@@ -834,9 +909,9 @@ export class BrowserProfileStore {
       const first = parts[0]!;
       check(parts.every((part) => part.backupId === first.backupId && part.count === first.count && part.digest === first.digest));
       check(new Set(parts.map((part) => part.index)).size === parts.length);
-      const reconstructed = parts.sort((a, b) => a.index - b.index).map((part) => part.text).join('');
-      check(backupDigest(reconstructed) === first.digest);
-      try { value = JSON.parse(reconstructed) as unknown; } catch { throw new Error(INVALID); }
+      const chunks = parts.sort((a, b) => a.index - b.index).map((part) => part.text);
+      check(backupDigest(chunks) === first.digest);
+      value = parseJSONChunks(chunks, PROFILE_LIMITS.fileBytes * 6);
     } else check(values.length === 1);
     // Validate EVERY reconstructed profile and session before enqueueing a mutation.
     const backup = backupFrom(value);

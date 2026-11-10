@@ -37,12 +37,14 @@ export function normalizeModelOptions(model: PeettyModelOptions): PeettyModelOpt
       }
       headers = Object.fromEntries(normalized.entries());
     }
+    const nonCredentialHeaders = normalizeNonCredentialHeaders(model.nonCredentialHeaders, headers);
     return {
       id, baseUrl: normalizeBaseUrl(model.baseUrl),
       ...(model.provider?.trim() ? { provider: model.provider.trim() } : {}),
       ...(model.apiKey !== undefined ? { apiKey: model.apiKey.trim() } : {}),
       ...(model.getApiKey ? { getApiKey: model.getApiKey } : {}),
       ...(headers ? { headers } : {}),
+      ...(nonCredentialHeaders?.length ? { nonCredentialHeaders } : {}),
       ...(model.tools !== undefined ? { tools: model.tools } : {}),
       ...(model.effort !== undefined ? { effort: model.effort } : {}),
     };
@@ -57,22 +59,44 @@ const NONCREDENTIAL_HEADERS = new Set([
   'anthropic-version', 'anthropic-beta', 'anthropic-dangerous-direct-browser-access',
   'http-referer', 'x-title', // OpenRouter application attribution.
 ]);
-export function isCredentialHeader(name: string): boolean {
-  return !NONCREDENTIAL_HEADERS.has(name.trim().toLowerCase());
+// Authentication names remain sensitive even if a caller attempts to classify them otherwise.
+const AUTHENTICATION_HEADER = /auth|token|secret|cookie|password|credential|(?:api|access|subscription)[-_]?key|(?:^|[-_])key(?:$|[-_])/i;
+
+function normalizeNonCredentialHeaders(value: unknown, headers?: Record<string, string>): string[] | undefined {
+  if (value === undefined) return;
+  if (!Array.isArray(value)) throw new Error();
+  const names = new Set<string>();
+  for (const name of value) {
+    if (typeof name !== 'string') throw new Error();
+    // Headers validates HTTP token syntax and canonicalizes case without accepting whitespace.
+    const normalized = [...new Headers([[name, '']]).keys()][0]!;
+    if (!Object.hasOwn(headers ?? {}, normalized) || AUTHENTICATION_HEADER.test(normalized)) throw new Error();
+    names.add(normalized);
+  }
+  return [...names].sort();
 }
 
-/** Keep only headers already owned by this endpoint, including unchanged subsets after key rotation. */
+export function isCredentialHeader(name: string, nonCredentialHeaders: readonly string[] = []): boolean {
+  const normalized = name.trim().toLowerCase();
+  return AUTHENTICATION_HEADER.test(normalized) ||
+    !NONCREDENTIAL_HEADERS.has(normalized) && !nonCredentialHeaders.some(value => value.toLowerCase() === normalized);
+}
+
+type HeaderConnection = Pick<StoredConnection, 'baseUrl' | 'headers' | 'nonCredentialHeaders'>;
+
+/** Explicit nonsecret classifications opt those headers into storage. Other headers must
+ * already belong to this endpoint; unclassified values still follow authentication consent. */
 export function retainedConnectionHeaders(
-  chosen: { baseUrl: string; headers?: Record<string, string> },
-  known?: { baseUrl: string; headers?: Record<string, string> },
+  chosen: HeaderConnection,
+  known?: HeaderConnection,
   rememberCredentials = true,
 ): Record<string, string> | undefined {
-  if (!chosen.headers || !known?.headers) return;
+  if (!chosen.headers) return;
   try {
-    if (normalizeBaseUrl(chosen.baseUrl) !== normalizeBaseUrl(known.baseUrl)) return;
-    const previous = new Headers(known.headers);
+    const explicit = normalizeNonCredentialHeaders(chosen.nonCredentialHeaders, Object.fromEntries(new Headers(chosen.headers))) ?? [];
+    const previous = new Headers(known && normalizeBaseUrl(chosen.baseUrl) === normalizeBaseUrl(known.baseUrl) ? known.headers : undefined);
     const kept = [...new Headers(chosen.headers)].filter(([name, value]) =>
-      previous.has(name) && previous.get(name) === value && (rememberCredentials || !isCredentialHeader(name)));
+      explicit.includes(name) || previous.has(name) && previous.get(name) === value && (rememberCredentials || !isCredentialHeader(name, explicit)));
     return kept.length ? Object.fromEntries(kept) : undefined;
   } catch { return; }
 }
@@ -84,6 +108,7 @@ export function toStoredConnection(model: PeettyModelOptions, apiKey: string | u
     ...(model.provider ? { provider: model.provider } : {}),
     ...(apiKey !== undefined ? { apiKey } : {}),
     ...(model.headers ? { headers: { ...model.headers } } : {}),
+    ...(model.nonCredentialHeaders ? { nonCredentialHeaders: [...model.nonCredentialHeaders] } : {}),
     ...(model.tools !== undefined ? { tools: model.tools } : {}),
     ...(model.effort !== undefined ? { effort: model.effort } : {}),
   };
@@ -97,13 +122,17 @@ export function prepareSavedConnection(
   const headers = retainedConnectionHeaders(chosen, known, rememberCredentials);
   if (headers) saved.headers = headers;
   else delete saved.headers;
+  const nonCredentialHeaders = normalizeNonCredentialHeaders(chosen.nonCredentialHeaders, Object.fromEntries(new Headers(chosen.headers)))?.filter(name => Object.hasOwn(headers ?? {}, name));
+  if (nonCredentialHeaders?.length) saved.nonCredentialHeaders = nonCredentialHeaders;
+  else delete saved.nonCredentialHeaders;
   if (!rememberCredentials) delete saved.apiKey;
   return saved;
 }
 
 function connectionFields(model: PeettyModelOptions) {
   return [model.id.trim(), normalizeBaseUrl(model.baseUrl), model.provider?.trim() || '', model.apiKey?.trim() || '',
-    model.tools !== false, model.effort, JSON.stringify([...new Headers(model.headers)])] as const;
+    model.tools !== false, model.effort, JSON.stringify([...new Headers(model.headers)]),
+    JSON.stringify(normalizeNonCredentialHeaders(model.nonCredentialHeaders, Object.fromEntries(new Headers(model.headers))) ?? [])] as const;
 }
 
 /** Canonical transport identity shared by session deduplication and override detection. */
@@ -121,7 +150,7 @@ export function sameConnection(a?: PeettyModelOptions, b?: PeettyModelOptions): 
 }
 
 export function hasStoredCredentials(connection?: PeettyModelOptions): boolean {
-  return !!connection?.apiKey || Object.entries(connection?.headers ?? {}).some(([name, value]) => isCredentialHeader(name) && !!value.trim());
+  return !!connection?.apiKey || Object.entries(connection?.headers ?? {}).some(([name, value]) => isCredentialHeader(name, connection?.nonCredentialHeaders) && !!value.trim());
 }
 
 /** Magpie's default gateway on the device running the browser. Supply your own model ID and gateway key. */
@@ -130,5 +159,8 @@ export const LOCAL_MAGPIE = Object.freeze({ baseUrl: 'http://127.0.0.1:3425/v1' 
 /** Reuse credentials only when already configured for this exact local gateway. */
 export function localMagpieConnection(current?: PeettyModelOptions): PeettyModelOptions {
   if (current?.baseUrl.replace(/\/+$/, '') !== LOCAL_MAGPIE.baseUrl) return { ...LOCAL_MAGPIE, id: '' };
-  return { ...current, ...LOCAL_MAGPIE, ...(current.headers ? { headers: { ...current.headers } } : {}) };
+  return { ...current, ...LOCAL_MAGPIE,
+    ...(current.headers ? { headers: { ...current.headers } } : {}),
+    ...(current.nonCredentialHeaders ? { nonCredentialHeaders: [...current.nonCredentialHeaders] } : {}),
+  };
 }

@@ -175,7 +175,11 @@ export class ChatRuntime {
   }
 
   get model(): PeettyModelOptions | undefined {
-    return this.currentModel ? { ...this.currentModel, ...(this.currentModel.headers ? { headers: { ...this.currentModel.headers } } : {}) } : undefined;
+    return this.currentModel ? {
+      ...this.currentModel,
+      ...(this.currentModel.headers ? { headers: { ...this.currentModel.headers } } : {}),
+      ...(this.currentModel.nonCredentialHeaders ? { nonCredentialHeaders: [...this.currentModel.nonCredentialHeaders] } : {}),
+    } : undefined;
   }
   get sessionOverride(): SessionModel | undefined {
     const model = this.ownsSessionOverride ? this.model : undefined;
@@ -197,7 +201,7 @@ export class ChatRuntime {
   private rememberSecrets(model?: PeettyModelOptions): void {
     if (model?.apiKey?.trim()) { this.secrets.add(model.apiKey); this.secrets.add(model.apiKey.trim()); }
     for (const [name, value] of Object.entries(model?.headers ?? {})) {
-      if (isCredentialHeader(name) && value.trim()) {
+      if (isCredentialHeader(name, model?.nonCredentialHeaders) && value.trim()) {
         this.secrets.add(value); this.secrets.add(value.trim());
         this.secrets.add(value.trim().replace(/^(?:Bearer|Basic|Token)\s+/i, ''));
       }

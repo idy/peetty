@@ -60,6 +60,60 @@ describe('model header validation', () => {
   });
 });
 
+describe('explicit nonsecret header classification', () => {
+  const base = { id: 'model', baseUrl: 'https://api.example/v1', apiKey: 'fixture-static-key' };
+
+  it('canonicalizes, deduplicates and detaches declarations for existing HTTP headers', () => {
+    const headers = { 'X-Route': 'fixture-route', 'X-Region': 'fixture-region' };
+    const names = ['X-Route', 'x-region', 'x-ROUTE'];
+    const model = normalizeModelOptions({ ...base, headers, nonCredentialHeaders: names });
+    assert.deepEqual(model.nonCredentialHeaders, ['x-region', 'x-route']);
+    names.push('Authorization'); headers['X-Route'] = 'changed';
+    assert.deepEqual(model.nonCredentialHeaders, ['x-region', 'x-route']); assert.equal(model.headers!['x-route'], 'fixture-route');
+    assert.equal(normalizeModelOptions({ ...base, nonCredentialHeaders: [] }).nonCredentialHeaders, undefined);
+    const snapshot = toStoredConnection(model, undefined);
+    assert.notEqual(snapshot.nonCredentialHeaders, model.nonCredentialHeaders);
+    snapshot.nonCredentialHeaders!.push('other'); assert.deepEqual(model.nonCredentialHeaders, ['x-region', 'x-route']);
+  });
+
+  it('rejects malformed declarations and names absent from the supplied header record', () => {
+    for (const names of [null, false, 'X-Route', {}, [null], [1], [''], ['bad header'], ['X-Route\r\nAuthorization'], [' X-Route '], ['X-Missing']]) {
+      assert.throws(() => normalizeModelOptions({ ...base, headers: { 'X-Route': 'fixture-route' }, nonCredentialHeaders: names as string[] }), { message: 'Enter a valid API base URL and model ID.' });
+    }
+    assert.throws(() => normalizeModelOptions({ ...base, nonCredentialHeaders: ['X-Route'] }));
+  });
+
+  it('never permits authentication names to be exempted', () => {
+    for (const name of ['Authorization', 'Proxy-Authorization', 'Api-Key', 'X-Api-Key', 'X-Auth', 'X-Access-Key', 'X-Token', 'X-Secret', 'Cookie', 'Set-Cookie', 'Ocp-Apim-Subscription-Key', 'X-Key', 'Gateway-Credential', 'X-Password']) {
+      assert.throws(() => normalizeModelOptions({ ...base, headers: { [name]: 'fixture-sensitive' }, nonCredentialHeaders: [name] }));
+      assert.equal(isCredentialHeader(name, [name]), true);
+    }
+  });
+
+  it('opts newly declared routing metadata into persistence without key consent', () => {
+    const chosen = normalizeModelOptions({ ...base, headers: { 'X-Route': 'fixture-route', 'X-Undeclared': 'fixture-sensitive' }, nonCredentialHeaders: ['X-Route'] });
+    const saved = prepareSavedConnection(toStoredConnection(chosen, chosen.apiKey), undefined, false);
+    assert.deepEqual(saved.headers, { 'x-route': 'fixture-route' });
+    assert.deepEqual(saved.nonCredentialHeaders, ['x-route']); assert.equal(saved.apiKey, undefined);
+    assert.equal(hasStoredCredentials(saved), false);
+    assert.equal(hasStoredCredentials(chosen), true, 'the API key and undeclared header remain sensitive');
+    assert.equal(isCredentialHeader('X-Route'), true); assert.equal(isCredentialHeader('X-Route', ['x-route']), false);
+    const { nonCredentialHeaders: _names, ...old } = chosen;
+    assert.equal(prepareSavedConnection(old, old, false).headers, undefined, 'old data without a marker remains conservative');
+    assert.equal(hasStoredCredentials({ ...saved, headers: { 'x-route': 'fixture-route', 'x-undeclared': 'fixture-sensitive' } }), true);
+  });
+
+  it('includes canonical classifications in identity and retains copied local gateway declarations', () => {
+    const first = { ...base, headers: { 'X-Route': 'fixture-route', 'X-Region': 'fixture-region' }, nonCredentialHeaders: ['X-Route', 'x-region'] };
+    const equivalent = { ...first, nonCredentialHeaders: ['X-REGION', 'x-route', 'X-Route'] };
+    assert.equal(connectionIdentity(first), connectionIdentity(equivalent)); assert.equal(sameConnection(first, equivalent), true);
+    assert.notEqual(connectionIdentity(first), connectionIdentity({ ...first, nonCredentialHeaders: ['x-route'] }));
+    assert.equal(sameConnection(first, { ...first, nonCredentialHeaders: [] }), false);
+    const local = localMagpieConnection({ ...first, ...LOCAL_MAGPIE });
+    assert.deepEqual(local.nonCredentialHeaders, first.nonCredentialHeaders); assert.notEqual(local.nonCredentialHeaders, first.nonCredentialHeaders);
+  });
+});
+
 describe('shared connection projections', () => {
   const base = { id: 'model', baseUrl: 'https://api.example/v1', apiKey: 'fixture-connection-key' };
 

@@ -140,6 +140,53 @@ describe('composer acceptance ownership', () => {
   }
 });
 
+describe('explicit nonsecret setup headers', () => {
+  it('persists a newly classified route without API key consent and retains it through reload and key replacement', async (t) => {
+    const idb = installChatIndexedDB(t); const namespace = 'explicit-route-setup';
+    const { panel, query } = await mountPanel(t, { ...MODEL, apiKey: 'fixture-route-api-key',
+      headers: { 'X-Route': 'fixture-route', 'X-Undeclared': 'fixture-private-header', 'X-Auth': 'fixture-auth-header' }, nonCredentialHeaders: ['X-Route'],
+    }, { chat: { storageKey: namespace } });
+    assert.equal(query<HTMLInputElement>('[name="remember"]').checked, false);
+    query<HTMLFormElement>('.pc-setup').requestSubmit();
+    await eventually(() => !!savedConnection(idb, namespace));
+    const saved = savedConnection(idb, namespace)!;
+    assert.equal(saved.apiKey, undefined); assert.deepEqual(saved.headers, { 'x-route': 'fixture-route' }); assert.deepEqual(saved.nonCredentialHeaders, ['x-route']);
+    panel.destroy();
+    const next = await mountPanel(t, undefined, { chat: { storageKey: namespace } });
+    assert.equal(next.query<HTMLInputElement>('[name="key"]').value, '');
+    assert.equal(next.query<HTMLInputElement>('[name="remember"]').checked, false, 'nonsecret metadata does not imply authentication consent');
+    const requests: Headers[] = [];
+    t.mock.method(globalThis, 'fetch', async (_input: RequestInfo | URL, init?: RequestInit) => { requests.push(new Headers(init?.headers)); return Response.json({ data: [{ id: MODEL.id }] }); });
+    const key = next.query<HTMLInputElement>('[name="key"]'); key.value = 'fixture-replacement-key'; key.dispatchEvent(new next.window.Event('input') as unknown as Event);
+    next.query<HTMLButtonElement>('.pc-load').click(); await eventually(() => requests.length === 1 && !next.query<HTMLButtonElement>('.pc-load').disabled);
+    assert.equal(requests[0]!.get('x-route'), 'fixture-route'); assert.equal(requests[0]!.get('authorization'), 'Bearer fixture-replacement-key');
+    assert.equal(requests[0]!.get('x-undeclared'), null); assert.equal(requests[0]!.get('x-auth'), null);
+    next.query<HTMLFormElement>('.pc-setup').requestSubmit(); await eventually(() => next.query<HTMLElement>('.peetty-chat').dataset.mode === 'chat');
+    assert.equal(savedConnection(idb, namespace)!.apiKey, undefined);
+    assert.deepEqual(savedConnection(idb, namespace)!.headers, { 'x-route': 'fixture-route' });
+    assert.deepEqual(savedConnection(idb, namespace)!.nonCredentialHeaders, ['x-route']);
+  });
+
+  it('preserves saved and session classifications in a full backup and restored runtime', async (t) => {
+    const idb = installChatIndexedDB(t); const namespace = 'explicit-route-backup';
+    const model = { ...MODEL, apiKey: 'fixture-route-backup-key', headers: { 'X-Route': 'fixture-backup-route' }, nonCredentialHeaders: ['X-Route'] };
+    const { panel, query, root } = await mountPanel(t, model, { chat: { storageKey: namespace } });
+    query<HTMLFormElement>('.pc-setup').requestSubmit(); await eventually(() => !!savedConnection(idb, namespace)); panel.open(true);
+    let blob: Blob | undefined; t.mock.method(URL, 'createObjectURL', (value: Blob) => { blob = value; return 'blob:explicit-route-backup'; }); t.mock.method(URL, 'revokeObjectURL', () => {});
+    root.addEventListener('click', event => { if ((event.target as Element).closest('a[download]')) event.preventDefault(); });
+    query<HTMLButtonElement>('[data-tab="data"]').click(); query<HTMLButtonElement>('.pc-backup').click(); await eventually(() => !!blob);
+    const text = await blob!.text(); const archive = JSON.parse(text);
+    assert.deepEqual(archive.profiles[0].connection.nonCredentialHeaders, ['x-route']);
+    assert.equal(archive.profiles[0].connection.apiKey, undefined);
+    assert.deepEqual(archive.sessions[0].connection.nonCredentialHeaders, ['x-route']);
+    const target = new BrowserProfileStore('explicit-route-backup-target'); await target.initialize(); t.after(() => target.close()); await target.restore(text);
+    assert.deepEqual(target.storedConnection(target.activeProfileId)!.nonCredentialHeaders, ['x-route']);
+    assert.deepEqual(target.storedConnection(target.activeProfileId)!.headers, { 'x-route': 'fixture-backup-route' });
+    const runtime = new ChatRuntime({ storage: target.runtimeStorage(target.activeProfileId) }); t.after(() => runtime.destroy()); await runtime.initialize();
+    assert.deepEqual(runtime.model!.nonCredentialHeaders, ['x-route']); assert.equal(runtime.model!.apiKey, model.apiKey);
+  });
+});
+
 describe('panel surface fallbacks', () => {
   it('keeps literal light and dark surfaces outside color-mix support blocks', async (t) => {
     const { root, window } = await mountPanel(t, MODEL);
@@ -569,7 +616,7 @@ describe('setup drafts and credential replacement', () => {
     let lookups = 0;
     const { query, window } = await mountPanel(t, {
       ...MODEL, apiKey: 'fixture-original-key', getApiKey: () => { lookups++; return 'fixture-callback-key'; },
-      headers: { Authorization: 'Bearer fixture-expired', 'x-api-key': 'fixture-expired', 'api-key': 'fixture-expired', 'Cf-Aig-Authorization': 'Bearer fixture-expired', 'OpenAI-Project': 'retained' },
+      headers: { Authorization: 'Bearer fixture-expired', 'x-api-key': 'fixture-expired', 'api-key': 'fixture-expired', 'Cf-Aig-Authorization': 'Bearer fixture-expired', 'X-Route': 'retained' }, nonCredentialHeaders: ['X-Route'],
     }, { onReply: () => reply.resolve() });
     const requests: Request[] = [];
     t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -590,7 +637,7 @@ describe('setup drafts and credential replacement', () => {
       assert.equal(request.headers.get('x-api-key'), null);
       assert.equal(request.headers.get('api-key'), null);
       assert.equal(request.headers.get('cf-aig-authorization'), null);
-      assert.equal(request.headers.get('openai-project'), 'retained');
+      assert.equal(request.headers.get('x-route'), 'retained');
     }
     assert.equal(lookups, 0);
   });

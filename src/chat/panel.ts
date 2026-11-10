@@ -636,12 +636,13 @@ export async function createChatPanel({
       const typedKey = key.value.trim();
       const replacement = keyEdited || typedKey !== (matching?.apiKey ?? '');
       const headers = matching?.headers ? { ...matching.headers } : undefined;
+      const nonCredentialHeaders = matching?.nonCredentialHeaders ? [...matching.nonCredentialHeaders] : undefined;
       if (replacement && headers) {
         for (const name of Object.keys(headers)) {
-          if (isCredentialHeader(name)) delete headers[name];
+          if (isCredentialHeader(name, nonCredentialHeaders)) delete headers[name];
         }
       }
-      return { typedKey, headers, matching, getApiKey: !replacement ? matching?.getApiKey : undefined };
+      return { typedKey, headers, nonCredentialHeaders, matching, getApiKey: !replacement ? matching?.getApiKey : undefined };
     }
     function showManualModel() { model.hidden = false; model.required = true; models.hidden = true; }
     function manualModel() { showManualModel(); model.focus(); }
@@ -722,10 +723,10 @@ export async function createChatPanel({
           const baseUrl = normalizeBaseUrl(url.value);
           const id = model.value.trim();
           if (!id) { showError(() => t.invalid); return; }
-          const { typedKey, headers, getApiKey } = connectionAuth(baseUrl);
+          const { typedKey, headers, nonCredentialHeaders, getApiKey } = connectionAuth(baseUrl);
           cancelDiscovery();
           canceledTurn = true;
-          await owner.configure({ baseUrl, id, provider: find<HTMLInputElement>('[name="provider"]').value, tools: tools.checked, ...(effort.value ? { effort: effort.value as PeettyReasoningEffort } : {}), ...(typedKey ? { apiKey: typedKey } : {}), ...(getApiKey ? { getApiKey } : {}), ...(headers ? { headers } : {}) }, remember.checked);
+          await owner.configure({ baseUrl, id, provider: find<HTMLInputElement>('[name="provider"]').value, tools: tools.checked, ...(effort.value ? { effort: effort.value as PeettyReasoningEffort } : {}), ...(typedKey ? { apiKey: typedKey } : {}), ...(getApiKey ? { getApiKey } : {}), ...(headers ? { headers } : {}), ...(nonCredentialHeaders ? { nonCredentialHeaders } : {}) }, remember.checked);
           if (disposed || revision !== configuration || runtime !== owner || currentProfileId !== ownerId) return;
           cacheSession();
           showError(); setSettings(false);

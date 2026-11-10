@@ -9,6 +9,7 @@ export interface StoredConnection {
   baseUrl: string;
   provider?: string;
   headers?: Record<string, string>;
+  nonCredentialHeaders?: string[];
   apiKey?: string;
   tools?: boolean;
   effort?: PeettyReasoningEffort;
@@ -85,6 +86,7 @@ function connectionFrom(value: unknown): StoredConnection | undefined {
       ...(connection.provider !== undefined ? { provider: connection.provider } : {}),
       ...(connection.apiKey !== undefined ? { apiKey: connection.apiKey } : {}),
       ...(connection.headers !== undefined ? { headers: connection.headers } : {}),
+      ...(connection.nonCredentialHeaders !== undefined ? { nonCredentialHeaders: connection.nonCredentialHeaders } : {}),
       ...(connection.tools !== undefined ? { tools: connection.tools } : {}),
       ...(connection.effort !== undefined ? { effort: connection.effort } : {}),
     });

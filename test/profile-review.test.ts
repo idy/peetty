@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { constants as bufferConstants } from 'node:buffer';
+import { jsonChunks, jsonFingerprint, parseJSONChunks } from '../src/chat/bounded-json.ts';
 import { readFile } from 'node:fs/promises';
 import { describe, it } from 'node:test';
 import type { TestContext } from 'node:test';
@@ -636,10 +639,12 @@ describe('full-archive sanitation and tolerant legacy migration', () => {
         const request = { result: database } as IDBOpenDBRequest;
         const open = globalThis.indexedDB.open.bind(globalThis.indexedDB);
         t.mock.timers.enable({ apis: ['setTimeout'] });
+        let legacyAttempts = 0;
         t.mock.method(globalThis.indexedDB, 'open', (name: string, version?: number) => {
           if (name !== `${namespace}:chat`) return open(name, version);
-          // A peer commits after the initial empty-directory read, before migration settles.
-          if (peerCommitted) for (const [key, value] of records) idb.databases.get(`${namespace}:profiles`)!.set(key, structuredClone(value));
+          legacyAttempts++;
+          // A peer commits once after the initial empty-directory read; retries must not replay that commit.
+          if (peerCommitted && legacyAttempts === 1) for (const [key, value] of records) idb.databases.get(`${namespace}:profiles`)!.set(key, structuredClone(value));
           if (failure === 'throw') throw new Error('synthetic legacy open failure');
           queueMicrotask(() => {
             if (failure === 'timeout') t.mock.timers.tick(IDB_OPEN_TIMEOUT_MS);
@@ -672,7 +677,7 @@ describe('full-archive sanitation and tolerant legacy migration', () => {
         if (failure === 'blocked' || failure === 'timeout') {
           request.onsuccess?.call(request, new Event('success'));
           assert.equal(closes, 1, 'close a late legacy connection');
-        } else if (failure.startsWith('read')) assert.equal(closes, 1, 'close a failed legacy read connection');
+        } else if (failure.startsWith('read')) assert.equal(closes, legacyAttempts, 'close every failed legacy read connection');
         assert.equal(manager.persistenceWarning, false);
       });
     }
@@ -918,6 +923,145 @@ describe('complete multipart backup downloads', () => {
     await target.restoreFiles(files.map((file) => file.text));
     assert.equal(target.profileInfo(target.activeProfileId)!.entryCount, entries.length);
     assert.equal(target.sourceText(target.activeProfileId, target.historyPage(target.activeProfileId, '', 1).entries[0]!.id), body);
+  });
+});
+
+describe('bounded JSON compatibility and retryable migration', () => {
+  it('streams native JSON values across escape/surrogate boundaries without prototype mutation', () => {
+    const source = { text: '雪😀\\\"\n\t\u0000\ud800'.repeat(5_000), absent: undefined, array: [null, 1, true, false] };
+    const chunks = [...jsonChunks(source, 83)];
+    assert.ok(chunks.every((part) => part.length <= 83));
+    assert.deepEqual(parseJSONChunks(chunks, PROFILE_LIMITS.fileBytes * 6), JSON.parse(JSON.stringify(source)));
+    const literal = '{"same":1,"same":2,"__proto__":{"polluted":true},"constructor":{"prototype":{"polluted":true}},"escaped":"\\uD83D\\uDE00\\n\\\\\\\""}';
+    const parsed = parseJSONChunks(Array.from(literal), 10_000) as Record<string, unknown>;
+    assert.deepEqual(parsed, JSON.parse(literal));
+    assert.equal(Object.getPrototypeOf(parsed), Object.prototype);
+    assert.equal(({} as { polluted?: boolean }).polluted, undefined);
+    for (const invalid of ['{} trailing', '{"a":1,}', '[1,]', '[', '{"a":"\\uXYZ1"}', '01', 'true false', '{"a":"line\nfeed"}']) {
+      assert.throws(() => parseJSONChunks(Array.from(invalid), 10_000), /Invalid/u);
+    }
+  });
+
+  it('computes portable SHA-256 proofs without subtle crypto and without plaintext checkpoints', async (t) => {
+    const value = { text: '😀'.repeat(20_000), nested: [1, false, 'proof'] };
+    const serialized = [...jsonChunks(value, 16_384)].join('');
+    const bytes = Buffer.alloc(serialized.length * 2);
+    for (let i = 0; i < serialized.length; i++) bytes.writeUInt16BE(serialized.charCodeAt(i), i * 2);
+    assert.equal(jsonFingerprint(value), createHash('sha256').update(bytes).digest('hex'));
+    const idb = installChatIndexedDB(t);
+    const crypto = globalThis.crypto;
+    t.mock.getter(globalThis, 'crypto', () => ({ getRandomValues: crypto.getRandomValues.bind(crypto) }) as Crypto);
+    idb.databases.set('no-subtle:chat', new Map<string, unknown>([['entries', [entry('old', 'Private old message')]], ['connection', connection]]));
+    const manager = await store(t, 'no-subtle');
+    await manager.storage(manager.activeProfileId).clearEntries();
+    await manager.storage(manager.activeProfileId).saveConnection(connection, { rememberCredentials: false });
+    const proof = JSON.stringify(idb.databases.get('no-subtle:profiles')!.get('legacyMigration'));
+    assert.equal(proof.includes('Private old message'), false);
+    assert.equal(proof.includes(connection.apiKey!), false);
+    assert.equal(manager.persistenceWarning, false);
+  });
+
+  it('reconciles older markerless migrated stores by correspondence while preserving uncopied records', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const manager = await store(t, 'old-migration');
+    const id = manager.activeProfileId;
+    await manager.storage(id).saveEntries([entry('copied')]);
+    await manager.storage(id).saveConnection(connection);
+    manager.close();
+    const legacy = new Map<string, unknown>([['entries', [entry('copied'), entry('uncopied')]], ['connection', connection], ['entriesEpoch', 'old']]);
+    idb.databases.set('old-migration:chat', legacy);
+    const reopened = await store(t, 'old-migration');
+    assert.deepEqual(legacy.get('entries'), [entry('uncopied')]);
+    assert.equal(legacy.has('connection'), false);
+    assert.deepEqual(reopened.activeProfile.entries, [entry('copied')]);
+    await reopened.storage(id).clearEntries();
+    await reopened.storage(id).saveConnection(connection, { rememberCredentials: false });
+    assert.deepEqual(legacy.get('entries'), [entry('uncopied')]);
+    assert.equal(legacy.has('connection'), false);
+  });
+
+  it('retries failed cleanup after restart and a later clear/key opt-out without retaining plaintext proof', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const legacy = new Map<string, unknown>([['entries', [entry('old', 'Raw private history')]], ['connection', connection]]);
+    idb.databases.set('retry-cleanup:chat', legacy);
+    const open = globalThis.indexedDB.open.bind(globalThis.indexedDB);
+    let attempts = 0; let blocked = true;
+    t.mock.method(globalThis.indexedDB, 'open', (name: string, version?: number) => {
+      if (name === 'retry-cleanup:chat' && ++attempts > 1 && blocked) throw new Error('Cleanup temporarily unavailable');
+      return open(name, version);
+    });
+    const first = await store(t, 'retry-cleanup');
+    const id = first.activeProfileId;
+    assert.ok(legacy.has('entries'));
+    await first.storage(id).clearEntries();
+    await first.storage(id).saveConnection(connection, { rememberCredentials: false });
+    assert.equal(first.persistenceWarning, false);
+    const persistedProof = JSON.stringify(idb.databases.get('retry-cleanup:profiles')!.get('legacyMigration'));
+    assert.equal(persistedProof.includes('Raw private history'), false);
+    assert.equal(persistedProof.includes(connection.apiKey!), false);
+    blocked = false;
+    const reopened = await store(t, 'retry-cleanup');
+    assert.equal(legacy.size, 0);
+    assert.deepEqual(reopened.activeProfile.entries, []);
+    assert.equal(reopened.activeProfile.connection!.apiKey, undefined);
+  });
+
+  it('retries a concurrent legacy write safely and only retires newly copied values after correspondence', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const legacy = new Map<string, unknown>([['entries', [entry('copied')]], ['connection', connection], ['entriesEpoch', 'old']]);
+    idb.databases.set('retry-concurrent:chat', legacy);
+    const open = globalThis.indexedDB.open.bind(globalThis.indexedDB); let attempts = 0;
+    t.mock.method(globalThis.indexedDB, 'open', (name: string, version?: number) => {
+      if (name === 'retry-concurrent:chat' && ++attempts === 2) legacy.set('entries', [entry('copied'), entry('new-legacy')]);
+      return open(name, version);
+    });
+    const manager = await store(t, 'retry-concurrent');
+    assert.deepEqual(legacy.get('entries'), [entry('copied'), entry('new-legacy')]);
+    await manager.storage(manager.activeProfileId).clearEntries();
+    assert.deepEqual(legacy.get('entries'), [entry('new-legacy')]);
+    await manager.storage(manager.activeProfileId).saveEntries([entry('new-legacy')]);
+    await manager.storage(manager.activeProfileId).clearEntries();
+    assert.equal(legacy.size, 0);
+    assert.equal(manager.profileInfo(manager.activeProfileId)!.entryCount, 0);
+  });
+
+  it('serializes a supported 70,000 by 8,000-character archive beyond the engine string limit in bounded pieces', () => {
+    const body = 'x'.repeat(8_000);
+    const archive = { profiles: [profile('huge', { entries: Array.from({ length: 70_000 }, (_, i) => entry(`huge-${i}`, body)) })] };
+    let characters = 0; let largest = 0;
+    for (const chunk of jsonChunks(archive, 262_144)) { characters += chunk.length; largest = Math.max(largest, chunk.length); }
+    assert.ok(characters > bufferConstants.MAX_STRING_LENGTH);
+    assert.ok(largest <= 262_144);
+    assert.equal(archive.profiles[0]!.entries.length, 70_000);
+  });
+
+  it('exports/restores many entries with strict intermediate stringify and join ceilings', async (t) => {
+    const manager = await store(t, 'bounded-many', false);
+    const body = 'snow 雪😀\\\"\n'.repeat(100);
+    await manager.storage(manager.activeProfileId).saveEntries(Array.from({ length: 5_000 }, (_, i) => entry(`many-${i}`, body)));
+    const stringify = JSON.stringify;
+    const join = Array.prototype.join;
+    t.mock.method(JSON, 'stringify', ((value: unknown, ...args: unknown[]) => {
+      if (typeof value === 'object' && value) {
+        assert.equal('profiles' in value, false, 'must not stringify a backup');
+        assert.equal('entries' in value, false, 'must not stringify a profile archive');
+      }
+      const result = Reflect.apply(stringify, JSON, [value, ...args]) as string | undefined;
+      assert.ok(!result || result.length < 32_768, 'bounded serialization only');
+      return result;
+    }) as typeof JSON.stringify);
+    const descriptor = Object.getOwnPropertyDescriptor(Array.prototype, 'join')!;
+    Object.defineProperty(Array.prototype, 'join', { ...descriptor, value: function(this: unknown[], separator?: string) {
+      if (this.every((item) => typeof item === 'string')) assert.ok(this.reduce((count: number, item) => count + (item as string).length, 0) < 32_768, 'never join the whole archive');
+      return Reflect.apply(join, this, [separator]);
+    } });
+    t.after(() => Object.defineProperty(Array.prototype, 'join', descriptor));
+    const files = await manager.backupDownload({ _testing: { fileBytes: 16_384 } });
+    assert.ok(Array.isArray(files) && files.length > 100);
+    const destination = await store(t, 'bounded-many-target', false);
+    await destination.restoreFiles(files.map((file) => file.text));
+    assert.equal(destination.profileInfo(destination.activeProfileId)!.entryCount, 5_000);
+    assert.equal(destination.historyPage(destination.activeProfileId, '', 1).entries[0]!.text, body);
   });
 });
 
