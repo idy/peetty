@@ -38,7 +38,7 @@ async function fetchJson(input: string, base: string): Promise<{ data: unknown; 
 /**
  * Resolves a figure option:
  * - a bundled preset id (`miru`), used directly;
- * - any other catalog id (`xiaoxiao`), loaded from {@link FIGURE_CATALOG};
+ * - any other catalog id (`shiori`), loaded from {@link FIGURE_CATALOG};
  * - a URL or relative path to a figure JSON file;
  * - figure data.
  * Everything loaded is validated before use.
@@ -52,9 +52,18 @@ export async function resolveFigure(input: string | object = 'miru', catalog = F
 
 /** Lists the figures in a catalog, e.g. for a character picker. */
 export async function listFigures(catalog = FIGURE_CATALOG): Promise<CatalogEntry[]> {
-  const { data } = await fetchJson('index.json', catalog) as { data: { format?: unknown; figures?: unknown } };
+  const { data, url } = await fetchJson('index.json', catalog) as { data: { format?: unknown; figures?: unknown }; url: string };
   if (data?.format !== CATALOG_FORMAT || !Array.isArray(data.figures)) throw new Error('Not a Peetty figure catalog.');
-  return data.figures.filter((e): e is CatalogEntry =>
-    !!e && typeof e === 'object' && typeof e.id === 'string' && FIGURE_ID.test(e.id) && typeof e.url === 'string'
-    && /^https?:\/\//.test(e.url));
+  const entries = data.figures.filter((e): e is CatalogEntry =>
+    !!e && typeof e === 'object' && typeof e.id === 'string' && FIGURE_ID.test(e.id) && typeof e.url === 'string');
+  const resolved: CatalogEntry[] = [];
+  for (const entry of entries) {
+    try {
+      const reference = entry.url.trim();
+      if (!reference || reference.startsWith('#')) continue;
+      const address = new URL(reference, url);
+      if (address.protocol === 'https:' || address.protocol === 'http:') resolved.push({ ...entry, url: address.href });
+    } catch { /* Invalid catalog destinations are omitted. */ }
+  }
+  return resolved;
 }

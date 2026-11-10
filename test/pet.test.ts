@@ -110,18 +110,21 @@ function attachChatPanel(pet: Peetty, setModel: (model: PeettyModelOptions) => P
 
 /** Exercise the real initialization chain with only the lazy chat module replaced. */
 async function petWithChatLoader(loadChatPanel: typeof import('../src/chat/load.ts').loadChatPanel): Promise<typeof Peetty> {
+  let replaced = false;
   const result = await build({
     entryPoints: [fileURLToPath(new URL('../src/pet/pet.ts', import.meta.url))],
     bundle: true, write: false, platform: 'node', format: 'cjs',
     plugins: [{
       name: 'deferred-chat-loader',
       setup(builder) {
-        builder.onLoad({ filter: /\/chat\/load\.ts$/ }, () => ({
-          contents: 'export const loadChatPanel = () => loadChatPanelForTest();',
-        }));
+        builder.onLoad({ filter: /[\\/]chat[\\/]load\.ts$/ }, () => {
+          replaced = true;
+          return { contents: 'export const loadChatPanel = () => loadChatPanelForTest();' };
+        });
       },
     }],
   });
+  assert.equal(replaced, true, 'The lazy chat module must be replaced by the fixture on every platform.');
   const module = { exports: {} as { Peetty: typeof Peetty } };
   runInThisContext(`(function(module, loadChatPanelForTest) { ${result.outputFiles[0]!.text}\n})`)(module, loadChatPanel);
   return module.exports.Peetty;

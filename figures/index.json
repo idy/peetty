@@ -17,7 +17,7 @@
       "license": "CC-BY-4.0",
       "renderer": "rig",
       "bundled": true,
-      "url": "https://peetty.idy.dev/figures/miru.json"
+      "url": "miru.json"
     },
     {
       "id": "koharu",
@@ -34,7 +34,7 @@
       "license": "CC-BY-4.0",
       "renderer": "rig",
       "bundled": true,
-      "url": "https://peetty.idy.dev/figures/koharu.json"
+      "url": "koharu.json"
     },
     {
       "id": "xiaoxiao",
@@ -51,7 +51,7 @@
       "license": "CC-BY-4.0",
       "renderer": "rig",
       "bundled": true,
-      "url": "https://peetty.idy.dev/figures/xiaoxiao.json"
+      "url": "xiaoxiao.json"
     },
     {
       "id": "riley",
@@ -68,7 +68,7 @@
       "license": "CC-BY-4.0",
       "renderer": "rig",
       "bundled": true,
-      "url": "https://peetty.idy.dev/figures/riley.json"
+      "url": "riley.json"
     },
     {
       "id": "amara",
@@ -85,7 +85,7 @@
       "license": "CC-BY-4.0",
       "renderer": "rig",
       "bundled": true,
-      "url": "https://peetty.idy.dev/figures/amara.json"
+      "url": "amara.json"
     },
     {
       "id": "elsie",
@@ -102,7 +102,7 @@
       "license": "CC-BY-4.0",
       "renderer": "rig",
       "bundled": true,
-      "url": "https://peetty.idy.dev/figures/elsie.json"
+      "url": "elsie.json"
     },
     {
       "id": "shiori",
@@ -119,7 +119,7 @@
       "license": "CC-BY-4.0",
       "renderer": "rig",
       "bundled": false,
-      "url": "https://peetty.idy.dev/figures/shiori.json"
+      "url": "shiori.json"
     }
   ]
 }
