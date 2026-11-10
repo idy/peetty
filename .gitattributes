@@ -2,3 +2,4 @@ cdn/** text eol=lf linguist-generated=true
 licenses/*.LICENSE text eol=lf
 figures/*.json text eol=lf
 LICENSE text eol=lf
+flutter/assets/figures/*.json text eol=lf linguist-generated=true

@@ -1,0 +1,48 @@
+name: Flutter package
+
+on:
+  pull_request:
+    paths:
+      - 'flutter/**'
+      - 'figures/**'
+      - '.github/workflows/flutter.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'flutter/**'
+      - 'figures/**'
+      - '.github/workflows/flutter.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: flutter-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Package
+        working-directory: flutter
+        run: |
+          flutter pub get
+          flutter analyze
+          flutter test
+      - name: Example app
+        working-directory: flutter/example
+        run: |
+          flutter pub get
+          flutter analyze
+          flutter test
+          flutter build web --release

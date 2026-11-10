@@ -4,9 +4,10 @@
 //   to figures/<id>.json.
 // - Every figures/<id>.json, generated or contributed directly as JSON, is
 //   validated and listed in figures/index.json.
+// - The catalog is mirrored into flutter/assets/figures/ for the Flutter package.
 //
 // `--check` writes nothing and fails if any generated file is out of date.
-import { readdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { CATALOG_FORMAT, PRESET_IDS } from '../src/catalog.ts';
 import { validateFigure } from '../src/figure/validate.ts';
 
@@ -66,6 +67,28 @@ const rank = (e) => (e.bundled ? PRESET_IDS.indexOf(e.id) : PRESET_IDS.length);
 entries.sort((a, b) => rank(a) - rank(b) || a.id.localeCompare(b.id));
 await output('index.json', `${JSON.stringify({ format: CATALOG_FORMAT, version: 1, figures: entries }, null, 2)}\n`);
 if (!check) console.log(`figures/index.json  ${entries.length} figures`);
+
+// The Flutter package bundles the same catalog as assets.
+const flutterDir = new URL('../flutter/assets/figures/', import.meta.url);
+const mirrored = new Set([...files, 'index.json']);
+if (!check) await mkdir(flutterDir, { recursive: true });
+for (const file of mirrored) {
+  const text = await readFile(new URL(file, dir), 'utf8');
+  const target = new URL(file, flutterDir);
+  if (check) {
+    const current = await readFile(target, 'utf8').catch(() => '');
+    if (current !== text) problems.push(`flutter/assets/figures/${file} is out of date; run npm run figures`);
+  } else {
+    await writeFile(target, text);
+  }
+}
+for (const file of await readdir(flutterDir).catch(() => [])) {
+  if (file.endsWith('.json') && !mirrored.has(file)) {
+    if (check) problems.push(`flutter/assets/figures/${file} is not in figures/; run npm run figures`);
+    else await rm(new URL(file, flutterDir));
+  }
+}
+if (!check) console.log(`flutter/assets/figures/  ${mirrored.size} files`);
 
 if (problems.length) {
   for (const p of problems) console.error(p);

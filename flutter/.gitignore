@@ -1,0 +1,4 @@
+.dart_tool/
+build/
+# A package does not pin its dependencies; the example app does.
+/pubspec.lock
