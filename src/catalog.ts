@@ -3,8 +3,13 @@
  * data, so the generator can load it before the figure JSON exists.
  */
 
-/** Where the public figure catalog lives; `<id>.json` and `index.json`. */
-export const FIGURE_CATALOG = 'https://peetty.idy.dev/figures/';
+/** Default catalog for package consumers; browser entries follow their own CDN URL. */
+export let FIGURE_CATALOG = 'https://cdn.jsdelivr.net/gh/idy/peetty@v0.3.1/figures/';
+
+/** Browser bundles live in cdn/ (or sdk/), alongside the figures/ directory. */
+export function setFigureScriptSource(source: string): void {
+  FIGURE_CATALOG = new URL('../figures/', source).href;
+}
 export const CATALOG_FORMAT = 'peetty.catalog';
 
 const BUNDLED = ['miru', 'koharu', 'xiaoxiao', 'riley', 'amara', 'elsie'] as const;

@@ -58,7 +58,7 @@ pet.closeChat();
 // await pet.configure();
 ```
 
-Mounting the companion makes no AI requests. Chat, Markdown tokenization and provider code load on demand. Script-tag embeds load the adjacent `chat/` and `chunks/` directories; self-host the complete `dist/` directory, not just `peetty.global.js`.
+Mounting the companion makes no AI requests. Chat, Markdown tokenization and provider code load on demand. Script-tag embeds load the adjacent `chat/` and `chunks/` directories; self-host the complete browser distribution with its sibling `figures/` catalog, not just `peetty.global.js`.
 
 The chat UI uses a same-origin initial `about:blank` iframe built with DOM APIs, keeping typing and pointer events out of the embedding document's event path, including earlier capture listeners. Escape keeps focus inside that frame until key release, then restores the previous host focus. This is an event boundary; trusted scripts on the same origin can still access the UI and credentials.
 
@@ -118,11 +118,39 @@ More characters, such as Shiori, live in the catalog in `figures/` and load on d
 
 ## Project direction
 
-Peetty is first built as an npm SDK that any page can embed with one script, which is how [peetty.idy.dev](https://peetty.idy.dev/) will host it. A browser extension then reuses the same core, so the same companion follows you across websites with its key in extension storage. A Tauri desktop companion is a possible later direction.
+Peetty is first built as a browser SDK that any page can load directly from a CDN or install with npm. [peetty.idy.dev](https://peetty.idy.dev/) uses the same browser build. A browser extension then reuses the same core, so the same companion follows you across websites with its key in extension storage. A Tauri desktop companion is a possible later direction.
 
 When embedded through the SDK, settings and any saved key live in that website's own storage, where other scripts on the same site could read them. Key handling for SDK embeds will be documented with the chat feature, including a mode that does not persist the key.
 
-## Install from GitHub Packages
+## Use from a CDN (no installation)
+
+Load the prebuilt browser distribution from jsDelivr, without requests to `peetty.idy.dev`. No npm install, GitHub login or build step is needed, and no separate stylesheet is required. The `v0.3.1` URLs below become available after that release tag is pushed; older tags do not contain the `cdn/` distribution.
+
+For an automatically mounted companion, add a classic script tag:
+
+```html
+<script src="https://cdn.jsdelivr.net/gh/idy/peetty@v0.3.1/cdn/peetty.global.js"
+        data-peetty-auto data-figure="miru" defer></script>
+```
+
+For JavaScript control, import the browser ES module directly:
+
+```html
+<script type="module">
+  import { createPeetty } from 'https://cdn.jsdelivr.net/gh/idy/peetty@v0.3.1/cdn/index.js';
+
+  const pet = createPeetty({ figure: 'koharu' });
+  await pet.mount();
+  // Optional: open chat and configure your own model in the UI.
+  // await pet.openChat();
+</script>
+```
+
+The classic script also exposes `window.Peetty.createPeetty()` for manual setup when `data-peetty-auto` is omitted. Use `cdn/index.js` for named ES module imports and `cdn/peetty.global.js` for classic scripts. Dependencies, styles and six preset figures are bundled. Chat modules and extra figures load from the same CDN host and version as the entry script; the catalog contains portable relative URLs.
+
+The generated `cdn/` directory is checked into Git so jsDelivr can read a version tag directly. GitHub Packages is optional and is not involved in CDN downloads. To self-host a fixed build, copy the complete `cdn/` and `figures/` directories as siblings, preserving `cdn/chat/` and `cdn/chunks/`.
+
+## Install from GitHub Packages (optional)
 
 The package is named `@idy/peetty` and is published to GitHub Packages. GitHub Packages requires authentication, including for public packages. Route only the `@idy` scope there so Pi, OpenAI and other dependencies continue to resolve from the default npm registry. Configure the scope and authenticate with a GitHub account that can read the package, using a personal access token (classic) with `read:packages`:
 
@@ -138,7 +166,7 @@ npm login --scope=@idy --auth-type=legacy --registry=https://npm.pkg.github.com
 npm install @idy/peetty
 ```
 
-Release workflow: after the intended version is on the repository, push a matching tag such as `v0.1.0`. The package workflow checks that the tag matches `package.json`, runs the checks, tests and build, then publishes to GitHub Packages using `GITHUB_TOKEN` and reads the exact version back from the registry to verify publication. Publishing a new version and changing the package's visibility are separate GitHub operations.
+Release workflow: set the version in `package.json` and `package-lock.json`, update the fallback catalog in `src/catalog.ts` and the pinned examples, run `npm run figures` and `npm run build`, and commit the source together with `cdn/` before pushing the matching tag, such as `v0.3.1`. The tag makes the prebuilt files publicly readable through jsDelivr. The package workflow checks that the tag matches `package.json`, runs the checks, tests and build, then publishes to GitHub Packages using `GITHUB_TOKEN` and reads the exact version back from the registry to verify publication. Publishing a new version and changing the package's visibility are separate GitHub operations.
 
 ## Development
 
@@ -160,7 +188,7 @@ npm test
 npm run check
 ```
 
-`npm run dev` serves the figure sheet at `http://127.0.0.1:4180/dev/figures.html` and the website at `http://127.0.0.1:4180/site/`, rebuilding on each change. `npm run build` writes `dist/index.js` (ESM) and `dist/peetty.global.js` (a `Peetty` global for script tags). `npm run figures` regenerates the preset JSON from its sources; `npm run check` type-checks and verifies that the generated JSON is current.
+`npm run dev` serves the figure sheet at `http://127.0.0.1:4180/dev/figures.html` and the website at `http://127.0.0.1:4180/site/`, rebuilding on each change. `npm run build` writes `dist/index.js` (ESM), `dist/peetty.global.js` (a `Peetty` global for script tags), and the checked-in `cdn/` browser distribution without source maps. `npm run build:cdn` regenerates only the CDN files. `npm run figures` regenerates the preset JSON from its sources; `npm run check` type-checks and verifies that generated figure JSON and the checked-in CDN build are current.
 
 | Path | Purpose |
 | --- | --- |
@@ -175,6 +203,9 @@ npm run check
 | `schema/figure-v1.json` | JSON Schema for editors |
 | `src/pet/` | The companion: perch finding, jump physics, behaviour, dragging, hover menu, bubble and action sounds |
 | `src/global.ts` | Script-tag build with `data-peetty-auto` |
+| `src/browser.ts` | CDN ES module entry with a catalog relative to its own URL |
+| `cdn/` | Checked-in browser distribution served directly by jsDelivr |
+| `scripts/cdn.mjs` | Generate and verify the browser distribution |
 | `site/` | peetty.idy.dev, with the shared idy.dev shell in `site/shared/` |
 | `.github/workflows/pages.yml` | Checks on every PR; builds and deploys `site/` to GitHub Pages from `main` |
 | `.github/workflows/package.yml` | Checks and publishes matching version tags to GitHub Packages |

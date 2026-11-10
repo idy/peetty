@@ -2,7 +2,7 @@
 
 A Peetty figure is a JSON file: shapes, colors and a few motion hints. The SDK owns the animation, so a figure only has to draw its parts and attach them to a standard skeleton. Any figure can be recolored by overriding its palette.
 
-Add `"$schema": "https://peetty.idy.dev/schema/figure-v1.json"` for editor completion. The schema ships in the package as `@idy/peetty/schema/figure-v1.json`; the SDK's `validateFigure()` is authoritative and also checks cross-references and size limits.
+Add `"$schema": "https://cdn.jsdelivr.net/gh/idy/peetty@v0.3.1/schema/figure-v1.json"` for editor completion. The schema ships in the package as `@idy/peetty/schema/figure-v1.json`; the SDK's `validateFigure()` is authoritative and also checks cross-references and size limits.
 
 ## Presets
 
@@ -25,22 +25,22 @@ The `figure` option (or `data-figure` on the script tag) accepts:
 
 | Value | Loads |
 | --- | --- |
-| `miru`, `shiori`, `koharu` | The bundled preset, with no request |
-| Any other id, e.g. `xiaoxiao` | `https://peetty.idy.dev/figures/<id>.json` from the public catalog |
+| `miru`, `koharu`, `xiaoxiao`, `riley`, `amara`, `elsie` | The bundled preset, with no request |
+| Any other id, e.g. `shiori` | `<id>.json` in the `figures/` catalog beside the browser bundle, on the same CDN host and version |
 | A URL or relative path | That figure JSON file, e.g. `https://example.com/my-pet.json` or `/pets/mimi.json` |
 | An object | Figure data passed in directly |
 
-Every loaded figure is validated first. A figure on another site must be served with CORS (`Access-Control-Allow-Origin`); GitHub Pages, including peetty.idy.dev, does this. `listFigures()` returns the catalog entries from `figures/index.json`, for building a character picker.
+Every loaded figure is validated first. A figure on another site must be served with CORS (`Access-Control-Allow-Origin`); jsDelivr supports this. `listFigures()` reads `figures/index.json` and returns entries with absolute URLs resolved against the fetched index, for building a character picker.
 
 ## The catalog and contributing a figure
 
-`figures/` is the catalog: one `<id>.json` per figure, plus `index.json`, which `npm run figures` generates with each figure's id, name, description, author, license and public URL. The website publishes the whole directory at `https://peetty.idy.dev/figures/`. Only the presets are bundled into the SDK; the rest load on demand, so the catalog can grow without making the script larger.
+`figures/` is the catalog: one `<id>.json` per figure, plus `index.json`, which `npm run figures` generates with each figure's id, name, description, author, license and relative URL. Both the ESM and classic browser entries resolve this catalog beside their own `cdn/` (or `sdk/`) directory, retaining the host and version when served through jsDelivr or another static host. Package consumers default to the release-pinned jsDelivr catalog. Only the presets are bundled into the SDK; the rest load on demand, so the catalog can grow without making the script larger.
 
 To contribute a figure:
 
 1. Pick an unused id (lowercase letters, digits and hyphens) and name the file `figures/<id>.json`. If you build it with the drawing kit, put the source in `figures/src/<id>.mjs` instead and let `npm run figures` write the JSON.
 2. Set `author` and an SPDX `license`. The artwork must be your own original work or properly licensed; characters from existing games, anime or other franchises cannot be accepted.
-3. Run `npm run figures`, `npm test` and `npm run check`, and look at it in the figure sheet (`npm run dev`, then `/dev/figures.html?figures=<id>`; the sheet uses the source if there is one, otherwise `figures/<id>.json`).
+3. Run `npm run figures`, `npm run build`, `npm test` and `npm run check`, and look at it in the figure sheet (`npm run dev`, then `/dev/figures.html?figures=<id>`; the sheet uses the source if there is one, otherwise `figures/<id>.json`).
 4. Open a pull request. CI validates every figure and checks that `index.json` is current.
 
 ## Format

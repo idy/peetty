@@ -2,15 +2,19 @@
  * Script-tag build: exposes `window.Peetty` and, when the script tag has
  * `data-peetty-auto`, adds a companion once the page is ready.
  *
- *   <script src="https://peetty.idy.dev/sdk/peetty.global.js" data-peetty-auto data-figure="shiori" defer></script>
+ *   <script src="https://cdn.jsdelivr.net/gh/idy/peetty@v0.3.1/cdn/peetty.global.js" data-peetty-auto data-figure="shiori" defer></script>
  */
 import { createPeetty, type Activity, type PeettyOptions } from './pet/pet.ts';
 import { setChatScriptSource } from './chat/load.ts';
+import { setFigureScriptSource } from './catalog.ts';
 
 export * from './index.ts';
 
 const script = document.currentScript as HTMLScriptElement | null;
-if (script?.src) setChatScriptSource(script.src);
+if (script?.src) {
+  setChatScriptSource(script.src);
+  setFigureScriptSource(script.src);
+}
 if (script?.hasAttribute('data-peetty-auto')) {
   const data = script.dataset;
   const options: PeettyOptions = {};

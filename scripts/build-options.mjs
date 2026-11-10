@@ -5,6 +5,10 @@ export const modules = {
   entryPoints: { index: 'src/index.ts', 'chat/panel': 'src/chat/panel.ts' },
   format: 'esm', splitting: true, chunkNames: 'chunks/[name]-[hash]',
 };
+// Browser entries resolve the figure catalog from their own script URL.
+export const browserModules = {
+  ...modules, entryPoints: { ...modules.entryPoints, index: 'src/browser.ts' },
+};
 export const global = {
   ...shared, entryPoints: ['src/global.ts'], format: 'iife', globalName: 'Peetty',
   plugins: [{

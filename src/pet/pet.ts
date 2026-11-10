@@ -16,7 +16,7 @@ import type { CompanionAction, PeettyChatOptions, PeettyModelOptions } from '../
 export type Activity = 'calm' | 'normal' | 'lively';
 
 export interface PeettyOptions {
-  /** A catalog id (`miru`, or any id at peetty.idy.dev/figures/), a URL to a figure JSON file, or figure data. */
+  /** A catalog id (`miru`, or any id in the CDN figure catalog), a URL to a figure JSON file, or figure data. */
   figure?: string | object;
   /** Height in CSS pixels; defaults to the figure's own height. */
   size?: number;

@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { readdir, readFile } from 'node:fs/promises';
 import { describe, it } from 'node:test';
 import { validateFigure } from '../src/figure/validate.ts';
-import { PRESET_IDS } from '../src/presets.ts';
+import { PRESET_IDS, FIGURE_CATALOG } from '../src/presets.ts';
+import metadata from '../package.json' with { type: 'json' };
 
 const dir = new URL('../figures/', import.meta.url);
 
@@ -15,10 +16,14 @@ describe('figure catalog', async () => {
     assert.deepEqual(index.figures.map((e: { id: string }) => `${e.id}.json`).sort(), files);
   });
 
-  it('marks the bundled presets and points at the public URL', () => {
+  it('pins the package fallback catalog to its release version', () => {
+    assert.equal(FIGURE_CATALOG, `https://cdn.jsdelivr.net/gh/idy/peetty@v${metadata.version}/figures/`);
+  });
+
+  it('marks the bundled presets and keeps URLs portable across CDN hosts and tags', () => {
     for (const entry of index.figures) {
       assert.equal(entry.bundled, (PRESET_IDS as string[]).includes(entry.id));
-      assert.equal(entry.url, `https://peetty.idy.dev/figures/${entry.id}.json`);
+      assert.equal(entry.url, `${entry.id}.json`);
       assert.ok(entry.author && entry.license, `${entry.id} has author and license`);
     }
   });
