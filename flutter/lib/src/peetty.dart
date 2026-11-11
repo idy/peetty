@@ -352,7 +352,7 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
       var lo = 0.0, hi = size.width - width;
       for (final (hx, _, hc) in level) {
         // Rounding allowance, relative to the bound's own size across this host.
-        final slack = 1e-9 * (hx.abs() * size.width + hc.abs());
+        final slack = 1e-12 * (hx.abs() * size.width + hc.abs());
         if (hx == 0) {
           if (-hc > slack) return null;
         } else if (hx > 0) {
@@ -384,9 +384,23 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
       return [first, mid, last].reduce((a, b) => rows(a, width).$3 >= rows(b, width).$3 ? a : b);
     }
 
+    // The solve allows rounding slack; the box it picks must still land inside
+    // the safe area on screen, checked at its projected corners to within a
+    // millionth of a logical pixel.
+    bool onScreen(double x0, double x1, double y0, double y1) {
+      for (final (x, y) in [(x0, y0), (x1, y0), (x0, y1), (x1, y1)]) {
+        if (wx * x + wy * y + wc <= 0) return false;
+        final p = MatrixUtils.transformPoint(transform, Offset(x, y));
+        if (!(p.dx >= left - 1e-6 && p.dx <= right + 1e-6 && p.dy >= top - 1e-6 && p.dy <= bottom + 1e-6)) return false;
+      }
+      return true;
+    }
+
     bool fits(double width) {
       final x0 = bestStart(width);
-      return x0 != null && rows(x0, width).$3 >= anchor.dy;
+      if (x0 == null) return false;
+      final (y0, y1, height) = rows(x0, width);
+      return height >= anchor.dy && onScreen(x0, x0 + width, y0, y1);
     }
 
     // Narrower columns only loosen the constraints, so if anything fits her own
@@ -412,7 +426,7 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
       final x0 = bestStart(width);
       if (x0 == null) continue;
       final (y0, y1, height) = rows(x0, width);
-      if (height < anchor.dy) continue;
+      if (height < anchor.dy || !onScreen(x0, x0 + width, y0, y1)) continue;
       final area = width * height;
       if (area > bestArea) {
         bestArea = area;

@@ -551,6 +551,21 @@ void main() {
     expect(_state(tester).position, isNotNull);
   });
 
+  testWidgets('rounding slack never admits a box that projects off screen', (tester) async {
+    // W = 1e-8 + 0.001·x, X = 810·W + 0.02·x, Y = 300·W + 0.02·y: every point projects to x ≥ 810.
+    final transform = Matrix4.identity()
+      ..setEntry(0, 0, 810 * 0.001 + 0.02)
+      ..setEntry(0, 3, 810 * 1e-8)
+      ..setEntry(1, 0, 300 * 0.001)
+      ..setEntry(1, 1, 0.02)
+      ..setEntry(1, 3, 300 * 1e-8)
+      ..setEntry(3, 0, 0.001)
+      ..setEntry(3, 3, 1e-8);
+    await tester.pumpWidget(transformed(transform, const Size(100000, 300), 0.00003));
+    await _until(tester, () => false, frames: 30);
+    expect(_state(tester).position, isNull);
+  });
+
   testWidgets('a host too short for her below a large inset leaves her nowhere to stand', (tester) async {
     await tester.pumpWidget(MediaQuery(
       data: const MediaQueryData(size: Size(800, 600), padding: EdgeInsets.only(top: 80)),
