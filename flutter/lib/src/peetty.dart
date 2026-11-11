@@ -376,12 +376,16 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
     // the safe area on screen, checked at its projected corners to within a
     // millionth of a logical pixel.
     bool onScreen(double x0, double x1, double y0, double y1) {
-      // Inside the host first, to within rounding.
-      if (x0 < -rounding || x1 > size.width + rounding) return false;
-      if (y0 < -1e-9 * size.height || y1 > size.height * (1 + 1e-9)) return false;
       for (final (x, y) in [(x0, y0), (x1, y0), (x0, y1), (x1, y1)]) {
         if (wx * x + wy * y + wc <= 0) return false;
         final p = MatrixUtils.transformPoint(transform, Offset(x, y));
+        // Inside the host too: any overhang past its edge is measured on screen,
+        // where the transform cannot magnify a host-unit allowance.
+        final cx = x.clamp(0.0, size.width).toDouble(), cy = y.clamp(0.0, size.height).toDouble();
+        if (cx != x || cy != y) {
+          if (wx * cx + wy * cy + wc <= 0) return false;
+          if ((MatrixUtils.transformPoint(transform, Offset(cx, cy)) - p).distance > 1e-6) return false;
+        }
         if (!(p.dx >= left - 1e-6 && p.dx <= right + 1e-6 && p.dy >= top - 1e-6 && p.dy <= bottom + 1e-6)) return false;
       }
       return true;

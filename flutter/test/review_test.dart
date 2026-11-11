@@ -603,6 +603,19 @@ void main() {
     expect(_state(tester).position, isNull);
   });
 
+  testWidgets('a host-unit rounding overhang magnified near a horizon is rejected', (tester) async {
+    // W = 1 − (1 − 1e-9)·x and X = 1e-7·x: the host's right edge lands near screen x = 100,
+    // a figure 5e-10 wider reaches about x = 200.
+    final transform = Matrix4.identity()
+      ..setEntry(0, 0, 1e-7)
+      ..setEntry(1, 1, 1e-7)
+      ..setEntry(3, 0, -(1 - 1e-9));
+    // Tall enough (2 units, about 200 pixels near the edge) that her height fits.
+    await tester.pumpWidget(transformed(transform, const Size(1, 2), 1 + 5e-10));
+    await _until(tester, () => false, frames: 30);
+    expect(_state(tester).position, isNull);
+  });
+
   testWidgets('a host too short for her below a large inset leaves her nowhere to stand', (tester) async {
     await tester.pumpWidget(MediaQuery(
       data: const MediaQueryData(size: Size(800, 600), padding: EdgeInsets.only(top: 80)),
