@@ -38,8 +38,8 @@ export interface ProfileRecord {
 export type ProfileInfo = Omit<ProfileRecord, 'entries' | 'memories' | 'connection'> & { memoryCount: number; entryCount: number };
 export interface BackupSession extends StoredSessionConnection { profileId: string }
 type BackupOptions = { sessions: readonly BackupSession[] };
-export interface BackupDownloadFile { name: string; text: string }
-type BackupDownloadOptions = Partial<BackupOptions> & { _testing?: { fileBytes: number } };
+export interface BackupDownloadFile { name: string; text: string; final?: boolean }
+type BackupDownloadOptions = Partial<BackupOptions> & { signal?: AbortSignal; _testing?: { fileBytes: number } };
 interface BackupPart { format: 'peetty-backup-part'; version: 1; backupId: string; index: number; count: number; digest: string; text: string }
 type Defaults = { name?: string; figure?: string | object; personality?: string };
 type Settings = Pick<ProfileRecord, 'name' | 'figure' | 'personality' | 'useMemories' | 'autoRemember'>;
@@ -207,28 +207,68 @@ function stringify(value: unknown): string {
   checkFile(result, LIMIT);
   return result;
 }
+function checkBackupSignal(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new DOMException('Backup stopped.', 'AbortError');
+}
+async function backupTick(signal?: AbortSignal): Promise<void> {
+  checkBackupSignal(signal);
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  checkBackupSignal(signal);
+}
+/** Assemble bounded transport pieces while yielding macrotasks during the scan,
+ * rather than waiting for an entire multi-megabyte part before handling Cancel. */
+async function* downloadChunks(snapshot: Backup, chunkSize: number, signal?: AbortSignal): AsyncGenerator<string> {
+  await backupTick(signal);
+  let pending = ''; let batch = 0;
+  for (const token of jsonChunks(snapshot, Math.min(chunkSize, 65_536))) {
+    checkBackupSignal(signal);
+    for (let offset = 0; offset < token.length;) {
+      const count = Math.min(chunkSize - pending.length, token.length - offset);
+      pending += token.slice(offset, offset + count); offset += count;
+      if (pending.length === chunkSize) {
+        const last = pending.charCodeAt(pending.length - 1);
+        if (last >= 0xd800 && last <= 0xdbff) {
+          yield pending.slice(0, -1); pending = pending.slice(-1);
+        } else { yield pending; pending = ''; }
+      }
+    }
+    batch += token.length;
+    if (batch >= 262_144) { batch = 0; await backupTick(signal); }
+  }
+  checkBackupSignal(signal);
+  if (pending) yield pending;
+}
+
 /** Single-use lazy transport; release the snapshot even if canceled before first next(). */
-function multipartDownloads(snapshot: Backup, chunkSize: number, fileBytes: number, count: number, digest: string): AsyncIterable<BackupDownloadFile> {
+function multipartDownloads(snapshot: Backup, chunkSize: number, fileBytes: number, count: number, digest: string, signal?: AbortSignal): AsyncIterable<BackupDownloadFile> {
   const holder: { snapshot?: Backup } = { snapshot };
   const backupId = freshId();
   const files = (async function* () {
     try {
+      checkBackupSignal(signal);
       if (!holder.snapshot) return;
       let index = 0;
-      for (const text of jsonChunks(holder.snapshot, chunkSize)) {
+      for await (const text of downloadChunks(holder.snapshot, chunkSize, signal)) {
+        checkBackupSignal(signal);
         const part: BackupPart = { format: 'peetty-backup-part', version: 1, backupId, index, count, digest, text };
         const serialized = stringify(part);
         check(new TextEncoder().encode(serialized).length <= fileBytes, LIMIT);
-        yield { name: `peetty-backup-${backupId}.part-${String(++index).padStart(String(count).length, '0')}-of-${count}.json`, text: serialized };
+        checkBackupSignal(signal);
+        index++;
+        yield { name: `peetty-backup-${backupId}.part-${String(index).padStart(String(count).length, '0')}-of-${count}.json`, text: serialized,
+          ...(index === count ? { final: true } : {}) };
       }
+      checkBackupSignal(signal);
       check(index === count, LIMIT);
-    } finally { delete holder.snapshot; }
+    } finally { delete holder.snapshot; signal?.removeEventListener('abort', release); }
   })();
+  function release() { delete holder.snapshot; void files.return().catch(() => {}); }
+  signal?.addEventListener('abort', release, { once: true });
   const iterator: AsyncIterableIterator<BackupDownloadFile> = {
     [Symbol.asyncIterator]() { return this; },
-    next: () => files.next(),
-    return: async () => { delete holder.snapshot; return files.return(); },
-    throw: async (error: unknown) => { delete holder.snapshot; return files.throw(error); },
+    next: async () => { checkBackupSignal(signal); return files.next(); },
+    return: async () => { delete holder.snapshot; signal?.removeEventListener('abort', release); return files.return(); },
+    throw: async (error: unknown) => { delete holder.snapshot; signal?.removeEventListener('abort', release); return files.throw(error); },
   };
   return iterator;
 }
@@ -494,7 +534,7 @@ export class BrowserProfileStore {
   private queued<T>(selection: readonly string[], write: boolean, action: (draft: Draft) => T, privacyMutation = false): Promise<T> {
     return this.enqueue(async () => {
       this.ready();
-      if (privacyMutation) await this.reconcileLegacy();
+      if (privacyMutation) await this.reconcileLegacy(true);
       return this.run(selection, write, action);
     });
   }
@@ -577,7 +617,9 @@ export class BrowserProfileStore {
                 else store.delete('entries');
               }
               if (removeConnection) store.delete('connection');
-              if ((!original || changedEntries && !remainingEntries!.length) && (snapshot.connection === undefined || removeConnection)) store.delete('entriesEpoch');
+              // Any history removal invalidates stale legacy clients, including
+              // clients whose original database had no epoch record at all.
+              if (changedEntries) store.put(freshId(), 'entriesEpoch');
             } catch { abort(); }
           };
         }
@@ -632,12 +674,15 @@ export class BrowserProfileStore {
   clearLegacyData(): Promise<void> {
     return this.enqueue(async () => {
       this.ready();
-      if (!this.persist) return;
       const clear = async (database: string, keys: readonly string[]) => {
         const db = await openStateDatabase(database, { isClosed: () => this.closed, onFailure: () => {} });
         check(db, 'Could not remove legacy data. Try again.');
         try {
-          const ok = await stateTransaction(db, true, (store) => { for (const key of keys) store.delete(key); });
+          const barrier = freshId();
+          const ok = await stateTransaction(db, true, (store) => {
+            for (const key of keys) store.delete(key);
+            if (database === `${this.namespace}:chat`) store.put(barrier, 'entriesEpoch');
+          });
           check(ok, 'Could not remove legacy data. Try again.');
         } finally { db.close(); }
       };
@@ -735,7 +780,7 @@ export class BrowserProfileStore {
   remove(profileId: string): Promise<void> {
     return this.enqueue(async () => {
       this.ready();
-      await this.reconcileLegacy();
+      await this.reconcileLegacy(true);
       await this.run([profileId], true, (draft) => {
         getRecord(draft, profileId);
         check(draft.directory.ids.length > 1, 'Cannot remove the last profile.');
@@ -789,7 +834,7 @@ export class BrowserProfileStore {
         return this.enqueue(async () => {
           this.ready();
           // Replacing a connection can forget old credentials just like opt-out.
-          await this.reconcileLegacy();
+          await this.reconcileLegacy(true);
           const saved = await this.run([profileId], true, (draft) => {
             const known = this.sessions.get(profileId)?.at(-1)?.connection ?? getRecord(draft, profileId).profile.connection;
             const saved = prepareSavedConnection(copy, known, options?.rememberCredentials);
@@ -829,7 +874,7 @@ export class BrowserProfileStore {
         if (closing) return;
         await this.enqueue(async () => {
           this.ready();
-          await this.reconcileLegacy();
+          await this.reconcileLegacy(true);
           await this.run([profileId], true, (draft) => {
             const record = touchMemories(draft, profileId);
             detachSources(record.profile, record.profile.entries);
@@ -926,30 +971,44 @@ export class BrowserProfileStore {
   async backupDownload(options?: BackupDownloadOptions): Promise<string | AsyncIterable<BackupDownloadFile>> {
     const fileBytes = options?._testing?.fileBytes ?? PROFILE_LIMITS.fileBytes;
     check(Number.isSafeInteger(fileBytes) && fileBytes >= 1_024 && fileBytes <= PROFILE_LIMITS.fileBytes);
-    const backup = await this.backupSnapshot(options);
+    const signal = options?.signal;
+    checkBackupSignal(signal);
+    const backup = await this.backupSnapshot(options, signal);
+    checkBackupSignal(signal);
     // Only individual metadata/string tokens and bounded transport chunks are
     // serialized. A profile archive can exceed the engine's maximum string length.
     const chunkSize = Math.floor((fileBytes - 512) / 6);
-    let bytes = 0; let count = 0;
+    let bytes = 0; let count = 0; let crc = 0xffffffff; let length = 0;
     let small: string[] = [];
-    function* measure() {
-      for (const chunk of jsonChunks(backup, chunkSize)) {
-        count++; bytes += new TextEncoder().encode(chunk).length;
-        if (bytes <= fileBytes) small.push(chunk);
-        else if (small.length) small = [];
-        yield chunk;
+    for await (const chunk of downloadChunks(backup, chunkSize, signal)) {
+      count++; bytes += new TextEncoder().encode(chunk).length; length += chunk.length;
+      if (bytes <= fileBytes) small.push(chunk);
+      else if (small.length) small = [];
+      for (let offset = 0; offset < chunk.length; offset += 65_536) {
+        checkBackupSignal(signal);
+        const end = Math.min(offset + 65_536, chunk.length);
+        for (let i = offset; i < end; i++) {
+          const code = chunk.charCodeAt(i);
+          crc = CRC_TABLE[(crc ^ code) & 255]! ^ (crc >>> 8);
+          crc = CRC_TABLE[(crc ^ (code >>> 8)) & 255]! ^ (crc >>> 8);
+        }
+        if (offset && offset % 262_144 === 0) await backupTick(signal);
       }
     }
-    const digest = backupDigest(measure());
+    checkBackupSignal(signal);
+    const digest = `crc32:${((crc ^ 0xffffffff) >>> 0).toString(16).padStart(8, '0')}:${length}`;
     if (bytes <= fileBytes) return small.join(''); // Proven bounded single-file path only.
-    return multipartDownloads(backup, chunkSize, fileBytes, count, digest);
+    return multipartDownloads(backup, chunkSize, fileBytes, count, digest, signal);
   }
 
-  private async backupSnapshot(options?: Partial<BackupOptions>): Promise<Backup> {
+  private async backupSnapshot(options?: Partial<BackupOptions>, signal?: AbortSignal): Promise<Backup> {
+    checkBackupSignal(signal);
     const supplied = options?.sessions?.map(sessionFrom) ?? [];
     return this.enqueue(async () => {
       this.ready();
+      checkBackupSignal(signal);
       return this.run('all', false, (draft) => {
+        checkBackupSignal(signal);
         const profiles = draft.directory.ids.map((profileId) => {
           // Histories and memories are already validated; serialization needs no second deep copy.
           const profile = { ...getRecord(draft, profileId).profile };

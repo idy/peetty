@@ -60,7 +60,7 @@ const NONCREDENTIAL_HEADERS = new Set([
   'http-referer', 'x-title', // OpenRouter application attribution.
 ]);
 // Authentication names remain sensitive even if a caller attempts to classify them otherwise.
-const AUTHENTICATION_HEADER = /(?:^|[-_])(?:auth(?:entication|orization)?|tokens?|secrets?|cookies?|passwords?|credentials?|subscription|(?:api|access|subscription)[-_]?(?:key|token))(?:$|[-_])|^(?:x[-_])?key$/i;
+const AUTHENTICATION_HEADER = /(?:^|[-_])(?:auth(?:entication|orization)?(?:[-_]?(?:key|token))?|tokens?|secrets?(?:[-_]?(?:key|token))?|cookies?|passwords?|credentials?|(?:api|access|subscription)[-_]?(?:key|token))(?:$|[-_])|^(?:x[-_])?key$/i;
 
 function normalizeNonCredentialHeaders(value: unknown, headers?: Record<string, string>): string[] | undefined {
   if (value === undefined) return;

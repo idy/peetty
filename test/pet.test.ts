@@ -158,7 +158,15 @@ async function mountProfileChatPet(t: Parameters<typeof installPetDOM>[0], optio
     assert.ok(result, `${text} button exists`); result.click();
   };
   const settle = async () => { for (let i = 0; i < 100; i++) await Promise.resolve(); };
-  return { dom, pet, state, window, root, query, click, settle };
+  const waitFor = async (condition: () => boolean) => {
+    for (let i = 0; i < 1_000 && !condition(); i++) {
+      await settle();
+      dom.frame(0); // Advance yielding backup work without advancing gesture/deadline clocks.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.ok(condition(), 'expected asynchronous panel work to finish');
+  };
+  return { dom, pet, state, window, root, query, click, settle, waitFor };
 }
 
 describe('Pet profile figure integration', () => {
@@ -314,7 +322,7 @@ describe('Pet profile figure integration', () => {
     it(`keeps ${source} through profile rename, memory toggle and full backup`, async (t) => {
       installChatIndexedDB(t);
       const figure = source === 'PRESETS.elsie' ? PRESETS.elsie : { ...structuredClone(PRESETS.koharu), id: 'inline-custom-pet', name: { en: 'Inline custom pet', zh: '内联角色' } };
-      const { pet, state, root, query, click, settle, window } = await mountProfileChatPet(t, { figure, chat: { storageKey: `pet-inline-${source}` } });
+      const { pet, state, root, query, click, settle, waitFor, window } = await mountProfileChatPet(t, { figure, chat: { storageKey: `pet-inline-${source}` } });
       await pet.openChat(); assert.deepEqual(state.view.renderer.figure, figure);
       await pet.configure(); query<HTMLButtonElement>('[data-tab="profile"]').click();
       const name = query<HTMLInputElement>('[aria-label="Profile name"]'); name.value = 'Renamed inline companion'; name.form!.requestSubmit(); await settle();
@@ -325,7 +333,7 @@ describe('Pet profile figure integration', () => {
       let downloaded: Blob | undefined;
       mock.method(URL, 'createObjectURL', (blob: Blob) => { downloaded = blob; return 'blob:pet-inline-backup'; }); mock.method(URL, 'revokeObjectURL', () => {});
       root().addEventListener('click', (event) => { if ((event.target as Element).closest('a[download]')) event.preventDefault(); });
-      query<HTMLButtonElement>('[data-tab="data"]').click(); click('Download full backup'); await settle();
+      query<HTMLButtonElement>('[data-tab="data"]').click(); click('Download full backup'); await waitFor(() => downloaded !== undefined);
       assert.ok(downloaded); const backup = JSON.parse(await downloaded.text()) as { activeProfileId: string; profiles: ProfileRecord[] };
       const profile = backup.profiles.find((item) => item.id === backup.activeProfileId)!;
       assert.equal(profile.name, 'Renamed inline companion'); assert.equal(profile.useMemories, false); assert.deepEqual(profile.figure, figure);
@@ -334,7 +342,7 @@ describe('Pet profile figure integration', () => {
 
   it('syncs a public setFigure inline replacement to profile reloads and backup', async (t) => {
     installChatIndexedDB(t);
-    const { pet, state, root, query, click, settle, window } = await mountProfileChatPet(t, { chat: { storageKey: 'pet-inline-replacement' } });
+    const { pet, state, root, query, click, settle, waitFor, window } = await mountProfileChatPet(t, { chat: { storageKey: 'pet-inline-replacement' } });
     await pet.openChat();
     const figure = { ...structuredClone(PRESETS.amara), id: 'replacement-inline-pet', name: 'Replacement inline pet' };
     await pet.setFigure(figure); assert.deepEqual(state.view.renderer.figure, figure);
@@ -346,7 +354,7 @@ describe('Pet profile figure integration', () => {
     let downloaded: Blob | undefined;
     mock.method(URL, 'createObjectURL', (blob: Blob) => { downloaded = blob; return 'blob:pet-replacement-backup'; }); mock.method(URL, 'revokeObjectURL', () => {});
     root().addEventListener('click', (event) => { if ((event.target as Element).closest('a[download]')) event.preventDefault(); });
-    query<HTMLButtonElement>('[data-tab="data"]').click(); click('Download full backup'); await settle();
+    query<HTMLButtonElement>('[data-tab="data"]').click(); click('Download full backup'); await waitFor(() => downloaded !== undefined);
     assert.ok(downloaded); const backup = JSON.parse(await downloaded.text()) as { profiles: ProfileRecord[] };
     assert.deepEqual(backup.profiles[0]!.figure, figure); assert.equal(backup.profiles[0]!.autoRemember, true);
   });
@@ -357,7 +365,7 @@ describe('Pet profile figure integration', () => {
     assert.ok(url.length > 350);
     const requests: string[] = [];
     mock.method(globalThis, 'fetch', async (input: string | URL | Request) => { requests.push(String(input)); return response(PRESETS.elsie); });
-    const { pet, state, query, root, click, settle } = await mountProfileChatPet(t, { figure: url, chat: { storageKey: 'pet-long-cdn' } });
+    const { pet, state, query, root, click, waitFor } = await mountProfileChatPet(t, { figure: url, chat: { storageKey: 'pet-long-cdn' } });
     assert.equal(state.view.renderer.figure.id, 'elsie'); await pet.openChat();
     assert.equal(state.chatVisible, true); assert.equal(query<HTMLElement>('.peetty-chat').hidden, false);
     assert.equal(state.view.renderer.figure.id, 'elsie'); assert.deepEqual(requests, [url]);
@@ -365,7 +373,7 @@ describe('Pet profile figure integration', () => {
     let downloaded: Blob | undefined;
     mock.method(URL, 'createObjectURL', (blob: Blob) => { downloaded = blob; return 'blob:pet-cdn-backup'; }); mock.method(URL, 'revokeObjectURL', () => {});
     root().addEventListener('click', (event) => { if ((event.target as Element).closest('a[download]')) event.preventDefault(); });
-    query<HTMLButtonElement>('[data-tab="data"]').click(); click('Download full backup'); await settle();
+    query<HTMLButtonElement>('[data-tab="data"]').click(); click('Download full backup'); await waitFor(() => downloaded !== undefined);
     assert.ok(downloaded); const backup = JSON.parse(await downloaded.text()) as { profiles: ProfileRecord[] };
     assert.equal(backup.profiles[0]!.figure, url);
   });

@@ -685,15 +685,18 @@ export function createManagement(options: Options) {
     signal.addEventListener('abort', close, { once: true });
     try {
       while (!signal.aborted) {
-        // Wait before requesting a part. Even the producer's serialized payload stays bounded.
+        // One bounded lookahead lets external producers without final metadata finish
+        // immediately too. At most one serialized part waits behind the two live URLs.
+        const next = await untilCanceled(iterator.next(), signal);
+        if (signal.aborted) return;
+        if (next.done) { returned = true; return; }
         if (downloadSlots.length >= 2) {
           await untilCanceled(downloadSlots[0]!, signal);
           downloadSlots.shift();
         }
-        const next = await untilCanceled(iterator.next(), signal);
-        if (signal.aborted) return;
-        if (next.done) { returned = true; return; }
         downloadSlots.push(download(next.value.text, next.value.name));
+        // Core producers identify their last part without serializing this runtime flag.
+        if (next.value.final) return;
       }
     } finally {
       signal.removeEventListener('abort', close);

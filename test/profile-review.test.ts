@@ -32,12 +32,20 @@ async function store(t: TestContext, namespace = 'regressions', persist = true):
   return result;
 }
 const fullBackup = (): string => document(Array.from({ length: PROFILE_LIMITS.profiles }, (_, i) => profile(`import-${i}`)));
+function assertLegacyRetired(legacy: Map<string, unknown>): void {
+  assert.equal(legacy.has('entries'), false);
+  assert.equal(legacy.has('connection'), false);
+  assert.equal(typeof legacy.get('entriesEpoch'), 'string');
+}
 // Tests collect deliberately small fixtures; production consumes the lazy iterator.
 async function downloadFiles(manager: BrowserProfileStore, options?: Parameters<BrowserProfileStore['backupDownload']>[0]): Promise<BackupDownloadFile[]> {
   const output = await manager.backupDownload(options);
   assert.notEqual(typeof output, 'string');
   const files: BackupDownloadFile[] = [];
   for await (const file of output as AsyncIterable<BackupDownloadFile>) files.push(file);
+  assert.equal(files.at(-1)!.final, true);
+  assert.ok(files.slice(0, -1).every((file) => file.final === undefined));
+  assert.ok(files.every((file) => !('final' in JSON.parse(file.text))));
   return files;
 }
 
@@ -1009,7 +1017,7 @@ describe('bounded JSON compatibility and retryable migration', () => {
     assert.equal(persistedProof.includes(connection.apiKey!), false);
     blocked = false;
     const reopened = await store(t, 'retry-cleanup');
-    assert.equal(legacy.size, 0);
+    assertLegacyRetired(legacy);
     assert.deepEqual(reopened.activeProfile.entries, []);
     assert.equal(reopened.activeProfile.connection!.apiKey, undefined);
   });
@@ -1029,7 +1037,7 @@ describe('bounded JSON compatibility and retryable migration', () => {
     assert.deepEqual(legacy.get('entries'), [entry('new-legacy')]);
     await manager.storage(manager.activeProfileId).saveEntries([entry('new-legacy')]);
     await manager.storage(manager.activeProfileId).clearEntries();
-    assert.equal(legacy.size, 0);
+    assertLegacyRetired(legacy);
     assert.equal(manager.profileInfo(manager.activeProfileId)!.entryCount, 0);
   });
 
@@ -1160,7 +1168,8 @@ describe('lazy downloads, explicit recovery, and bounded escaped strings', () =>
     const profiles = idb.databases.get('explicit-legacy:profiles')!;
     profiles.set('legacyMigration', { version: 1, entries: [jsonFingerprint(entry('irrelevant'))], connections: [] });
     await manager.clearLegacyData();
-    assert.deepEqual([...legacy], [['unrelated', 'preserve']]);
+    assertLegacyRetired(legacy);
+    assert.equal(legacy.get('unrelated'), 'preserve');
     assert.equal(profiles.has('legacyMigration'), false);
     assert.deepEqual(manager.profiles, before);
     assert.deepEqual((await store(t, 'explicit-legacy')).profiles, before);
@@ -1181,7 +1190,7 @@ describe('lazy downloads, explicit recovery, and bounded escaped strings', () =>
       assert.equal(manager.persistenceWarning, false);
       idb.fail('none');
       await manager.clearLegacyData();
-      assert.equal(legacy.size, 0);
+      assertLegacyRetired(legacy);
       assert.deepEqual(manager.profiles, before);
     });
   }
@@ -1206,7 +1215,120 @@ describe('lazy downloads, explicit recovery, and bounded escaped strings', () =>
     assert.deepEqual(legacy.get('entries'), [entry('unknown', 'Retain this unprovable old archive')]);
     await storage.saveEntries([entry('unknown', 'Retain this unprovable old archive')]);
     await storage.clearEntries();
-    assert.equal(legacy.size, 0, 'new correspondence must invalidate a previous negative/pending check');
+    assertLegacyRetired(legacy);
+  });
+});
+
+describe('fresh legacy privacy barriers and abortable download preflight', () => {
+  for (const mutation of ['clear', 'opt-out', 'replace', 'delete-entry', 'delete-profile'] as const) {
+    it(`refreshes a cached empty legacy database before ${mutation} without a local revision change`, async (t) => {
+      const idb = installChatIndexedDB(t);
+      const namespace = `fresh-legacy-${mutation}`;
+      const manager = await store(t, namespace);
+      const id = manager.activeProfileId;
+      const saved = entry('same', 'Copied in an older tab');
+      await manager.storage(id).saveEntries([saved]);
+      await manager.storage(id).saveConnection(connection);
+      if (mutation === 'delete-profile') await manager.create({ name: 'Keep' });
+      // Prime an empty check at precisely the current local revision. The older
+      // tab then writes matching legacy data without touching this store at all.
+      await (manager as unknown as { reconcileLegacy(force: boolean): Promise<void> }).reconcileLegacy(true);
+      const legacy = idb.databases.get(`${namespace}:chat`)!;
+      legacy.set('entries', [saved]); legacy.set('connection', connection);
+      if (mutation === 'clear') await manager.storage(id).clearEntries();
+      else if (mutation === 'opt-out') await manager.storage(id).saveConnection(connection, { rememberCredentials: false });
+      else if (mutation === 'replace') await manager.storage(id).saveConnection({ ...connection, apiKey: 'replacement-fixture-key' });
+      else if (mutation === 'delete-entry') await manager.removeEntry(id, saved.id);
+      else await manager.remove(id);
+      assertLegacyRetired(legacy);
+      assert.equal(manager.persistenceWarning, false);
+    });
+  }
+
+  for (const initialEpoch of [undefined, 'existing-barrier']) {
+    for (const removal of ['explicit', 'automatic'] as const) {
+      it(`${removal} legacy deletion blocks a stale writer with original epoch ${initialEpoch ?? 'absent'}`, async (t) => {
+        const idb = installChatIndexedDB(t);
+        const namespace = `stale-legacy-${removal}-${initialEpoch ?? 'none'}`;
+        const legacy = new Map<string, unknown>([['entries', [entry('old')]], ['connection', connection]]);
+        if (initialEpoch) legacy.set('entriesEpoch', initialEpoch);
+        idb.databases.set(`${namespace}:chat`, legacy);
+        const stale = new BrowserChatStore(namespace); t.after(() => stale.close());
+        const snapshot = (await stale.load()).entries;
+        const manager = await store(t, namespace);
+        if (removal === 'explicit') await manager.clearLegacyData();
+        const barrier = legacy.get('entriesEpoch');
+        assert.equal(typeof barrier, 'string');
+        assert.notEqual(barrier, initialEpoch);
+        await stale.saveEntries([...snapshot, entry('late')]);
+        await stale.saveEntries([entry('old', 'late edit'), entry('another-late')]);
+        assertLegacyRetired(legacy);
+        assert.equal(legacy.get('entriesEpoch'), barrier);
+      });
+    }
+  }
+
+  it('explicitly cleans persistent legacy data from a memory-only host without changing its RAM profile', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const legacy = new Map<string, unknown>([['entries', [entry('old')]], ['connection', connection], ['entriesEpoch', 'old']]);
+    idb.databases.set('memory-host:chat', legacy);
+    const persisted = new Map<string, unknown>([['unrelated', 'keep'], ['legacyMigration', { version: 1, entries: [], connections: [] }]]);
+    idb.databases.set('memory-host:profiles', persisted);
+    const manager = await store(t, 'memory-host', false);
+    await manager.storage(manager.activeProfileId).saveEntries([entry('ram')]);
+    await manager.storage(manager.activeProfileId).saveConnection(connection);
+    const before = manager.profiles;
+    await manager.clearLegacyData();
+    assertLegacyRetired(legacy);
+    assert.notEqual(legacy.get('entriesEpoch'), 'old');
+    assert.deepEqual([...persisted], [['unrelated', 'keep']]);
+    assert.deepEqual(manager.profiles, before);
+  });
+
+  it('allows a timer to abort a supported large archive during measurement before returning any iterator', async (t) => {
+    const manager = await store(t, 'abort-measurement', false);
+    const controller = new AbortController();
+    let inspected = 0; let timerRan = false; let envelopes = 0;
+    const body = 'x'.repeat(8_000);
+    const entries = Array.from({ length: 70_000 }, (_, i) => {
+      const value = entry(`large-abort-${i}`, body);
+      Object.defineProperty(value, 'text', { enumerable: true, get() {
+        inspected++;
+        if (inspected === 1) setTimeout(() => { timerRan = true; controller.abort(); }, 0);
+        return body;
+      } });
+      return value;
+    });
+    const internal = manager as unknown as { state: { records: Map<string, { profile: ProfileRecord }> } };
+    internal.state.records.get(manager.activeProfileId)!.profile.entries = entries;
+    const stringify = JSON.stringify;
+    t.mock.method(JSON, 'stringify', ((value: unknown, ...args: unknown[]) => {
+      if (value && typeof value === 'object' && 'format' in value && value.format === 'peetty-backup-part') envelopes++;
+      return Reflect.apply(stringify, JSON, [value, ...args]);
+    }) as typeof JSON.stringify);
+    await assert.rejects(manager.backupDownload({ signal: controller.signal }), { name: 'AbortError' });
+    assert.equal(timerRan, true);
+    assert.ok(inspected > 0 && inspected < 1_000, `cancellation should stop a bounded measurement batch, saw ${inspected}`);
+    const stopped = inspected;
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    assert.equal(inspected, stopped);
+    assert.equal(envelopes, 0);
+  });
+
+  it('rejects already aborted backups and propagates iterator abort without producing more files', async (t) => {
+    const manager = await store(t, 'abort-iterator', false);
+    await manager.storage(manager.activeProfileId).saveEntries([entry('long', 'x'.repeat(10_000))]);
+    const canceled = new AbortController(); canceled.abort();
+    await assert.rejects(manager.backupDownload({ signal: canceled.signal }), { name: 'AbortError' });
+    const active = new AbortController();
+    const output = await manager.backupDownload({ signal: active.signal, _testing: { fileBytes: 2_048 } });
+    assert.notEqual(typeof output, 'string');
+    const iterator = (output as AsyncIterable<BackupDownloadFile>)[Symbol.asyncIterator]();
+    const first = await iterator.next();
+    assert.equal(first.done, false); assert.equal(first.value!.final, undefined);
+    active.abort();
+    await assert.rejects(iterator.next(), { name: 'AbortError' });
+    await iterator.return?.();
   });
 });
 
@@ -1218,7 +1340,8 @@ describe('safe legacy retirement after authoritative migration', () => {
     const manager = await store(t, 'retirement');
     assert.deepEqual(manager.activeProfile.entries, [entry('old', 'Private old conversation')]);
     assert.deepEqual(manager.activeProfile.connection, connection);
-    assert.deepEqual([...legacy], [['unrelated', 'retain']]);
+    assertLegacyRetired(legacy);
+    assert.equal(legacy.get('unrelated'), 'retain');
     const adapter = manager.storage(manager.activeProfileId);
     await adapter.clearEntries();
     await adapter.saveConnection(connection, { rememberCredentials: false });
@@ -1240,7 +1363,7 @@ describe('safe legacy retirement after authoritative migration', () => {
       idb.fail('none');
       const reopened = await store(t, `retirement-${failure}`);
       assert.deepEqual(reopened.activeProfile.entries, [entry('old')]);
-      assert.equal(legacy.size, 0);
+      assertLegacyRetired(legacy);
     });
   }
 

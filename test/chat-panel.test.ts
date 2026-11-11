@@ -196,22 +196,96 @@ describe('explicit nonsecret setup headers', () => {
 
   it('exports trusted classifications but strips their consent when a backup is restored', async (t) => {
     const idb = installChatIndexedDB(t); const namespace = 'explicit-route-backup';
-    const model = { ...MODEL, apiKey: 'fixture-route-backup-key', headers: { 'X-Route': 'fixture-backup-route' }, nonCredentialHeaders: ['X-Route'] };
+    const headers = { 'X-Route': 'fixture-backup-route', 'X-Author': 'fixture-author', 'X-Key-Version': 'fixture-version', 'X-Subscription-Plan': 'fixture-plan' };
+    const model = { ...MODEL, apiKey: 'fixture-route-backup-key', headers, nonCredentialHeaders: Object.keys(headers) };
+    const declared = ['x-author', 'x-key-version', 'x-route', 'x-subscription-plan'];
     const { panel, query, root } = await mountPanel(t, model, { chat: { storageKey: namespace } });
     query<HTMLFormElement>('.pc-setup').requestSubmit(); await eventually(() => !!savedConnection(idb, namespace)); panel.open(true);
     let blob: Blob | undefined; t.mock.method(URL, 'createObjectURL', (value: Blob) => { blob = value; return 'blob:explicit-route-backup'; }); t.mock.method(URL, 'revokeObjectURL', () => {});
     root.addEventListener('click', event => { if ((event.target as Element).closest('a[download]')) event.preventDefault(); });
     query<HTMLButtonElement>('[data-tab="data"]').click(); query<HTMLButtonElement>('.pc-backup').click(); await eventually(() => !!blob);
     const text = await blob!.text(); const archive = JSON.parse(text);
-    assert.deepEqual(archive.profiles[0].connection.nonCredentialHeaders, ['x-route']);
+    assert.deepEqual(archive.profiles[0].connection.nonCredentialHeaders, declared);
     assert.equal(archive.profiles[0].connection.apiKey, undefined);
-    assert.deepEqual(archive.sessions[0].connection.nonCredentialHeaders, ['x-route']);
+    assert.deepEqual(archive.sessions[0].connection.nonCredentialHeaders, declared);
     const target = new BrowserProfileStore('explicit-route-backup-target'); await target.initialize(); t.after(() => target.close()); await target.restore(text);
     assert.equal(target.storedConnection(target.activeProfileId)!.nonCredentialHeaders, undefined, 'file declarations cannot grant persistence consent');
-    assert.deepEqual(target.storedConnection(target.activeProfileId)!.headers, { 'x-route': 'fixture-backup-route' });
+    assert.deepEqual(target.storedConnection(target.activeProfileId)!.headers, Object.fromEntries(new Headers(headers)));
     const runtime = new ChatRuntime({ storage: target.runtimeStorage(target.activeProfileId) }); t.after(() => runtime.destroy()); await runtime.initialize();
     assert.equal(runtime.model!.nonCredentialHeaders, undefined); assert.equal(runtime.model!.apiKey, model.apiKey);
   });
+});
+
+describe('backup preflight and producer lifetime', () => {
+  for (const ending of ['cancel', 'timeout'] as const) {
+    it(`aborts the actual backup preflight on ${ending} and preserves the unsent draft`, async (t) => {
+      let scan: AbortSignal | undefined; let running = false;
+      t.mock.method(BrowserProfileStore.prototype, 'backupDownload', async function(options?: Parameters<BrowserProfileStore['backupDownload']>[0]) {
+        scan = options?.signal; assert.ok(scan); running = true;
+        return await new Promise<string>((_resolve, reject) => {
+          const stop = () => { running = false; reject(new DOMException('Fixture scan stopped.', 'AbortError')); };
+          scan!.addEventListener('abort', stop, { once: true }); if (scan!.aborted) stop();
+        });
+      });
+      const { query, window } = await mountPanel(t, MODEL);
+      const draft = query<HTMLTextAreaElement>('[name="message"]'); draft.value = 'Keep this unsent draft'; draft.dispatchEvent(new window.Event('input') as unknown as Event);
+      const urls = t.mock.method(URL, 'createObjectURL', () => 'blob:unexpected-preflight');
+      t.mock.timers.enable({ apis: ['setTimeout'] });
+      query<HTMLButtonElement>('[data-tab="data"]').click(); query<HTMLButtonElement>('.pc-backup').click();
+      await eventually(() => running);
+      if (ending === 'cancel') query<HTMLButtonElement>('[data-cancel-download]').click(); else t.mock.timers.tick(20_000);
+      await eventually(() => !query<HTMLButtonElement>('.pc-backup').disabled);
+      assert.equal(scan!.aborted, true); assert.equal(running, false); assert.equal(urls.mock.callCount(), 0);
+      assert.equal(draft.value, 'Keep this unsent draft');
+      const status = query('.pc-manage-status');
+      if (ending === 'cancel') assert.match(status.textContent!, /canceled.*incomplete/);
+      else { assert.equal(status.hasAttribute('data-error'), true); assert.doesNotMatch(status.textContent!, /ready|canceled/); }
+    });
+  }
+
+  for (const ending of ['final', 'error', 'before first next'] as const) {
+    it(`releases the backup signal lifecycle on ${ending} without aborting successful preflight`, async (t) => {
+      let signal: AbortSignal | undefined; let nextCalls = 0; let returned = 0;
+      let query: Awaited<ReturnType<typeof mountPanel>>['query'];
+      t.mock.method(BrowserProfileStore.prototype, 'backupDownload', async function(options?: Parameters<BrowserProfileStore['backupDownload']>[0]) {
+        signal = options?.signal; assert.ok(signal); assert.equal(signal.aborted, false);
+        return {
+          [Symbol.asyncIterator]() {
+            if (ending === 'before first next') query<HTMLButtonElement>('[data-cancel-download]').click();
+            return {
+              async next() {
+                nextCalls++; assert.equal(signal!.aborted, false, 'returning a producer must not abort its lifetime signal');
+                if (ending === 'error') throw new Error('Fixture producer failed');
+                return { done: false as const, value: { name: `part-${nextCalls}.json`, text: '{}', ...(nextCalls === 2 ? { final: true } : {}) } };
+              },
+              async return() { returned++; return { done: true as const, value: undefined }; },
+            };
+          },
+        };
+      });
+      const abort = t.mock.method(AbortController.prototype, 'abort');
+      const added = t.mock.method(AbortSignal.prototype, 'addEventListener');
+      const removed = t.mock.method(AbortSignal.prototype, 'removeEventListener');
+      const ui = await mountPanel(t, MODEL); query = ui.query;
+      ui.root.addEventListener('click', event => { if ((event.target as Element).closest('a[download]')) event.preventDefault(); });
+      let created = 0; const revoked: string[] = [];
+      t.mock.method(URL, 'createObjectURL', () => `blob:producer-lifetime-${++created}`); t.mock.method(URL, 'revokeObjectURL', (url: string) => { revoked.push(url); });
+      t.mock.timers.enable({ apis: ['setTimeout'] });
+      query<HTMLButtonElement>('[data-tab="data"]').click(); query<HTMLButtonElement>('.pc-backup').click();
+      await eventually(() => !query<HTMLButtonElement>('.pc-backup').disabled);
+      assert.ok(signal); assert.equal(signal.aborted, true, 'completion, return and errors all release the producer controller'); assert.equal(returned, 1);
+      assert.equal(nextCalls, ending === 'before first next' ? 0 : ending === 'error' ? 1 : 2);
+      if (ending === 'final') assert.match(query('.pc-manage-status').textContent!, /All backup parts are ready/);
+      else if (ending === 'before first next') assert.match(query('.pc-manage-status').textContent!, /canceled/);
+      else assert.equal(query('.pc-manage-status').hasAttribute('data-error'), true);
+      const aborts = () => abort.mock.calls.filter(call => (call.this as AbortController).signal === signal).length;
+      const beforeDestroy = aborts(); ui.panel.destroy(); assert.equal(aborts(), beforeDestroy, 'released controllers are removed from panel-owned backups');
+      const cancellations = added.mock.calls.filter(call => call.arguments[0] === 'abort' && typeof call.arguments[1] === 'function' && call.arguments[1].name === 'cancel');
+      assert.ok(cancellations.length > 0);
+      for (const call of cancellations) assert.ok(removed.mock.calls.some(removal => removal.this === call.this && removal.arguments[0] === 'abort' && removal.arguments[1] === call.arguments[1]), 'caller cancellation listeners are removed');
+      t.mock.timers.tick(59_999); assert.deepEqual(revoked, []); t.mock.timers.tick(1); assert.equal(revoked.length, created);
+    });
+  }
 });
 
 describe('panel surface fallbacks', () => {
@@ -345,7 +419,8 @@ describe('profile management and migration UI', () => {
     const { query, root, window } = await mountPanel(t, MODEL, { chat: { storageKey: 'history-ui' } });
     query<HTMLButtonElement>('[data-tab="history"]').click(); click(root, 'Edit');
     query<HTMLTextAreaElement>('[aria-label="Edit"]').value = 'I now prefer black tea.';
-    query<HTMLTextAreaElement>('[aria-label="Edit"]').form!.requestSubmit(); await flush();
+    query<HTMLTextAreaElement>('[aria-label="Edit"]').form!.requestSubmit();
+    await eventually(() => !query<HTMLSelectElement>('.pc-profile-select').disabled);
     assert.match(query('.pc-record-list').textContent!, /black tea/);
     click(root, 'Delete'); click(root, 'Confirm deletion');
     await eventually(() => !query<HTMLSelectElement>('.pc-profile-select').disabled);
@@ -1217,9 +1292,13 @@ describe('reviewed profile ownership and recovery', () => {
     });
     t.mock.timers.enable({ apis: ['setTimeout'] });
     query<HTMLButtonElement>('[data-tab="data"]').click(); query<HTMLButtonElement>('.pc-backup').click();
-    await eventually(() => blobs.length === 2);
+    const advanceScan = async () => { t.mock.timers.tick(0); await new Promise<void>(resolve => setImmediate(resolve)); };
+    for (let i = 0; i < 1_000 && blobs.length < 2 && !query('.pc-manage-status').hasAttribute('data-error'); i++) await advanceScan();
+    assert.equal(query('.pc-manage-status').hasAttribute('data-error'), false, query('.pc-manage-status').textContent!);
+    assert.equal(blobs.length, 2);
     for (let i = 0; i < 100 && !query('.pc-manage-status').textContent!.includes('All backup parts are ready'); i++) {
-      t.mock.timers.tick(60_000); await flush();
+      t.mock.timers.tick(60_000);
+      for (let turn = 0; turn < 20; turn++) await advanceScan();
     }
     assert.match(query('.pc-manage-status').textContent!, /All backup parts are ready/);
     assert.ok(blobs.length > 1); assert.equal(lookups, 1); assert.equal(names.length, blobs.length);

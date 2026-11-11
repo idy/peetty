@@ -412,6 +412,10 @@ export async function createChatPanel({
       signal?.addEventListener('abort', cancel, { once: true });
       if (signal?.aborted) cancel();
       const timer = setTimeout(() => controller.abort(), 20_000);
+      let streaming = false;
+      const release = () => {
+        controller.abort(); signal?.removeEventListener('abort', cancel); activeBackups.delete(controller);
+      };
       const liveIds = new Set(profiles.listProfiles().map((profile) => profile.id));
       try {
         const sessions = await Promise.all([...sessionModels].filter(([id]) => liveIds.has(id)).map(async ([profileId, session]) => {
@@ -422,8 +426,28 @@ export async function createChatPanel({
           const connection = toStoredConnection(model, resolvedKey);
           return { profileId, connection, rememberKey: session.rememberKey && !model.getApiKey };
         }));
-        return await profiles.backupDownload({ sessions });
-      } finally { clearTimeout(timer); controller.abort(); signal?.removeEventListener('abort', cancel); activeBackups.delete(controller); }
+        const result = await abortable(profiles.backupDownload({ sessions, signal: controller.signal }), controller.signal);
+        if (typeof result === 'string') return result;
+        streaming = true;
+        return {
+          [Symbol.asyncIterator]() {
+            const iterator = result[Symbol.asyncIterator]();
+            return {
+              async next() {
+                try {
+                  const next = await iterator.next();
+                  if (next.done) release();
+                  return next;
+                } catch (error) { release(); throw error; }
+              },
+              async return() {
+                release();
+                return await iterator.return?.() ?? { done: true, value: undefined };
+              },
+            };
+          },
+        };
+      } finally { clearTimeout(timer); if (!streaming) release(); }
     }
     const management = createManagement({
       document, store: profiles, language: () => language,

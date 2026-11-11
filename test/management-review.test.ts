@@ -63,6 +63,40 @@ function forbidSnapshots(t: TestContext, store: BrowserProfileStore) {
 }
 
 describe('multipart backup UI', () => {
+  for (const count of [2, 4, 5]) {
+    for (const metadata of [false, true]) {
+      it(`completes ${count} parts immediately after the last download ${metadata ? 'with final metadata' : 'with bounded fallback lookahead'}`, async (t) => {
+        installChatIndexedDB(t); let produced = 0; let closed = 0;
+        async function* parts() {
+          try {
+            for (let i = 1; i <= count; i++) {
+              produced++;
+              yield { name: `part-${i}.json`, text: 'fixture part', ...(metadata && i === count ? { final: true } : {}) };
+            }
+          } finally { closed++; }
+        }
+        const ui = await mount(t, { backup: async () => parts() }); ui.tab('data');
+        let created = 0; const retained = new Set<string>();
+        t.mock.method(URL, 'createObjectURL', () => { const url = `blob:final-part-${++created}`; retained.add(url); assert.ok(retained.size <= 2); return url; });
+        t.mock.method(URL, 'revokeObjectURL', (url: string) => { retained.delete(url); });
+        ui.root.addEventListener('click', event => { if ((event.target as Element).closest('a[download]')) event.preventDefault(); });
+        t.mock.timers.enable({ apis: ['setTimeout'] });
+        ui.click('Download full backup'); await flush();
+        assert.equal(created, 2); assert.ok(produced <= 3);
+        while (created < count) { t.mock.timers.tick(60_000); await flush(); }
+        assert.equal(closed, 1, 'the producer closes immediately without another retention wait');
+        assert.match(ui.query('.pc-manage-status').textContent!, /All backup parts are ready/);
+        assert.equal(ui.query<HTMLButtonElement>('.pc-backup').disabled, false);
+        assert.equal(ui.query<HTMLButtonElement>('[data-cancel-download]').hidden, true);
+        assert.ok(retained.size >= 1, 'last downloads remain available while the UI is released');
+        ui.query<HTMLButtonElement>('[data-cancel-download]').click(); await flush();
+        assert.match(ui.query('.pc-manage-status').textContent!, /All backup parts are ready/, 'a completed backup cannot be relabeled incomplete');
+        t.mock.timers.tick(59_999); assert.ok(retained.size >= 1);
+        t.mock.timers.tick(1); assert.equal(retained.size, 0);
+      });
+    }
+  }
+
   it('pulls streaming parts lazily with at most two retained URLs and localized progress', async (t) => {
     installChatIndexedDB(t);
     let produced = 0; let closed = false;
@@ -77,12 +111,12 @@ describe('multipart backup UI', () => {
     ui.root.addEventListener('click', event => { const link = (event.target as Element).closest<HTMLAnchorElement>('a[download]'); if (link) { event.preventDefault(); names.push(link.download); } });
     t.mock.timers.enable({ apis: ['setTimeout'] });
     ui.click('Download full backup'); await flush();
-    assert.equal(produced, 2, 'the producer is not advanced while URL slots are full'); assert.equal(created, 2);
+    assert.equal(produced, 3, 'fallback buffers at most one lookahead part while URL slots are full'); assert.equal(created, 2);
     assert.equal(ui.query<HTMLButtonElement>('[data-cancel-download]').disabled, false);
     assert.match(ui.query('.pc-manage-status').textContent!, /Allow multiple downloads.*keep every part.*two parts per minute/);
     ui.language('zh'); assert.match(ui.query('.pc-manage-status').textContent!, /允许浏览器下载多个文件.*保留全部分卷.*每分钟最多下载两个分卷/);
-    t.mock.timers.tick(59_999); await flush(); assert.equal(produced, 2); assert.equal(retained.size, 2);
-    t.mock.timers.tick(1); await flush(); assert.equal(produced, 4); assert.equal(retained.size, 2);
+    t.mock.timers.tick(59_999); await flush(); assert.equal(produced, 3); assert.equal(retained.size, 2);
+    t.mock.timers.tick(1); await flush(); assert.equal(produced, 5); assert.equal(retained.size, 2);
     t.mock.timers.tick(60_000); await flush(); assert.equal(produced, 5); assert.equal(closed, true);
     assert.deepEqual(names, [1, 2, 3, 4, 5].map(i => `part-${i}.json`));
     assert.match(ui.query('.pc-manage-status').textContent!, /全部备份分卷已准备下载/);
@@ -99,15 +133,15 @@ describe('multipart backup UI', () => {
       t.mock.method(URL, 'createObjectURL', () => `blob:cancel-part-${++created}`); t.mock.method(URL, 'revokeObjectURL', (url: string) => { revoked.push(url); });
       ui.root.addEventListener('click', event => { if ((event.target as Element).closest('a[download]')) event.preventDefault(); });
       t.mock.timers.enable({ apis: ['setTimeout'] });
-      ui.click('Download full backup'); await flush(); assert.equal(produced, 2);
+      ui.click('Download full backup'); await flush(); assert.equal(produced, 3);
       if (ending === 'cancel') ui.click('Cancel remaining downloads'); else ui.management.destroy();
-      await flush(); assert.equal(closed, 1, 'return releases the suspended producer immediately'); assert.equal(produced, 2);
+      await flush(); assert.equal(closed, 1, 'return releases the suspended producer immediately'); assert.equal(produced, 3);
       if (ending === 'cancel') {
         assert.match(ui.query('.pc-manage-status').textContent!, /canceled.*incomplete/); assert.equal(ui.query<HTMLButtonElement>('.pc-backup').disabled, false);
-        ui.click('Download full backup'); await flush(); assert.equal(produced, 2, 'a retry also respects still-live URLs');
+        ui.click('Download full backup'); await flush(); assert.equal(produced, 4, 'a retry buffers just one part behind still-live URLs');
         ui.click('Cancel remaining downloads'); await flush();
       }
-      t.mock.timers.tick(59_999); await flush(); assert.deepEqual(revoked, []); assert.equal(produced, 2);
+      t.mock.timers.tick(59_999); await flush(); assert.deepEqual(revoked, []); assert.equal(produced, ending === 'cancel' ? 4 : 3);
       t.mock.timers.tick(1); await flush(); assert.deepEqual(revoked, ['blob:cancel-part-1', 'blob:cancel-part-2']); assert.equal(created, 2);
     });
   }
