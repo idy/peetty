@@ -317,12 +317,14 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
       (yx - top * wx, yy - top * wy, yc - top * wc),
       (bottom * wx - yx, bottom * wy - yy, bottom * wc - yc),
       // In front of the viewer: past the horizon, projection flips.
-      (wx, wy, wc - 1e-6),
+      (wx, wy, wc - 1e-12 * (wx.abs() * size.width + wy.abs() * size.height + wc.abs())),
     ];
 
     // Half-planes that rows do not move constrain the columns alone; they are hard
     // limits on where columns may start, handled apart from the rest.
-    bool flat((double, double, double) h) => h.$2.abs() <= 1e-12 * math.max(1.0, h.$1.abs() + h.$2.abs() + h.$3.abs());
+    // Only an exactly zero row coefficient is level: any other, however small, can
+    // add up across a tall host, so it is solved for like the rest.
+    bool flat((double, double, double) h) => h.$2 == 0;
     final sloped = [for (final h in planes) if (!flat(h)) h];
     final level = [for (final h in planes) if (flat(h)) h];
 
@@ -349,8 +351,9 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
     (double, double)? starts(double width) {
       var lo = 0.0, hi = size.width - width;
       for (final (hx, _, hc) in level) {
-        final slack = 1e-9 * math.max(1.0, hx.abs() + hc.abs());
-        if (hx.abs() <= 1e-12) {
+        // Rounding allowance, relative to the bound's own size across this host.
+        final slack = 1e-9 * (hx.abs() * size.width + hc.abs());
+        if (hx == 0) {
           if (-hc > slack) return null;
         } else if (hx > 0) {
           lo = math.max(lo, (-hc - slack) / hx);

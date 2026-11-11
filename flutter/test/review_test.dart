@@ -498,6 +498,59 @@ void main() {
     expect(_state(tester).position, isNull);
   });
 
+  Widget transformed(Matrix4 transform, Size host, double figureWidth) => MediaQuery(
+        data: const MediaQueryData(size: Size(800, 600)),
+        child: Directionality(
+          textDirection: TextDirection.ltr,
+          child: Stack(children: [
+            Positioned(
+              left: 0,
+              top: 0,
+              width: host.width,
+              height: host.height,
+              child: Transform(
+                transform: transform,
+                child: Peetty(
+                  figureData: _miru,
+                  scale: figureWidth / (_miru.height * _miru.viewBox.width / _miru.viewBox.height),
+                  random: _seeded(),
+                  child: const SizedBox.expand(),
+                ),
+              ),
+            ),
+          ]),
+        ),
+      );
+
+  testWidgets('tiny row coefficients that add up over a tall host are not ignored', (tester) async {
+    // X = x + 0.00005·y − 100,000,000 and Y = 0.006·y: a fit exists near x = 99,999,996, y = 90,000.
+    final transform = Matrix4.identity()
+      ..setEntry(0, 1, 0.00005)
+      ..setEntry(0, 3, -100000000)
+      ..setEntry(1, 1, 0.006);
+    await tester.pumpWidget(transformed(transform, const Size(100000196, 100000), 200));
+    // She finds somewhere to be rather than staying parked (the fall itself is long).
+    await _until(tester, () => false, frames: 30);
+    expect(_state(tester).position, isNotNull);
+  });
+
+  testWidgets('tiny column coefficients that add up over a wide host are not ignored', (tester) async {
+    // W = 0.0000011 and X = 610·W + 9e-13·x: a figure as wide as the host spans screen x 610 to 810.
+    final transform = Matrix4.identity()
+      ..setEntry(0, 0, 9e-13)
+      ..setEntry(0, 3, 610 * 0.0000011)
+      ..setEntry(1, 1, 0.0000011 * 1e-6)
+      ..setEntry(3, 3, 0.0000011);
+    await tester.pumpWidget(transformed(transform, const Size(244444445, 500000000), 244444444));
+    await _until(tester, () => false, frames: 30);
+    expect(_state(tester).position, isNull);
+    // The same host with 8e-13 spans 610 to about 788, which fits.
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpWidget(transformed(transform.clone()..setEntry(0, 0, 8e-13), const Size(244444445, 500000000), 244444444));
+    await _until(tester, () => false, frames: 30);
+    expect(_state(tester).position, isNotNull);
+  });
+
   testWidgets('a host too short for her below a large inset leaves her nowhere to stand', (tester) async {
     await tester.pumpWidget(MediaQuery(
       data: const MediaQueryData(size: Size(800, 600), padding: EdgeInsets.only(top: 80)),
