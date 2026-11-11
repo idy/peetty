@@ -411,6 +411,32 @@ void main() {
     }
   });
 
+  testWidgets('a wide host scrolled a pixel off screen still finds the narrow safe columns', (tester) async {
+    // 1000 wide, one pixel left of a 200-wide screen, with a 150-wide figure: only
+    // column starts 1 through 51 fit.
+    await tester.pumpWidget(MediaQuery(
+      data: const MediaQueryData(size: Size(200, 400)),
+      child: Directionality(
+        textDirection: TextDirection.ltr,
+        child: Stack(children: [
+          Positioned(
+            left: -1,
+            top: 0,
+            width: 1000,
+            height: 400,
+            child: Peetty(figureData: _miru, scale: 150 / (_miru.height * _miru.viewBox.width / _miru.viewBox.height), random: _seeded(), child: const SizedBox.expand()),
+          ),
+        ]),
+      ),
+    ));
+    final state = _state(tester);
+    expect(await _until(tester, () => state.action != FigureState.fall && state.position != null), isTrue);
+    final canvas = find.byType(FigureCanvas);
+    expect(tester.getSize(canvas).width, closeTo(150, 0.01));
+    expect(tester.getTopLeft(canvas).dx, greaterThanOrEqualTo(-1e-6));
+    expect(tester.getTopRight(canvas).dx, lessThanOrEqualTo(200 + 1e-6));
+  });
+
   testWidgets('a host too short for her below a large inset leaves her nowhere to stand', (tester) async {
     await tester.pumpWidget(MediaQuery(
       data: const MediaQueryData(size: Size(800, 600), padding: EdgeInsets.only(top: 80)),

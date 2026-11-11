@@ -274,9 +274,10 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
   ///
   /// Screen coordinates are affine in host coordinates, so for a scaled, rotated,
   /// skewed or flipped host the safe area is a slanted region of the host. Her
-  /// limits are an axis-aligned box in host coordinates: candidate column ranges
-  /// are tried, the rows that keep the whole box inside the safe area are solved
-  /// exactly for each, and the largest box that fits her wins.
+  /// limits are an axis-aligned box in host coordinates. For a column range, the
+  /// rows keeping the whole box inside the safe area are solved exactly; their
+  /// height is concave in where the columns start, so the best start is found by
+  /// ternary search rather than sampling, and the largest fitting box wins.
   Limits? _limits(RenderBox host) {
     final view = _view!;
     final size = host.size;
@@ -292,48 +293,92 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
   Limits? _limitsCache;
 
   Limits? _solveLimits(Matrix4 transform, Size size, Size? screen, double figureWidth, Offset anchor) {
-    Limits box(double x0, double x1, double y0, double y1) => Limits(x0 + anchor.dx, x1 - (figureWidth - anchor.dx), y0 + anchor.dy, y1);
-    if (screen == null) return size.width < figureWidth || size.height < anchor.dy ? null : box(0, size.width, 0, size.height);
+    // Rounding can leave a box exactly her size a hair narrower than her: no span is still a place to stand.
+    Limits box(double x0, double x1, double y0, double y1) {
+      final left = x0 + anchor.dx, top = y0 + anchor.dy;
+      return Limits(left, math.max(left, x1 - (figureWidth - anchor.dx)), top, math.max(top, y1));
+    }
+    final spare = size.width - figureWidth;
+    if (spare < 0) return null;
+    if (screen == null) return size.height < anchor.dy ? null : box(0, size.width, 0, size.height);
     Offset toScreen(double x, double y) => MatrixUtils.transformPoint(transform, Offset(x, y));
     final origin = toScreen(0, 0);
     final alongX = toScreen(1, 0) - origin;
     final alongY = toScreen(0, 1) - origin;
-    final band = [
+    final bands = [
       (alongX.dx, alongY.dx, origin.dx, _padding.left, screen.width - _padding.right),
       (alongX.dy, alongY.dy, origin.dy, _padding.top, screen.height - _padding.bottom),
     ];
 
-    // Rows y where `slope·y + offset` stays in [low, high] for every offset in [omin, omax].
-    (double, double) solve(double slope, double omin, double omax, double low, double high) {
-      final from = low - omin, to = high - omax;
-      if (from > to) return (1, 0);
-      // Rows do not move this coordinate: the columns alone must already fit.
-      if (slope.abs() <= 1e-12) return from <= 0 && to >= 0 ? (double.negativeInfinity, double.infinity) : (1, 0);
-      return slope > 0 ? (from / slope, to / slope) : (to / slope, from / slope);
+    // For columns [x0, x0 + width]: the rows [y0, y1] keeping the whole box inside
+    // both screen axes' safe bands, and their height (negative when none fit).
+    // Every bound is linear in x0, so the height is concave in x0 and in width.
+    (double, double, double) rows(double x0, double width) {
+      final x1 = x0 + width;
+      var y0 = 0.0, y1 = size.height;
+      var penalty = double.infinity;
+      for (final (px, py, c, low, high) in bands) {
+        final omin = c + math.min(px * x0, px * x1), omax = c + math.max(px * x0, px * x1);
+        final from = low - omin, to = high - omax;
+        if (py.abs() <= 1e-12) {
+          // Rows do not move this coordinate: the columns alone must fit. A steep
+          // concave penalty keeps the search exact at the boundary.
+          penalty = math.min(penalty, size.height + 1e6 * math.min(-from, to));
+        } else if (py > 0) {
+          y0 = math.max(y0, from / py);
+          y1 = math.min(y1, to / py);
+        } else {
+          y0 = math.max(y0, to / py);
+          y1 = math.min(y1, from / py);
+        }
+      }
+      return (y0, y1, math.min(y1 - y0, penalty));
     }
 
+    // The column start giving the most rows, by ternary search on the concave height.
+    double bestStart(double width) {
+      var lo = 0.0, hi = size.width - width;
+      for (var i = 0; i < 100 && hi - lo > 1e-9; i++) {
+        final m1 = lo + (hi - lo) / 3, m2 = hi - (hi - lo) / 3;
+        if (rows(m1, width).$3 < rows(m2, width).$3) {
+          lo = m1;
+        } else {
+          hi = m2;
+        }
+      }
+      final mid = (lo + hi) / 2;
+      // Plateaus can leave either end best.
+      return [0.0, mid, size.width - width].reduce((a, b) => rows(a, width).$3 >= rows(b, width).$3 ? a : b);
+    }
+
+    bool fits(double width) => rows(bestStart(width), width).$3 >= anchor.dy;
+    // Narrower columns only loosen the constraints, so if anything fits her own
+    // width does, and the widths that fit form a range: find its widest end.
+    if (!fits(figureWidth)) return null;
+    var narrow = figureWidth, wide = size.width;
+    if (!fits(wide)) {
+      for (var i = 0; i < 60 && wide - narrow > 1e-6; i++) {
+        final mid = (narrow + wide) / 2;
+        if (fits(mid)) {
+          narrow = mid;
+        } else {
+          wide = mid;
+        }
+      }
+      wide = narrow;
+    }
+    // Within that range, prefer the box with the most area.
     Limits? best;
     var bestArea = -1.0;
-    final spare = size.width - figureWidth;
-    if (spare < 0) return null;
     for (final fraction in const [1.0, 0.8, 0.6, 0.45, 0.3, 0.2, 0.12, 0.06, 0.0]) {
-      final width = figureWidth + spare * fraction;
-      final slack = size.width - width;
-      final steps = slack <= 0 ? 0 : 16;
-      for (var i = 0; i <= steps; i++) {
-        final x0 = steps == 0 ? 0.0 : slack * i / steps, x1 = x0 + width;
-        var (y0, y1) = (0.0, size.height);
-        for (final (ax, ay, c, low, high) in band) {
-          final (from, to) = solve(ay, c + math.min(ax * x0, ax * x1), c + math.max(ax * x0, ax * x1), low, high);
-          y0 = math.max(y0, from);
-          y1 = math.min(y1, to);
-        }
-        if (y1 - y0 < anchor.dy) continue;
-        final area = width * (y1 - y0);
-        if (area > bestArea) {
-          bestArea = area;
-          best = box(x0, x1, y0, y1);
-        }
+      final width = figureWidth + (wide - figureWidth) * fraction;
+      final x0 = bestStart(width);
+      final (y0, y1, height) = rows(x0, width);
+      if (height < anchor.dy) continue;
+      final area = width * height;
+      if (area > bestArea) {
+        bestArea = area;
+        best = box(x0, x0 + width, y0, y1);
       }
     }
     return best;
