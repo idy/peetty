@@ -197,6 +197,8 @@ export class ChatRuntime {
   get reply(): ChatEntry | undefined { return this.history.find((entry) => entry.id === this.replyId); }
   get busy(): boolean { return this.active !== undefined; }
   get error(): string | null { return this.currentError ?? this.clearError; }
+  /** Only the active connection/turn error; retained deletion warnings do not fail a reply. */
+  get replyError(): string | null { return this.currentError; }
   /** A failed deletion remains visible even when a later model error owns error. */
   get clearError(): string | null { return this.clearFailed ? CLEAR_HISTORY_FAILED : null; }
   get persistenceWarning(): boolean { return this.storageFailed || this.storage.persistenceWarning; }

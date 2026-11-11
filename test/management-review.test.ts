@@ -177,49 +177,44 @@ describe('multipart backup UI', () => {
     assert.equal(create.mock.callCount(), 0, 'late parts cannot become downloads after cancellation');
   });
 
-  it('reads all selected restore parts together and retains single-file memory import', async (t) => {
-    installChatIndexedDB(t); const ui = await mount(t); ui.tab('data');
-    const restore = t.mock.method(ui.store, 'restoreFiles', async (_texts: readonly string[]) => {});
-    const input = ui.query<HTMLInputElement>('input[type="file"][multiple]');
-    assert.equal(input.multiple, true);
-    const files = [new ui.window.File(['first fixture part'], 'part-1.json'), new ui.window.File(['second fixture part'], 'part-2.json')];
-    Object.defineProperty(input, 'files', { configurable: true, value: files });
-    input.dispatchEvent(new ui.window.Event('change') as unknown as Event); await flush();
-    assert.equal(restore.mock.callCount(), 1);
-    assert.deepEqual(restore.mock.calls[0]!.arguments[0], ['first fixture part', 'second fixture part']);
-    assert.equal(ui.query<HTMLInputElement>('input[type="file"]:not([multiple])').multiple, false);
-    assert.match(ui.query('.pc-manage-status').textContent!, /Import complete/);
-  });
-
-  for (const invalid of ['count', 'aggregate'] as const) {
-    it(`rejects an excessive restore ${invalid} before reading bodies or materializing an unbounded file list`, async (t) => {
+  for (const scale of ['over 128 parts', 'over 256 MiB'] as const) {
+    it(`passes the original file selection ${scale} to sequential restore without reading or copying it`, async (t) => {
       installChatIndexedDB(t); const ui = await mount(t); ui.tab('data');
       let reads = 0; let accesses = 0;
-      const file = { size: 50 * 1_024 * 1_024, text: async () => { reads++; return '{}'; } };
-      const selected = invalid === 'count'
-        ? new Proxy({ length: 129 }, { get(target, key) { if (key === 'length') return target.length; accesses++; throw new Error('Unbounded FileList accessed'); } })
+      const file = { size: 50 * 1_024 * 1_024, text: async () => { reads++; throw new Error('The management view must not read backup bodies'); } };
+      const selected = scale === 'over 128 parts'
+        ? new Proxy({ length: 129 }, { get(target, key) { if (key === 'length') return target.length; accesses++; throw new Error('The management view must not enumerate the FileList'); } })
         : Array.from({ length: 6 }, () => file);
+      const restore = t.mock.method(ui.store, 'restoreFileSelection', async (_files: Parameters<BrowserProfileStore['restoreFileSelection']>[0]) => {});
       const input = ui.query<HTMLInputElement>('input[type="file"][multiple]');
       Object.defineProperty(input, 'files', { configurable: true, value: selected });
-      const restore = t.mock.method(ui.store, 'restoreFiles', async (_texts: readonly string[]) => {});
       input.dispatchEvent(new ui.window.Event('change') as unknown as Event); await flush();
-      assert.equal(reads, 0); assert.equal(accesses, 0); assert.equal(restore.mock.callCount(), 0);
-      assert.match(ui.query('.pc-manage-status').textContent!, /128 files totaling 256 MiB/);
-      assert.equal(ui.query('.pc-manage-status').hasAttribute('data-error'), true);
-      assert.equal(ui.query<HTMLButtonElement>('[data-focus-key="restore"]').disabled, false);
+      assert.equal(restore.mock.callCount(), 1); assert.equal(restore.mock.calls[0]!.arguments[0], selected);
+      assert.equal(reads, 0); assert.equal(accesses, 0);
+      assert.match(ui.query('.pc-manage-status').textContent!, /Import complete/);
+      assert.match(ui.root.textContent!, /Backup parts are read sequentially/);
+      assert.doesNotMatch(ui.root.textContent!, /128 files|256 MiB/);
+      assert.equal(ui.query<HTMLInputElement>('input[type="file"]:not([multiple])').multiple, false);
     });
   }
 
-  it('accepts multipart selections larger than 50 MiB within the aggregate bound', async (t) => {
-    installChatIndexedDB(t); const ui = await mount(t); ui.tab('data');
-    let reads = 0;
-    const files = Array.from({ length: 2 }, (_, index) => ({ size: 40 * 1_024 * 1_024, text: async () => { reads++; return `fixture part ${index}`; } }));
-    const restore = t.mock.method(ui.store, 'restoreFiles', async (_texts: readonly string[]) => {});
-    const input = ui.query<HTMLInputElement>('input[type="file"][multiple]');
+  it('keeps memory imports to one bounded file and rejects oversized memory files before reading', async (t) => {
+    installChatIndexedDB(t); const ui = await mount(t); ui.tab('data'); let reads = 0;
+    const input = ui.query<HTMLInputElement>('input[type="file"]:not([multiple])');
+    const files = [
+      { size: 20, text: async () => { reads++; return 'synthetic first memory JSON'; } },
+      { size: 20, text: async () => { throw new Error('A second memory file must not be read'); } },
+    ];
+    const imported = t.mock.method(ui.store, 'importMemories', async (_id: string, _text: string) => {});
     Object.defineProperty(input, 'files', { configurable: true, value: files });
     input.dispatchEvent(new ui.window.Event('change') as unknown as Event); await flush();
-    assert.equal(reads, 2); assert.deepEqual(restore.mock.calls[0]!.arguments[0], ['fixture part 0', 'fixture part 1']);
+    assert.equal(reads, 1); assert.equal(imported.mock.calls[0]!.arguments[1], 'synthetic first memory JSON');
     assert.match(ui.query('.pc-manage-status').textContent!, /Import complete/);
+    const current = ui.query<HTMLInputElement>('input[type="file"]:not([multiple])');
+    Object.defineProperty(current, 'files', { configurable: true, value: [{ size: PROFILE_LIMITS.fileBytes + 1, text: async () => { reads++; return '{}'; } }] });
+    current.dispatchEvent(new ui.window.Event('change') as unknown as Event); await flush();
+    assert.equal(reads, 1); assert.equal(imported.mock.callCount(), 1);
+    assert.equal(ui.query('.pc-manage-status').hasAttribute('data-error'), true);
   });
 
   it('validates every restore part size before reading any file', async (t) => {
@@ -574,6 +569,43 @@ describe('management profile ownership', () => {
   });
 
   for (const setting of ['useMemories', 'autoRemember'] as const) {
+    it(`rolls back ${setting} after an actual IndexedDB transaction abort and recovers after reopening storage`, async (t) => {
+      const idb = installChatIndexedDB(t); const namespace = `management-setting-abort-${setting}`;
+      const store = new BrowserProfileStore(namespace); let reloads = 0;
+      const ui = await mount(t, { store, onReload: async () => { reloads++; } });
+      const id = store.activeProfileId; const original = store.profileInfo(id)![setting];
+      const persisted = () => (idb.databases.get(`${namespace}:profiles`)!.get(`profile:${id}`) as { profile: { useMemories: boolean; autoRemember: boolean } }).profile[setting];
+      assert.equal(persisted(), original);
+      ui.tab('memory'); idb.fail('commit');
+      const check = ui.query<HTMLInputElement>(`[data-setting="${setting}"]`); check.checked = !original;
+      check.dispatchEvent(new ui.window.Event('change') as unknown as Event); await flush();
+      assert.equal(persisted(), original, 'aborted transaction leaves disk unchanged');
+      assert.equal(store.profileInfo(id)![setting], original, 'the store rolls back its projection');
+      assert.equal(ui.query<HTMLInputElement>(`[data-setting="${setting}"]`).checked, original);
+      assert.equal(reloads, 0, 'a rejected save must not reload the runtime');
+      assert.match(ui.query('.pc-manage-status').textContent!, /Could not save this memory setting to browser storage.*last saved setting/);
+      assert.equal(ui.query('.pc-manage-status').hasAttribute('data-error'), true);
+      assert.doesNotMatch(ui.query('.pc-manage-status').textContent!, /Changes saved|was saved/);
+      ui.language('zh'); assert.match(ui.query('.pc-manage-status').textContent!, /未能保存到浏览器存储.*上次保存的设置/);
+      idb.fail('none'); ui.management.destroy(); store.close();
+      const recovered = await mount(t, { store: new BrowserProfileStore(namespace) }); recovered.tab('memory');
+      const retry = recovered.query<HTMLInputElement>(`[data-setting="${setting}"]`); assert.equal(retry.checked, original);
+      retry.checked = !original; retry.dispatchEvent(new recovered.window.Event('change') as unknown as Event); await flush();
+      assert.equal(persisted(), !original); assert.equal(recovered.store.profileInfo(id)![setting], !original);
+      assert.match(recovered.query('.pc-manage-status').textContent!, /Changes saved/);
+    });
+
+    it(`saves ${setting} intentionally in memory with persist false even when disk writes would abort`, async (t) => {
+      const idb = installChatIndexedDB(t); const store = new BrowserProfileStore(`memory-setting-${setting}`, false);
+      const ui = await mount(t, { store }); ui.tab('memory'); idb.fail('commit');
+      const check = ui.query<HTMLInputElement>(`[data-setting="${setting}"]`); const next = !check.checked; check.checked = next;
+      check.dispatchEvent(new ui.window.Event('change') as unknown as Event); await flush();
+      assert.equal(store.profileInfo(store.activeProfileId)![setting], next);
+      assert.equal(ui.query<HTMLInputElement>(`[data-setting="${setting}"]`).checked, next);
+      assert.match(ui.query('.pc-manage-status').textContent!, /Changes saved/);
+      assert.equal(ui.query('.pc-manage-status').hasAttribute('data-error'), false);
+    });
+
     it(`reconciles ${setting} after failed writes and failed reloads, then recovers on retry`, async (t) => {
       installChatIndexedDB(t);
       let rejectReload = false; let reloads = 0;

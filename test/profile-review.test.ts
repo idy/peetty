@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { constants as bufferConstants } from 'node:buffer';
-import { jsonChunks, jsonFingerprint, parseJSONChunks } from '../src/chat/bounded-json.ts';
+import { jsonChunks, jsonFingerprint, parseJSONChunks, parseJSONChunksAsync } from '../src/chat/bounded-json.ts';
 import { readFile } from 'node:fs/promises';
 import { describe, it } from 'node:test';
 import type { TestContext } from 'node:test';
@@ -2338,6 +2338,216 @@ describe('durable privacy deletion transactions', () => {
     assert.ok((await manager.backup()).includes('restored-session-secret'));
     assert.equal(supplied.connection.apiKey, 'supplied-session-secret');
   });
+});
+
+describe('sequential backup selection and shared JSON parser', () => {
+  const encodedSize = (value: string) => new TextEncoder().encode(value).length;
+  const fakeFile = (value: string) => ({ size: encodedSize(value), text: async () => value });
+
+  it('uses identical strict JSON/token/prototype semantics for asynchronous chunk boundaries', async () => {
+    const samples: unknown[] = [null, true, false, -1.25e10, [], {}, '雪😀\\\"\n\u0000\ud800',
+      { array: [1, 'text', { path: 'x' }], omitted: undefined, escaped: '\n'.repeat(25_000) }];
+    const literal = '{"same":1,"same":2,"__proto__":{"safe":true},"constructor":{"prototype":{"safe":true}},"n":-1e+2}';
+    const valid = samples.map((value) => JSON.stringify(value)).concat(literal);
+    for (const body of valid) for (const width of [1, 2, 7, 1_024]) {
+      async function* chunks() { for (let i = 0; i < body.length; i += width) yield body.slice(i, i + width); }
+      assert.deepEqual(await parseJSONChunksAsync(chunks(), 100_000), JSON.parse(body));
+    }
+    assert.equal(({} as { safe?: boolean }).safe, undefined);
+    for (const invalid of ['{} extra', '{"x":1,}', '[1,]', '{"x":}', '00', '[true false]', '"\\u12xz"', '"unescaped\nnewline"', '[', '']) {
+      async function* chunks() { for (const char of invalid) yield char; }
+      await assert.rejects(parseJSONChunksAsync(chunks(), 10_000), /Invalid/u);
+    }
+    async function* oversized() { yield '{"text":"'; yield '\\u0061'.repeat(9); yield '"}'; }
+    await assert.rejects(parseJSONChunksAsync(oversized(), (path, key) => key ? 200 : path.at(-1) === 'text' ? 8 : 200), /Invalid/u);
+    let consumed = 0;
+    async function* observed() {
+      yield '"';
+      for (let i = 0; i < 20; i++) {
+        const before = consumed; yield '\\u0061'.repeat(1_000);
+        assert.equal(consumed, before + 1_000, 'each chunk must be consumed before requesting the next');
+      }
+      yield '"';
+    }
+    assert.equal((await parseJSONChunksAsync(observed(), 20_000, { onStringBuffers(_buffers, _pending, decoded) { consumed = decoded; } }) as string).length, 20_000);
+  });
+
+  it('restores more than 128 parts sequentially in arbitrary selection order with only one read in flight', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const source = await store(t, 'sequential-source', false); const id = source.activeProfileId;
+    const evidence = '雪😀\\\"\n\u0000'.repeat(1_500);
+    await source.storage(id).saveEntries([entry('source', evidence)]);
+    await source.saveMemory(id, { text: 'Sourced fact', sourceEntryId: 'source', sourceText: evidence });
+    await source.storage(id).saveConnection(connection);
+    const sessions = [{ profileId: id, connection: { ...connection, apiKey: 'session-value', headers: { 'x-auth': 'header-value' } }, rememberKey: false }];
+    const files = await downloadFiles(source, { sessions, _testing: { fileBytes: 1_024 } });
+    assert.ok(files.length > 128);
+    let active = 0; let maximum = 0; const readOrder: number[] = []; const calls = files.map(() => 0);
+    const references = files.map((file, index) => ({ size: encodedSize(file.text), async text() {
+      active++; maximum = Math.max(maximum, active); calls[index] = calls[index]! + 1; readOrder.push(index);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      active--; return file.text;
+    } })).reverse();
+    const selection = { length: references.length, ...Object.fromEntries(references.map((file, i) => [i, file])) };
+    const target = await store(t, 'sequential-target');
+    await target.restoreFileSelection(selection);
+    assert.equal(maximum, 1);
+    assert.ok(calls.every((count) => count === 2), 'each file is read once for validation and once for parsing');
+    assert.deepEqual(readOrder.slice(0, files.length), files.map((_file, i) => files.length - i - 1));
+    assert.deepEqual(readOrder.slice(files.length), files.map((_file, i) => i));
+    const restored = target.activeProfile;
+    assert.equal(restored.entries[0]!.text, evidence);
+    assert.equal(restored.memories[0]!.sourceText, evidence);
+    assert.equal(restored.memories[0]!.sourceEntryId, restored.entries[0]!.id);
+    assert.deepEqual(restored.connection, connection);
+    assert.deepEqual((await target.storage(restored.id).load()).sessionConnections, sessions.map(({ profileId: _id, ...session }) => session));
+    assert.equal(JSON.stringify([...idb.databases.get('sequential-target:profiles')!]).includes('session-value'), false);
+    assert.deepEqual((await store(t, 'sequential-target')).activeProfile, restored);
+  });
+
+  it('restores valid exported whitespace-only chunks within message strings', async (t) => {
+    const source = await store(t, 'selection-spaces-source', false);
+    const body = `prefix${' '.repeat(10_000)}suffix`;
+    await source.storage(source.activeProfileId).saveEntries([entry('spaced', body)]);
+    const files = await downloadFiles(source, { _testing: { fileBytes: 1_024 } });
+    assert.ok(files.some((file) => !(JSON.parse(file.text) as { text: string }).text.trim()));
+    const target = await store(t, 'selection-spaces-target', false);
+    await target.restoreFileSelection(files.map((file) => fakeFile(file.text)));
+    assert.equal(target.historyPage(target.activeProfileId, '', 1).entries[0]!.text, body);
+  });
+
+  it('accepts a regular single file and rejects oversized or unreadable files before touching profiles', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const source = await store(t, 'selection-single-source', false);
+    const saved = await source.backup();
+    const target = await store(t, 'selection-single-target');
+    await target.restoreFileSelection({ 0: fakeFile(saved), length: 1 });
+    assert.equal(target.listProfiles().length, 2);
+    const before = target.profiles; const writes = idb.writes.length;
+    let reads = 0;
+    for (const files of [[], [{ size: PROFILE_LIMITS.fileBytes + 1, text: async () => { reads++; return saved; } }],
+      [{ size: 1, text: async () => { throw new Error('untrusted-provider-secret'); } }], [fakeFile('untrusted-invalid-json')]]) {
+      await assert.rejects(target.restoreFileSelection(files), { message: 'Invalid or unsupported profile data.' });
+      assert.deepEqual(target.profiles, before);
+    }
+    assert.equal(reads, 0);
+    assert.equal(idb.writes.length, writes);
+  });
+
+  it('rejects missing, duplicate, mixed, corrupt and changed-between-pass parts atomically', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const source = await store(t, 'selection-invalid-source', false);
+    await source.storage(source.activeProfileId).saveEntries([entry('source', 'content '.repeat(1_000))]);
+    const files = await downloadFiles(source, { _testing: { fileBytes: 2_048 } });
+    const texts = files.map((file) => file.text);
+    const target = await store(t, 'selection-invalid-target');
+    const before = target.profiles; const writes = idb.writes.length;
+    const changed = (index: number, patch: Record<string, unknown>) => texts.map((text, i) => fakeFile(i === index ? JSON.stringify({ ...JSON.parse(text), ...patch }) : text));
+    const originalPart = JSON.parse(texts[1]!) as { text: string };
+    for (const selection of [texts.slice(1).map(fakeFile), [fakeFile(texts[0]!)],
+      [fakeFile(texts[0]!), fakeFile(texts[0]!), ...texts.slice(2).map(fakeFile)],
+      [fakeFile(await source.backup()), ...texts.slice(1).map(fakeFile)],
+      changed(1, { backupId: 'other-backup' }), changed(1, { digest: 'crc32:00000000:1' }),
+      changed(1, { text: `${originalPart.text}x` }), changed(1, { count: files.length + 1 }), changed(1, { unknown: true })]) {
+      await assert.rejects(target.restoreFileSelection(selection), /Invalid/u);
+      assert.deepEqual(target.profiles, before);
+      assert.equal(idb.writes.length, writes);
+    }
+    for (const mutation of [{ text: `${originalPart.text}changed` }, { backupId: 'changed-on-second-read' }, { index: 0 }, { digest: 'crc32:00000000:1' }]) {
+      const selection = texts.map((text, i) => {
+        let reads = 0;
+        return { size: encodedSize(text), async text() {
+          reads++;
+          return i === 1 && reads === 2 ? JSON.stringify({ ...JSON.parse(text), ...mutation }) : text;
+        } };
+      });
+      await assert.rejects(target.restoreFileSelection(selection), /Invalid/u);
+      assert.deepEqual(target.profiles, before);
+      assert.equal(idb.writes.length, writes);
+    }
+    const malformedSource = source as unknown as { state: { records: Map<string, { profile: ProfileRecord }> } };
+    malformedSource.state.records.get(source.activeProfileId)!.profile.useMemories = 'false' as unknown as boolean;
+    const invalidSchema = await downloadFiles(source, { _testing: { fileBytes: 2_048 } });
+    await assert.rejects(target.restoreFileSelection(invalidSchema.map((file) => fakeFile(file.text))), /Invalid/u);
+    assert.deepEqual(target.profiles, before);
+    assert.equal(idb.writes.length, writes);
+  });
+});
+
+describe('durable explicit memory settings', () => {
+  for (const field of ['useMemories', 'autoRemember'] as const) {
+    for (const failure of ['write', 'put', 'commit', 'open'] as const) {
+      it(`does not acknowledge ${field} after a ${failure} failure and preserves current and reopened state`, async (t) => {
+        const idb = installChatIndexedDB(t);
+        const namespace = `durable-setting-${field}-${failure}`;
+        const manager = await store(t, namespace); const id = manager.activeProfileId;
+        await manager.storage(id).saveEntries([entry('existing')]);
+        await manager.saveMemory(id, { text: 'Saved memory' });
+        const before = manager.profiles; const disk = structuredClone(idb.databases.get(`${namespace}:profiles`));
+        const value = !manager.profileInfo(id)![field];
+        if (failure === 'open') {
+          const seam = manager as unknown as { db?: IDBDatabase; opening?: Promise<IDBDatabase | undefined> };
+          seam.db?.close(); delete seam.db; delete seam.opening;
+        }
+        idb.fail(failure);
+        await assert.rejects(manager.update(id, { [field]: value, name: 'Must not acknowledge partial patch' }), { code: 'settings-save' });
+        assert.deepEqual(manager.profiles, before);
+        assert.deepEqual(idb.databases.get(`${namespace}:profiles`), disk);
+        assert.equal(manager.persistenceWarning, true);
+        idb.fail('none');
+        await assert.rejects(manager.update(id, { [field]: value }), { code: 'settings-save' });
+        assert.deepEqual(manager.profiles, before);
+        const reopened = await store(t, namespace);
+        assert.deepEqual(reopened.profiles, before);
+        await reopened.update(id, { [field]: value });
+        assert.equal(reopened.profileInfo(id)![field], value);
+        assert.equal((await store(t, namespace)).profileInfo(id)![field], value);
+      });
+    }
+
+    it(`rejects ${field} when startup storage is unknown while keeping session/RAM data`, async (t) => {
+      const idb = installChatIndexedDB(t);
+      const namespace = `unknown-setting-${field}`;
+      const committed = await store(t, namespace); const originalId = committed.activeProfileId;
+      const disk = structuredClone(idb.databases.get(`${namespace}:profiles`));
+      idb.fail('open');
+      const unknown = await store(t, namespace); const id = unknown.activeProfileId;
+      await unknown.storage(id).saveEntries([entry('unsaved')]);
+      const local = unknown.profiles;
+      await assert.rejects(unknown.update(id, { [field]: !unknown.profileInfo(id)![field] }), { code: 'settings-save' });
+      assert.deepEqual(unknown.profiles, local);
+      assert.deepEqual(idb.databases.get(`${namespace}:profiles`), disk);
+      assert.equal(unknown.persistenceWarning, true);
+      idb.fail('none');
+      assert.equal((await store(t, namespace)).profileInfo(originalId)![field], committed.profileInfo(originalId)![field]);
+    });
+
+    it(`saves ${field} intentionally in RAM and preserves metadata-only fallback`, async (t) => {
+      const idb = installChatIndexedDB(t);
+      const memory = await store(t, `ram-setting-${field}`, false); const id = memory.activeProfileId;
+      idb.fail('commit');
+      const value = !memory.profileInfo(id)![field];
+      await memory.update(id, { [field]: value });
+      assert.equal(memory.profileInfo(id)![field], value);
+      assert.equal(memory.persistenceWarning, false);
+      assert.deepEqual(idb.opened, []);
+      idb.fail('none');
+      const persistent = await store(t, `metadata-fallback-${field}`);
+      const target = persistent.activeProfileId;
+      await persistent.storage(target).saveEntries([entry('disk')]);
+      idb.fail('write');
+      await persistent.storage(target).saveEntries([entry('disk'), entry('ram-turn')]);
+      const before = persistent.profiles;
+      idb.fail('none');
+      await assert.rejects(persistent.update(target, { [field]: !persistent.profileInfo(target)![field] }), { code: 'settings-save' });
+      assert.deepEqual(persistent.profiles, before);
+      assert.equal(persistent.persistenceWarning, true);
+      await persistent.update(target, { name: 'RAM-only name remains allowed' });
+      assert.equal(persistent.profileInfo(target)!.name, 'RAM-only name remains allowed');
+      assert.equal(persistent.profileInfo(target)!.entryCount, 2);
+      assert.equal(persistent.persistenceWarning, true);
+    });
+  }
 });
 
 describe('safe legacy retirement after authoritative migration', () => {

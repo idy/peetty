@@ -85,6 +85,7 @@ export class Peetty {
   private figure: Figure | null = null;
   private figureRequest: FigureRequest | null = null;
   private sdkFigureRequest: FigureRequest | null = null;
+  private appliedSDKFigureRequest: FigureRequest | null = null;
   private pendingPanelFigure: { figure: string | object; request: FigureRequest; current: () => boolean } | null = null;
   private deferredProfileFigure: string | object | undefined;
   private figureOwnership = 0;
@@ -200,7 +201,7 @@ export class Peetty {
     this.lastTap = null;
     this.generation++;
     this.figureRequest?.supersede();
-    this.figureRequest = this.sdkFigureRequest = null;
+    this.figureRequest = this.sdkFigureRequest = this.appliedSDKFigureRequest = null;
     this.pendingPanelFigure = null;
     this.deferredProfileFigure = undefined;
     this.figureOwnership++;
@@ -237,18 +238,24 @@ export class Peetty {
     const ownership = this.figureOwnership;
     const request = this.requestFigure(figure);
     this.sdkFigureRequest = request;
-    this.pendingPanelFigure = null;
+    // A new request does not erase the last artwork already applied successfully.
+    // Its pending Profile update stays owned until a newer load actually succeeds.
     const current = () => generation === this.generation && ownership === this.figureOwnership && this.figureRequest === request;
     try {
       const loaded = await this.loadCurrent(request, generation);
       if (!loaded || !current()) return;
       this.applyLoadedFigure(figure, loaded);
+      this.appliedSDKFigureRequest = request;
       this.deferredProfileFigure = undefined;
-      if (this.chatPanel) await this.chatPanel.setFigure?.(figure, current);
+      if (this.chatPanel) {
+        this.pendingPanelFigure = null;
+        await this.chatPanel.setFigure?.(figure, current);
+      }
       else if (this.chatLoading) {
         // Artwork is ready independently of chat. Keep only the latest selection
         // for the initial owning Profile when the panel eventually becomes ready.
-        this.pendingPanelFigure = { figure, request, current };
+        this.pendingPanelFigure = { figure, request,
+          current: () => generation === this.generation && ownership === this.figureOwnership && this.appliedSDKFigureRequest === request };
       }
     } finally {
       if (this.pendingPanelFigure?.request !== request) await this.finishSDKFigure(request, current);
@@ -267,7 +274,7 @@ export class Peetty {
 
   /** Profile restoration applies artwork without feeding it back into profile persistence. */
   private async applyProfileFigure(figure: string | object): Promise<boolean> {
-    if (this.sdkFigureRequest) { this.deferredProfileFigure = figure; return false; }
+    if (this.sdkFigureRequest || this.pendingPanelFigure) { this.deferredProfileFigure = figure; return false; }
     const generation = this.generation;
     const request = this.requestFigure(figure);
     const loaded = await this.loadCurrent(request, generation);
@@ -387,7 +394,7 @@ export class Peetty {
             if (generation !== this.generation) return;
             this.figureOwnership++;
             this.figureRequest?.supersede();
-            this.sdkFigureRequest = null;
+            this.sdkFigureRequest = this.appliedSDKFigureRequest = null;
             this.pendingPanelFigure = null;
             this.deferredProfileFigure = undefined;
           },

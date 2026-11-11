@@ -659,9 +659,9 @@ export async function createChatPanel({
       portrait?.setLive(visible);
       onState(runtime.busy, speaking);
       if (wasBusy && !runtime.busy) {
-        const announce = visible && !canceledTurn && !runtime.error;
+        const announce = visible && !canceledTurn && !runtime.replyError;
         find('.pc-announcement').textContent = announce ? last?.text ?? '' : '';
-        if (runtime.error) showRuntimeError(runtime.error);
+        if (runtime.replyError) showRuntimeError(runtime.replyError);
         else { showError(); if (announce && last?.text) onReply(last.text, target => renderMarkdownBubble(target, last.text)); }
       }
       wasBusy = runtime.busy;

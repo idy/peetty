@@ -36,83 +36,156 @@ export function* jsonChunks(value: unknown, chunkChars: number): Generator<strin
   if (pending) yield pending;
 }
 
-/** Incremental reader for existing fragmented multipart JSON. Only individual JSON
- * strings are assembled; arrays/objects are constructed directly from the pieces. */
-export function parseJSONChunks(
-  chunks: readonly string[],
-  maxTokenChars: number | ((path: readonly string[], key: boolean) => number),
-  testing?: { onStringBuffers?: (buffers: number, pending: number, decoded: number) => void },
-): unknown {
-  let part = 0; let offset = 0;
-  const invalid = (): never => { throw new Error('Invalid or unsupported profile data.'); };
-  const peek = (): string => {
-    while (part < chunks.length && offset === chunks[part]!.length) { part++; offset = 0; }
-    return chunks[part]?.[offset] ?? '';
-  };
-  const take = (): string => { const result = peek(); if (result) offset++; return result; };
-  const space = () => { while (/[\x20\t\n\r]/.test(peek()) && peek()) offset++; };
-  const string = (path: readonly string[], key = false): string => {
-    if (take() !== '"') invalid();
-    const limit = typeof maxTokenChars === 'number' ? maxTokenChars : maxTokenChars(path, key);
-    const pieces: string[] = []; let size = 0; let pending = '';
-    const append = (value: string) => {
-      if (!value) return;
-      size += value.length; if (size > limit) invalid();
-      for (let offset = 0; offset < value.length;) {
-        const count = Math.min(16_384 - pending.length, value.length - offset);
-        pending += value.slice(offset, offset + count); offset += count;
-        if (pending.length === 16_384) { pieces.push(pending); pending = ''; }
-      }
-      testing?.onStringBuffers?.(pieces.length, pending.length, size);
-    };
-    const escapes: Record<string, string> = { '"': '"', '\\': '\\', '/': '/', b: '\b', f: '\f', n: '\n', r: '\r', t: '\t' };
-    while (peek()) {
-      const source = chunks[part]!;
-      const special = /["\\\u0000-\u001f]/g; special.lastIndex = offset;
-      const match = special.exec(source);
-      if (!match) { append(source.slice(offset)); offset = source.length; continue; }
-      append(source.slice(offset, match.index)); offset = match.index;
-      const char = take();
-      if (char === '"') { if (pending) pieces.push(pending); return pieces.join(''); }
-      if (char !== '\\') invalid();
-      const escape = take();
-      if (escape === 'u') {
-        let code = '';
-        for (let i = 0; i < 4; i++) { const hex = take(); if (!hex || !/[0-9a-f]/i.test(hex)) invalid(); code += hex; }
-        append(String.fromCharCode(Number.parseInt(code, 16)));
-      } else {
-        if (!Object.hasOwn(escapes, escape)) invalid();
-        append(escapes[escape]!);
-      }
+type TokenLimit = number | ((path: readonly string[], key: boolean) => number);
+interface ParserTesting { onStringBuffers?: (buffers: number, pending: number, decoded: number) => void }
+interface JSONFrame {
+  array: boolean;
+  value: unknown[] | Record<string, unknown>;
+  state: 'keyOrEnd' | 'key' | 'colon' | 'valueOrEnd' | 'value' | 'commaOrEnd';
+  path: readonly string[];
+  field: string;
+}
+interface StringToken { key: boolean; limit: number; size: number; pieces: string[]; pending: string; escape: boolean; unicode: string | undefined }
+const invalidJSON = (): never => { throw new Error('Invalid or unsupported profile data.'); };
+const ESCAPES: Record<string, string> = { '"': '"', '\\': '\\', '/': '/', b: '\b', f: '\f', n: '\n', r: '\r', t: '\t' };
+
+/** A push parser shared by synchronous and asynchronous transport. Each feed is
+ * consumed synchronously, so escape-heavy tokens never incur per-character awaits.
+ * Only decoded schema-bounded strings are joined; no whole-source accumulation. */
+class JSONChunkParser {
+  private readonly stack: JSONFrame[] = [];
+  private root: unknown;
+  private complete = false;
+  private string: StringToken | undefined;
+  private primitive: string | undefined;
+  private readonly maxTokenChars: TokenLimit;
+  private readonly testing: ParserTesting | undefined;
+  constructor(maxTokenChars: TokenLimit, testing?: ParserTesting) { this.maxTokenChars = maxTokenChars; this.testing = testing; }
+  private path(): readonly string[] {
+    const frame = this.stack.at(-1);
+    return frame ? [...frame.path, frame.array ? '*' : frame.field] : [];
+  }
+  private accept(value: unknown): void {
+    const frame = this.stack.at(-1);
+    if (!frame) { if (this.complete) invalidJSON(); this.root = value; this.complete = true; return; }
+    if (frame.state !== 'value' && frame.state !== 'valueOrEnd') invalidJSON();
+    if (frame.array) (frame.value as unknown[]).push(value);
+    else Object.defineProperty(frame.value, frame.field, { configurable: true, enumerable: true, writable: true, value });
+    frame.state = 'commaOrEnd';
+  }
+  private close(): void { const frame = this.stack.pop()!; this.accept(frame.value); }
+  private startString(key: boolean): void {
+    const path = key ? this.stack.at(-1)!.path : this.path();
+    const limit = typeof this.maxTokenChars === 'number' ? this.maxTokenChars : this.maxTokenChars(path, key);
+    this.string = { key, limit, size: 0, pieces: [], pending: '', escape: false, unicode: undefined };
+  }
+  private append(value: string): void {
+    if (!value) return;
+    const token = this.string!;
+    token.size += value.length; if (token.size > token.limit) invalidJSON();
+    for (let offset = 0; offset < value.length;) {
+      const count = Math.min(16_384 - token.pending.length, value.length - offset);
+      token.pending += value.slice(offset, offset + count); offset += count;
+      if (token.pending.length === 16_384) { token.pieces.push(token.pending); token.pending = ''; }
     }
-    return invalid();
-  };
-  const value = (depth: number, path: readonly string[] = []): unknown => {
-    if (depth > 128) invalid();
-    space(); const char = peek();
-    if (char === '"') return string(path);
-    if (char === '{' || char === '[') {
-      take(); space();
-      const array = char === '['; const close = array ? ']' : '}';
-      const result: unknown[] | Record<string, unknown> = array ? [] : {};
-      if (peek() === close) { take(); return result; }
-      while (true) {
-        space(); let field = '';
-        if (!array) { field = string(path, true); space(); if (take() !== ':') invalid(); }
-        const child = value(depth + 1, [...path, array ? '*' : field]);
-        if (array) (result as unknown[]).push(child);
-        else Object.defineProperty(result, field, { configurable: true, enumerable: true, writable: true, value: child });
-        space(); const separator = take();
-        if (separator === close) return result;
-        if (separator !== ',') invalid();
+    this.testing?.onStringBuffers?.(token.pieces.length, token.pending.length, token.size);
+  }
+  private finishPrimitive(): void {
+    const primitive = this.primitive!; this.primitive = undefined;
+    if (!/^(?:true|false|null|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)$/.test(primitive)) invalidJSON();
+    this.accept(JSON.parse(primitive) as unknown);
+  }
+  feed(source: string): void {
+    let offset = 0;
+    const special = /["\\\u0000-\u001f]/g;
+    const delimiter = /[\x20\t\n\r,\]}]/g;
+    const nonspace = /[^\x20\t\n\r]/g;
+    while (offset < source.length) {
+      const token = this.string;
+      if (token) {
+        if (token.unicode !== undefined) {
+          const char = source[offset++]!;
+          if (!/[0-9a-f]/i.test(char)) invalidJSON();
+          token.unicode += char;
+          if (token.unicode.length === 4) { this.append(String.fromCharCode(Number.parseInt(token.unicode, 16))); token.unicode = undefined; }
+          continue;
+        }
+        if (token.escape) {
+          const char = source[offset++]!; token.escape = false;
+          if (char === 'u') token.unicode = '';
+          else { if (!Object.hasOwn(ESCAPES, char)) invalidJSON(); this.append(ESCAPES[char]!); }
+          continue;
+        }
+        special.lastIndex = offset;
+        const match = special.exec(source);
+        const end = match?.index ?? source.length;
+        this.append(source.slice(offset, end)); offset = end;
+        if (!match) continue;
+        const char = source[offset++]!;
+        if (char === '\\') { token.escape = true; continue; }
+        if (char !== '"') invalidJSON();
+        if (token.pending) token.pieces.push(token.pending);
+        const value = token.pieces.join(''); this.string = undefined;
+        if (token.key) { const frame = this.stack.at(-1)!; frame.field = value; frame.state = 'colon'; }
+        else this.accept(value);
+        continue;
       }
+      if (this.primitive !== undefined) {
+        delimiter.lastIndex = offset;
+        const match = delimiter.exec(source); const end = match?.index ?? source.length;
+        if (this.primitive.length + end - offset > 1_024) invalidJSON();
+        this.primitive += source.slice(offset, end); offset = end;
+        if (match) this.finishPrimitive();
+        continue;
+      }
+      nonspace.lastIndex = offset;
+      const next = nonspace.exec(source); if (!next) return;
+      offset = next.index;
+      const char = source[offset]!; const frame = this.stack.at(-1);
+      if (!frame && this.complete) invalidJSON();
+      if (frame?.state === 'commaOrEnd') {
+        if (char === (frame.array ? ']' : '}')) { offset++; this.close(); continue; }
+        if (char !== ',') invalidJSON();
+        frame.state = frame.array ? 'value' : 'key'; offset++; continue;
+      }
+      if (frame?.state === 'colon') {
+        if (char !== ':') invalidJSON(); frame.state = 'value'; offset++; continue;
+      }
+      if (frame && (frame.state === 'keyOrEnd' || frame.state === 'key')) {
+        if (char === '}' && frame.state === 'keyOrEnd') { offset++; this.close(); continue; }
+        if (char !== '"') invalidJSON(); this.startString(true); offset++; continue;
+      }
+      if (frame?.state === 'valueOrEnd' && char === ']') { offset++; this.close(); continue; }
+      if (char === '"') { this.startString(false); offset++; continue; }
+      if (char === '{' || char === '[') {
+        if (this.stack.length >= 128) invalidJSON();
+        const array = char === '['; const path = this.path();
+        this.stack.push({ array, path, value: array ? [] : {}, state: array ? 'valueOrEnd' : 'keyOrEnd', field: '' });
+        offset++; continue;
+      }
+      if (!/[tfn0-9-]/.test(char)) invalidJSON();
+      this.primitive = '';
     }
-    let primitive = '';
-    while (peek() && !/[\x20\t\n\r,\]}]/.test(peek())) { primitive += take(); if (primitive.length > 1_024) invalid(); }
-    if (!/^(?:true|false|null|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)$/.test(primitive)) invalid();
-    try { return JSON.parse(primitive) as unknown; } catch { return invalid(); }
-  };
-  const result = value(0); space(); if (peek()) invalid(); return result;
+  }
+  finish(): unknown {
+    if (this.primitive !== undefined) this.finishPrimitive();
+    if (this.string || this.stack.length || !this.complete) invalidJSON();
+    return this.root;
+  }
+}
+
+export function parseJSONChunks(chunks: readonly string[], maxTokenChars: TokenLimit, testing?: ParserTesting): unknown {
+  const parser = new JSONChunkParser(maxTokenChars, testing);
+  for (const chunk of chunks) parser.feed(chunk);
+  return parser.finish();
+}
+
+/** Consume one transport part at a time, releasing its source before requesting
+ * the next. The retained object is the decoded backup, not its serialized input. */
+export async function parseJSONChunksAsync(chunks: AsyncIterable<string>, maxTokenChars: TokenLimit, testing?: ParserTesting): Promise<unknown> {
+  const parser = new JSONChunkParser(maxTokenChars, testing);
+  for await (const chunk of chunks) parser.feed(chunk);
+  return parser.finish();
 }
 
 // Incremental SHA-256 provenance. Checkpoints contain digests rather than a second

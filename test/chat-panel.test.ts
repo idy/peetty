@@ -636,6 +636,30 @@ describe('chat frame sound activation', () => {
 });
 
 describe('chat panel clear recovery', () => {
+  it('announces successful replies while retaining an unrelated clear warning', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const namespace = 'reply-after-failed-clear';
+    const seed = new BrowserProfileStore(namespace); await seed.initialize(); t.after(() => seed.close());
+    await seed.storage(seed.activeProfileId).saveEntries([{ id: 'before-clear', role: 'user', text: 'Retain this history', createdAt: 1 }]);
+    const spoken: string[] = [];
+    const { panel, query, window } = await mountPanel(t, MODEL, { chat: { storageKey: namespace }, onReply: text => { spoken.push(text); } });
+    panel.open(false);
+    idb.fail('commit');
+    query<HTMLButtonElement>('.pc-clear').click(); query<HTMLButtonElement>('.pc-clear-now').click();
+    await eventually(() => !query('.pc-error').hidden);
+    t.mock.method(globalThis, 'fetch', async () => textReply(`Successful reply ${spoken.length + 1}`));
+    for (let turn = 1; turn <= 2; turn++) {
+      const input = query<HTMLTextAreaElement>('[name="message"]');
+      input.value = `Turn ${turn}`; input.dispatchEvent(new window.Event('input') as unknown as Event);
+      query<HTMLFormElement>('.pc-composer').requestSubmit();
+      await eventually(() => spoken.length === turn);
+      assert.equal(spoken.at(-1), `Successful reply ${turn}`);
+      assert.equal(query('.pc-announcement').textContent, `Successful reply ${turn}`);
+      assert.match(query('.pc-error').textContent!, /Could not clear conversation/);
+      assert.doesNotMatch(query('.pc-error').textContent!, /CORS|API URL/);
+    }
+    assert.match(query('.pc-messages').textContent!, /Retain this history/);
+  });
   it('restores the transcript and permits retry after a failed legacy history deletion', async (t) => {
     installChatIndexedDB(t);
     const namespace = 'panel-clear-legacy-race';

@@ -287,6 +287,35 @@ describe('Pet profile figure integration', () => {
     assert.equal(inspect.profileInfo(second.id)?.figure, 'miru');
   });
 
+  for (const failBeforeReady of [true, false]) {
+    it(`retains a successful pending SDK figure when its replacement fails ${failBeforeReady ? 'before' : 'after'} the panel is ready`, async (t) => {
+      installChatIndexedDB(t);
+      const namespace = `successful-pending-figure-${failBeforeReady}`;
+      const seeded = new BrowserProfileStore(namespace); await seeded.initialize({ figure: failBeforeReady ? 'riley' : 'miru' }); t.after(() => seeded.close());
+      const { pet, state, settle } = await mountProfileChatPet(t, { chat: { storageKey: namespace } });
+      const entered = deferred<void>(); const release = deferred<void>(); const failedResponse = deferred<Response>();
+      const initialize = BrowserProfileStore.prototype.initialize;
+      mock.method(BrowserProfileStore.prototype, 'initialize', async function(this: BrowserProfileStore, ...args: Parameters<typeof initialize>) {
+        await initialize.apply(this, args); entered.resolve(); await release.promise;
+      });
+      mock.method(globalThis, 'fetch', () => failedResponse.promise);
+      const opening = pet.openChat(); await entered.promise;
+      await pet.setFigure('elsie');
+      assert.equal(state.view.renderer.figure.id, 'elsie');
+      const replacing = pet.setFigure('/synthetic-failed-replacement.json');
+      const rejected = assert.rejects(replacing, /HTTP 503/);
+      if (failBeforeReady) { failedResponse.resolve(new Response('', { status: 503 })); await rejected; }
+      release.resolve(); await opening;
+      if (!failBeforeReady) { failedResponse.resolve(new Response('', { status: 503 })); await rejected; }
+      await settle();
+      const inspect = new BrowserProfileStore(namespace); await inspect.initialize(); t.after(() => inspect.close());
+      assert.equal(state.view.renderer.figure.id, 'elsie');
+      assert.equal(inspect.activeProfile.figure, 'elsie', 'the last successful artwork must reach its owning Profile');
+      await pet.configure();
+      assert.equal(state.view.renderer.figure.id, 'elsie');
+    });
+  }
+
   it('reconciles an SDK figure requested during panel construction into the initial owning profile', async (t) => {
     installChatIndexedDB(t);
     const namespace = 'sdk-figure-during-chat-loading';

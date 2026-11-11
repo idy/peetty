@@ -7,10 +7,6 @@ import { PROFILE_LIMITS } from './limits.ts';
 import { ChatStorageError } from './store.ts';
 
 const HISTORY_PREVIEW_CHARS = 4_000;
-// Bound retained File references and decoded input before any file bodies are read.
-// Multipart restores may exceed the 50 MiB per-file ceiling within these UI limits.
-const RESTORE_FILE_COUNT = 128;
-const RESTORE_TOTAL_BYTES = 256 * 1_024 * 1_024;
 
 function scheduleDownloadRevocation(url: string): Promise<void> {
   // This module-realm timer retains the URL and completion signal, never the Blob,
@@ -49,8 +45,8 @@ const COPY = {
     backupTitle: 'Backup and restore', backupHint: 'Download all profiles, characters, memories, conversations, providers and model settings. API keys are included in plain text; keep this file private.',
     backupWithoutCredentials: 'Download backup without credentials', backupWithoutCredentialsHint: 'Recovery option: keeps profiles, characters, memories, history and model settings, but omits API keys and authentication headers from all saved and session connections. Credential callbacks are not called. Reenter credentials after restore. Credentials typed into messages or memories are not removed.',
     backupFailed: 'Could not create the full backup. A credential callback may be unavailable or exceeded its 20-second deadline. Retry, or download a backup without credentials to recover your data.',
-    restoreLimits: 'Select at most 128 files totaling 256 MiB, with no file over 50 MiB.',
-    memorySaveFailed: 'Could not save this memory setting. The checkbox shows the current profile setting. Try again.',
+    restoreLimits: 'Each file must be 50 MiB or smaller. Backup parts are read sequentially; select every part together.',
+    memorySaveFailed: 'Could not save this memory setting to browser storage. The checkbox shows the last saved setting. Export unsaved changes before reloading to restore storage access, then retry.',
     memoryReloadFailed: 'The memory setting was saved, but the conversation could not reload. The checkbox shows the saved setting. Retry the setting or reload the page to recover.',
     backup: 'Download full backup', multipartDownloaded: 'All backup parts are ready. Keep every part together. To restore, select all parts at once.',
     multipartWorking: 'Downloading backup parts. Allow multiple downloads and keep every part. Larger backups download up to two parts per minute. To restore, select all parts at once.',
@@ -84,8 +80,8 @@ const COPY = {
     backupTitle: '备份与恢复', backupHint: '下载全部档案、角色、记忆、聊天、Provider 和模型设置。文件包含明文 API Key，请妥善保管。',
     backupWithoutCredentials: '下载不含连接凭据的备份', backupWithoutCredentialsHint: '恢复选项：保留档案、角色、记忆、聊天和模型设置，但省略全部已保存及会话连接的 API Key 和认证请求头，不调用密钥回调。恢复后需重新输入凭据。不会移除你写在聊天或记忆中的凭据。',
     backupFailed: '完整备份未能完成。密钥回调可能不可用或已超过 20 秒期限。请重试，或下载不含连接凭据的备份来恢复数据。',
-    restoreLimits: '最多选择 128 个文件，总计不超过 256 MiB，单个文件不超过 50 MiB。',
-    memorySaveFailed: '记忆设置未能保存。勾选框已显示当前档案设置，请重试。',
+    restoreLimits: '单个文件不超过 50 MiB。备份分卷按顺序读取，请一次选中全部分卷。',
+    memorySaveFailed: '记忆设置未能保存到浏览器存储。勾选框显示上次保存的设置，请先导出尚未保存的数据，再刷新页面恢复存储访问后重试。',
     memoryReloadFailed: '记忆设置已保存，但聊天未能重新加载。勾选框显示已保存的设置，请重试设置或刷新页面以恢复。',
     backup: '下载完整备份', multipartDownloaded: '全部备份分卷已准备下载。请保留全部分卷，恢复时一次选中所有分卷。',
     multipartWorking: '正在下载备份分卷。请允许浏览器下载多个文件并保留全部分卷。较大备份每分钟最多下载两个分卷。恢复时请一次选中所有分卷。',
@@ -374,6 +370,7 @@ export function createManagement(options: Options) {
     catch (error) {
       if (!destroyed) say(error instanceof ChatStorageError && error.code === 'profile-delete' ? 'profileDeleteFailed'
         : error instanceof ChatStorageError && error.code === 'privacy-delete' ? 'privacyDeleteFailed'
+        : error instanceof ChatStorageError && error.code === 'settings-save' ? 'memorySaveFailed'
         : error instanceof ChatStorageError && error.code === 'legacy-cleanup' ? 'legacyFailed' : typeof failure === 'function' ? failure() : failure, true);
     }
     finally {
@@ -739,31 +736,18 @@ export function createManagement(options: Options) {
       close();
     }
   }
-  function fileButton(profileId: string, key: CopyKey, action: (texts: string[]) => Promise<void>, multiple = false) {
+  function fileButton(profileId: string, key: CopyKey, action: (files: FileList, origin: HTMLInputElement) => Promise<void>, multiple = false) {
     const input = el('input'); input.type = 'file'; input.accept = '.json,application/json'; input.hidden = true; input.multiple = multiple;
     const trigger = button(key); trigger.dataset.focusKey = key; trigger.addEventListener('click', () => { if (!busy && owns(profileId, trigger)) input.click(); });
     input.addEventListener('change', () => {
       const selected = input.files;
-      const count = multiple ? selected?.length ?? 0 : Math.min(selected?.length ?? 0, 1);
-      if (!count) { input.value = ''; return; }
-      // Reject count before materializing the FileList; never retain an unbounded array.
-      const tooMany = count > RESTORE_FILE_COUNT;
-      const files = tooMany ? [] : Array.from({ length: count }, (_, index) => selected![index]!);
-      input.value = '';
-      let limitsExceeded = tooMany;
+      if (!selected?.length) { input.value = ''; return; }
       void run(profileId, input, async () => {
-        // Validate the complete selection before reading even the first body.
-        if (tooMany) throw new Error('Too many backup files.');
-        let total = 0;
-        for (const file of files) {
-          if (file.size > PROFILE_LIMITS.fileBytes || (total += file.size) > RESTORE_TOTAL_BYTES) {
-            limitsExceeded = true; throw new Error('Backup selection too large.');
-          }
-        }
-        const texts: string[] = [];
-        for (const file of files) { texts.push(await file.text()); requireOwner(profileId, input); }
-        await action(texts); if (!destroyed) refresh();
-      }, 'imported', () => limitsExceeded ? 'restoreLimits' : 'failed');
+        // Keep the original FileList: the store validates and reads backup parts
+        // sequentially without retaining every body or restricting valid archive totals.
+        try { await action(selected, input); if (!destroyed) refresh(); }
+        finally { input.value = ''; }
+      }, 'imported');
     });
     const group = el('div', 'pc-row-actions'); group.append(trigger, input); return group;
   }
@@ -804,13 +788,18 @@ export function createManagement(options: Options) {
     withoutCredentials.addEventListener('click', () => startBackup(withoutCredentials, true));
     page.append(backup, withoutCredentials, copy('p', 'backupWithoutCredentialsHint', 'pc-note'), cancelDownload,
       copy('p', 'restoreHint', 'pc-note'), copy('p', 'restoreLimits', 'pc-note'),
-      fileButton(profileId, 'restore', (texts) => transition(() => store.restoreFiles(texts)), true));
+      fileButton(profileId, 'restore', (files) => transition(() => store.restoreFileSelection(files)), true));
     page.append(copy('h4', 'memoryTitle'), copy('p', 'memoryHint', 'pc-note'));
     const actions = el('div', 'pc-row-actions'); const json = button('exportMemory'); const markdown = button('exportMarkdown');
     json.dataset.focusKey = 'exportMemory'; markdown.dataset.focusKey = 'exportMarkdown';
     json.addEventListener('click', () => { void run(profileId, json, async () => { download(await store.exportMemories(profileId), 'peetty-memories.json'); }, 'downloaded'); });
     markdown.addEventListener('click', () => { void run(profileId, markdown, async () => { download(await store.exportMemoryMarkdown(profileId), 'peetty-memories.md', 'text/markdown'); }, 'downloaded'); });
-    actions.append(json, markdown); page.append(actions, fileButton(profileId, 'importMemory', ([text]) => store.importMemories(profileId, text!)));
+    actions.append(json, markdown); page.append(actions, fileButton(profileId, 'importMemory', async (files, origin) => {
+      const file = files[0]!;
+      if (file.size > PROFILE_LIMITS.fileBytes) throw new Error('File too large.');
+      const text = await file.text(); requireOwner(profileId, origin);
+      await store.importMemories(profileId, text);
+    }));
     page.append(copy('h4', 'legacyTitle'), copy('p', 'legacyHint', 'pc-note'));
     const clearLegacy = button('clearLegacy', 'pc-link pc-danger'); clearLegacy.dataset.focusKey = 'clear-legacy';
     const legacyConfirmation = el('div', 'pc-row-actions'); legacyConfirmation.hidden = true;

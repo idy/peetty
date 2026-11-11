@@ -61,8 +61,8 @@ export interface StoredChat {
 
 /** Domain failures must not be mistaken for unavailable browser persistence. */
 export class ChatStorageError extends Error {
-  readonly code: 'missing-profile' | 'capacity' | 'stale-connection' | 'legacy-cleanup' | 'profile-delete' | 'privacy-delete';
-  constructor(code: 'missing-profile' | 'capacity' | 'stale-connection' | 'legacy-cleanup' | 'profile-delete' | 'privacy-delete', message: string) { super(message); this.code = code; this.name = 'ChatStorageError'; }
+  readonly code: 'missing-profile' | 'capacity' | 'stale-connection' | 'legacy-cleanup' | 'profile-delete' | 'privacy-delete' | 'settings-save';
+  constructor(code: 'missing-profile' | 'capacity' | 'stale-connection' | 'legacy-cleanup' | 'profile-delete' | 'privacy-delete' | 'settings-save', message: string) { super(message); this.code = code; this.name = 'ChatStorageError'; }
 }
 
 export interface HistoryProjection {

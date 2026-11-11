@@ -7,7 +7,7 @@ import { connectionIdentity, hasStoredCredentials, isCredentialHeader, normalize
 import { applyEntryChanges, entryChanges, sanitizeEntries } from './history.ts';
 import { fenceLegacyDatabase, openStateDatabase, stateTransaction } from './idb.ts';
 import { PROFILE_LIMITS } from './limits.ts';
-import { jsonChunks, jsonFingerprint, parseJSONChunks } from './bounded-json.ts';
+import { jsonChunks, jsonFingerprint, parseJSONChunks, parseJSONChunksAsync } from './bounded-json.ts';
 
 export { PROFILE_LIMITS } from './limits.ts';
 
@@ -39,6 +39,7 @@ export type ProfileInfo = Omit<ProfileRecord, 'entries' | 'memories' | 'connecti
 export interface BackupSession extends StoredSessionConnection { profileId: string }
 type BackupOptions = { sessions?: readonly BackupSession[]; omitCredentials?: boolean };
 export interface BackupDownloadFile { name: string; text: string; final?: boolean }
+export interface BackupRestoreFile { readonly size: number; text(): Promise<string> }
 type BackupDownloadOptions = Partial<BackupOptions> & { signal?: AbortSignal; _testing?: { fileBytes: number } };
 interface BackupPart { format: 'peetty-backup-part'; version: 1; backupId: string; index: number; count: number; digest: string; text: string }
 type Defaults = { name?: string; figure?: string | object; personality?: string };
@@ -99,6 +100,47 @@ function backupDigest(chunks: Iterable<string>): string {
     }
   }
   return `crc32:${((crc ^ 0xffffffff) >>> 0).toString(16).padStart(8, '0')}:${length}`;
+}
+/** Combine per-part CRCs in index order without rereading or retaining the part.
+ * The CRC processes two little-endian bytes per UTF-16 code unit, as above. */
+function combineBackupDigests(digests: Iterable<string>): string {
+  const times = (matrix: Uint32Array, vector: number) => {
+    let result = 0; let index = 0;
+    for (let bits = vector >>> 0; bits; bits >>>= 1) { if (bits & 1) result ^= matrix[index]!; index++; }
+    return result >>> 0;
+  };
+  const square = (matrix: Uint32Array) => Uint32Array.from({ length: 32 }, (_, i) => times(matrix, matrix[i]!));
+  const combine = (first: number, second: number, bytes: number) => {
+    if (!bytes) return first;
+    let odd = new Uint32Array(32); odd[0] = 0xedb88320;
+    for (let i = 1, row = 1; i < 32; i++, row <<= 1) odd[i] = row;
+    let even = square(odd); odd = square(even);
+    do {
+      even = square(odd); if (bytes % 2) first = times(even, first); bytes = Math.floor(bytes / 2);
+      if (!bytes) break;
+      odd = square(even); if (bytes % 2) first = times(odd, first); bytes = Math.floor(bytes / 2);
+    } while (bytes);
+    return (first ^ second) >>> 0;
+  };
+  let crc = 0; let length = 0;
+  for (const digest of digests) {
+    const fields = digest.split(':'); const count = Number(fields[2]);
+    check(Number.isSafeInteger(count) && count >= 0 && Number.isSafeInteger(length + count));
+    crc = combine(crc, Number.parseInt(fields[1]!, 16), count * 2); length += count;
+  }
+  return `crc32:${crc.toString(16).padStart(8, '0')}:${length}`;
+}
+function backupPartFrom(value: unknown, expectedCount: number): BackupPart {
+  const part = object(value, ['format', 'version', 'backupId', 'index', 'count', 'digest', 'text']);
+  check(part.format === 'peetty-backup-part' && part.version === 1);
+  check(Number.isSafeInteger(part.index) && Number.isSafeInteger(part.count));
+  const index = part.index as number; const count = part.count as number;
+  check(count > 1 && count === expectedCount && index >= 0 && index < count);
+  const digest = text(part.digest, 100);
+  check(/^crc32:[0-9a-f]{8}:[1-9][0-9]*$/.test(digest));
+  const chunk = text(part.text, PROFILE_LIMITS.fileBytes, true);
+  check(chunk.length > 0); // A valid exported chunk may consist entirely of whitespace inside a JSON string.
+  return { format: 'peetty-backup-part', version: 1, backupId: id(part.backupId), index, count, digest, text: chunk };
 }
 
 function check(condition: unknown, message = INVALID): asserts condition {
@@ -475,9 +517,10 @@ export class BrowserProfileStore {
   }
 
   /** Read/modify/write within ONE transaction; only dirty records are written, never a cached directory. */
-  private async run<T>(selection: readonly string[] | 'all', write: boolean, action: (draft: Draft) => T, durable = false): Promise<T> {
+  private async run<T>(selection: readonly string[] | 'all', write: boolean, action: (draft: Draft) => T, durable: boolean | 'settings' = false): Promise<T> {
     const db = await this.open();
-    if (durable && this.persist && !db) throw new ChatStorageError('privacy-delete', 'Could not delete this data. Restore browser storage and try again.');
+    if (durable && this.persist && !db) throw new ChatStorageError(durable === 'settings' ? 'settings-save' : 'privacy-delete', durable === 'settings'
+      ? 'Could not save memory settings. Restore browser storage and try again.' : 'Could not delete this data. Restore browser storage and try again.');
     let proof = this.legacyProof;
     let draft: Draft | undefined;
     let result!: T;
@@ -538,7 +581,8 @@ export class BrowserProfileStore {
         this.fail();
         // Privacy deletion cannot publish a RAM-only draft after a failed disk
         // commit. Keep prior archive, source links, barriers and sessions intact.
-        if (durable) throw new ChatStorageError('privacy-delete', 'Could not delete this data. Restore browser storage and try again.');
+        if (durable) throw new ChatStorageError(durable === 'settings' ? 'settings-save' : 'privacy-delete', durable === 'settings'
+          ? 'Could not save memory settings. Restore browser storage and try again.' : 'Could not delete this data. Restore browser storage and try again.');
       }
     }
     if (!completedAction) apply(this.state);
@@ -887,7 +931,10 @@ export class BrowserProfileStore {
   }
   async update(profileId: string, patch: SettingsInput): Promise<void> {
     const settings = settingsFrom(patch);
-    return this.queued([profileId], true, (draft) => {
+    const memorySettings = settings.useMemories !== undefined || settings.autoRemember !== undefined;
+    return this.enqueue(async () => {
+      this.ready();
+      return this.run([profileId], true, (draft) => {
       const profile = getRecord(draft, profileId).profile;
       const changed = (Object.keys(settings) as (keyof Settings)[]).some((field) => {
         const value = settings[field];
@@ -895,6 +942,7 @@ export class BrowserProfileStore {
           ? JSON.stringify(value) !== JSON.stringify(profile.figure) : value !== profile[field];
       });
       if (changed) Object.assign(touch(draft, profileId).profile, settings);
+      }, memorySettings ? 'settings' : false);
     });
   }
   remove(profileId: string): Promise<void> {
@@ -1281,6 +1329,48 @@ export class BrowserProfileStore {
     return this.restoreFiles([value]);
   }
 
+  /** Read files sequentially twice. Retain only file handles and envelope/checksum
+   * metadata between passes; never collect serialized parts into a source array. */
+  async restoreFileSelection(files: ArrayLike<BackupRestoreFile>): Promise<void> {
+    check(files != null && Number.isSafeInteger(files.length) && files.length > 0);
+    const references = Array.from(files);
+    for (const file of references) check(file && Number.isSafeInteger(file.size) && file.size >= 0 && file.size <= PROFILE_LIMITS.fileBytes && typeof file.text === 'function');
+    const read = async (file: BackupRestoreFile): Promise<unknown> => {
+      try { return parseJSON(await file.text()); } catch { throw new Error(INVALID); }
+    };
+    if (references.length === 1) {
+      const value = await read(references[0]!);
+      // A lone multipart envelope still fails through normal schema validation.
+      return this.restoreBackup(backupFrom(value));
+    }
+    type PartMetadata = Omit<BackupPart, 'text'> & { checksum: string; file: BackupRestoreFile };
+    const metadata: PartMetadata[] = [];
+    let identity: Pick<BackupPart, 'backupId' | 'count' | 'digest'> | undefined;
+    const indices = new Set<number>();
+    for (const file of references) {
+      const part = backupPartFrom(await read(file), references.length);
+      identity ??= { backupId: part.backupId, count: part.count, digest: part.digest };
+      check(part.backupId === identity.backupId && part.digest === identity.digest && part.count === identity.count && !indices.has(part.index));
+      indices.add(part.index);
+      metadata.push({ format: part.format, version: part.version, backupId: part.backupId, index: part.index, count: part.count,
+        digest: part.digest, checksum: backupDigest([part.text]), file });
+    }
+    metadata.sort((a, b) => a.index - b.index);
+    check(combineBackupDigests(metadata.map((part) => part.checksum)) === identity!.digest);
+    async function* chunks() {
+      for (const expected of metadata) {
+        const part = backupPartFrom(await read(expected.file), references.length);
+        check(part.backupId === expected.backupId && part.index === expected.index && part.count === expected.count && part.digest === expected.digest);
+        check(backupDigest([part.text]) === expected.checksum);
+        // The parser consumes this string synchronously, then releases it before
+        // requesting the next decoded file envelope from this generator.
+        yield part.text;
+      }
+    }
+    const value = await parseJSONChunksAsync(chunks(), backupTokenLimit);
+    return this.restoreBackup(backupFrom(value));
+  }
+
   async restoreFiles(texts: readonly string[]): Promise<void> {
     check(Array.isArray(texts) && texts.length > 0);
     // Each input retains the original file ceiling. Only a complete, consistent
@@ -1288,16 +1378,7 @@ export class BrowserProfileStore {
     const values = Array.from(texts, parseJSON);
     let value: unknown = values[0];
     if (values.length > 1 || (value && typeof value === 'object' && 'format' in value && value.format === 'peetty-backup-part')) {
-      const parts = values.map((item) => {
-        const part = object(item, ['format', 'version', 'backupId', 'index', 'count', 'digest', 'text']);
-        check(part.format === 'peetty-backup-part' && part.version === 1);
-        check(Number.isSafeInteger(part.index) && Number.isSafeInteger(part.count));
-        const index = part.index as number; const count = part.count as number;
-        check(count > 1 && count === values.length && index >= 0 && index < count);
-        const digest = text(part.digest, 100);
-        check(/^crc32:[0-9a-f]{8}:[1-9][0-9]*$/.test(digest));
-        return { backupId: id(part.backupId), index, count, digest, text: text(part.text, PROFILE_LIMITS.fileBytes) };
-      });
+      const parts = values.map((item) => backupPartFrom(item, values.length));
       const first = parts[0]!;
       check(parts.every((part) => part.backupId === first.backupId && part.count === first.count && part.digest === first.digest));
       check(new Set(parts.map((part) => part.index)).size === parts.length);
@@ -1306,7 +1387,10 @@ export class BrowserProfileStore {
       value = parseJSONChunks(chunks, backupTokenLimit);
     } else check(values.length === 1);
     // Validate EVERY reconstructed profile and session before enqueueing a mutation.
-    const backup = backupFrom(value);
+    return this.restoreBackup(backupFrom(value));
+  }
+
+  private restoreBackup(backup: Backup): Promise<void> {
     // Backup files carry credential values, never trusted SDK header classification.
     for (const profile of backup.profiles) if (profile.connection) delete profile.connection.nonCredentialHeaders;
     for (const session of backup.sessions ?? []) delete session.connection.nonCredentialHeaders;
