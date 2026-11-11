@@ -378,6 +378,32 @@ void main() {
     expect(state.position!.dx, greaterThanOrEqualTo(50));
   });
 
+  testWidgets('a steeply tilted host whose rows overflow the safe band still has room', (tester) async {
+    // 300x1300 at (700, 0) turned 60°: its height spans 650 screen units, more than the screen.
+    await tester.pumpWidget(MediaQuery(
+      data: const MediaQueryData(size: Size(800, 600)),
+      child: Directionality(
+        textDirection: TextDirection.ltr,
+        child: Stack(children: [
+          Positioned(
+            left: 700,
+            top: 0,
+            width: 300,
+            height: 1300,
+            child: Transform.rotate(
+              angle: math.pi / 3,
+              alignment: Alignment.topLeft,
+              child: Peetty(figureData: _miru, random: _seeded(), child: const SizedBox.expand()),
+            ),
+          ),
+        ]),
+      ),
+    ));
+    final state = _state(tester);
+    expect(await _until(tester, () => state.action != FigureState.fall && state.position != null), isTrue);
+    expect(state.position!.dy, 1300);
+  });
+
   testWidgets('pointer events reach the host over children that do not hit-test', (tester) async {
     await tester.pumpWidget(host(child: const SizedBox.expand()));
     await tester.pump();

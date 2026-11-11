@@ -273,13 +273,17 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
   Limits? _limits(RenderBox host) {
     final view = _view!;
     final size = host.size;
-    final insets = _insets(host);
-    final left = view.anchor.dx + insets.left;
-    final right = size.width - (view.width - view.anchor.dx) - insets.right;
-    final top = view.anchor.dy + insets.top;
-    final bottom = size.height - insets.bottom;
-    if (right < left || bottom < top) return null;
-    return Limits(left, right, top, bottom);
+    Limits? within(EdgeInsets insets) {
+      final left = view.anchor.dx + insets.left;
+      final right = size.width - (view.width - view.anchor.dx) - insets.right;
+      final top = view.anchor.dy + insets.top;
+      final bottom = size.height - insets.bottom;
+      return right < left || bottom < top ? null : Limits(left, right, top, bottom);
+    }
+
+    // A host tilted so far that no whole row or column fits inside the safe band
+    // keeps its full area, rather than leaving her nowhere to be.
+    return within(_insets(host)) ?? within(EdgeInsets.zero);
   }
 
   /// The safe-area insets that overlap the host, in host coordinates.
