@@ -7,6 +7,10 @@ import { PROFILE_LIMITS } from './limits.ts';
 import { ChatStorageError } from './store.ts';
 
 const HISTORY_PREVIEW_CHARS = 4_000;
+// Bound retained File references and decoded input before any file bodies are read.
+// Multipart restores may exceed the 50 MiB per-file ceiling within these UI limits.
+const RESTORE_FILE_COUNT = 128;
+const RESTORE_TOTAL_BYTES = 256 * 1_024 * 1_024;
 
 function scheduleDownloadRevocation(url: string): Promise<void> {
   // This module-realm timer retains the URL and completion signal, never the Blob,
@@ -43,12 +47,18 @@ const COPY = {
     edit: 'Edit', remove: 'Delete', confirm: 'Confirm deletion', cancel: 'Cancel', source: 'Source message', sourceMissing: 'Source message is no longer in history.',
     manual: 'Added or edited by you', automatic: 'Remembered from chat', you: 'You', companion: 'Companion', action: 'Action', more: 'Show more',
     backupTitle: 'Backup and restore', backupHint: 'Download all profiles, characters, memories, conversations, providers and model settings. API keys are included in plain text; keep this file private.',
+    backupWithoutCredentials: 'Download backup without credentials', backupWithoutCredentialsHint: 'Recovery option: keeps profiles, characters, memories, history and model settings, but omits API keys and authentication headers from all saved and session connections. Credential callbacks are not called. Reenter credentials after restore. Credentials typed into messages or memories are not removed.',
+    backupFailed: 'Could not create the full backup. A credential callback may be unavailable or exceeded its 20-second deadline. Retry, or download a backup without credentials to recover your data.',
+    restoreLimits: 'Select at most 128 files totaling 256 MiB, with no file over 50 MiB.',
+    memorySaveFailed: 'Could not save this memory setting. The checkbox shows the current profile setting. Try again.',
+    memoryReloadFailed: 'The memory setting was saved, but the conversation could not reload. The checkbox shows the saved setting. Retry the setting or reload the page to recover.',
     backup: 'Download full backup', multipartDownloaded: 'All backup parts are ready. Keep every part together. To restore, select all parts at once.',
     multipartWorking: 'Downloading backup parts. Allow multiple downloads and keep every part. Larger backups download up to two parts per minute. To restore, select all parts at once.',
     cancelDownload: 'Cancel remaining downloads', downloadCanceled: 'Backup download canceled. Previously downloaded parts are incomplete; start a new full backup to restore it.',
     legacyTitle: 'Previous-format data', legacyHint: 'Preserve pending work and upgrade pages running older Peetty releases before cleanup. Old clients stop saving; reloading a page pinned to an old version will not restore saving. This removes previous-format chat and key copies while keeping current profiles, conversations and connections.',
     clearLegacy: 'Delete previous-format copies', confirmLegacy: 'Permanently delete old chat and key copies', legacyCleared: 'Previous-format copies deleted. Current profiles are kept.',
     legacyFailed: 'Could not complete cleanup. Close other Peetty tabs, check browser storage, and try again.',
+    privacyDeleteFailed: 'Could not delete this data from browser storage. Your data has been kept. Export unsaved changes before reloading to restore storage access, then retry.',
     profileDeleteFailed: 'Could not delete this profile from browser storage. Your profile has been kept. Export unsaved changes before reloading to restore storage access, then retry.',
     restore: 'Restore backup', restoreHint: 'Restore creates independent profiles and keeps your existing data. Select the backup file, or all files of a multipart backup together. Connections are used only after you start chatting.',
     memoryTitle: 'Import and export memory', memoryHint: 'Only the selected profile’s memories. Source messages, conversation history and API keys are omitted.',
@@ -72,12 +82,18 @@ const COPY = {
     edit: '编辑', remove: '删除', confirm: '确认删除', cancel: '取消', source: '来源消息', sourceMissing: '来源消息已不在聊天历史中。',
     manual: '由你添加或修改', automatic: '从聊天中记住', you: '你', companion: '伙伴', action: '动作', more: '显示更多',
     backupTitle: '备份与恢复', backupHint: '下载全部档案、角色、记忆、聊天、Provider 和模型设置。文件包含明文 API Key，请妥善保管。',
+    backupWithoutCredentials: '下载不含连接凭据的备份', backupWithoutCredentialsHint: '恢复选项：保留档案、角色、记忆、聊天和模型设置，但省略全部已保存及会话连接的 API Key 和认证请求头，不调用密钥回调。恢复后需重新输入凭据。不会移除你写在聊天或记忆中的凭据。',
+    backupFailed: '完整备份未能完成。密钥回调可能不可用或已超过 20 秒期限。请重试，或下载不含连接凭据的备份来恢复数据。',
+    restoreLimits: '最多选择 128 个文件，总计不超过 256 MiB，单个文件不超过 50 MiB。',
+    memorySaveFailed: '记忆设置未能保存。勾选框已显示当前档案设置，请重试。',
+    memoryReloadFailed: '记忆设置已保存，但聊天未能重新加载。勾选框显示已保存的设置，请重试设置或刷新页面以恢复。',
     backup: '下载完整备份', multipartDownloaded: '全部备份分卷已准备下载。请保留全部分卷，恢复时一次选中所有分卷。',
     multipartWorking: '正在下载备份分卷。请允许浏览器下载多个文件并保留全部分卷。较大备份每分钟最多下载两个分卷。恢复时请一次选中所有分卷。',
     cancelDownload: '取消剩余下载', downloadCanceled: '备份下载已取消。此前下载的分卷不完整，请重新下载完整备份后再恢复。',
     legacyTitle: '旧格式数据', legacyHint: '清理前请先保留旧版 Peetty 网页中尚未保存的内容，并升级这些网页。旧版客户端将停止保存，刷新仍固定使用旧版的网页不能恢复保存功能。此操作删除旧格式聊天与密钥副本，当前档案、聊天和模型连接都会保留。',
     clearLegacy: '删除旧格式副本', confirmLegacy: '永久删除旧聊天与密钥副本', legacyCleared: '旧格式副本已删除，当前档案已保留。',
     legacyFailed: '暂时无法完成清理。请关闭其他 Peetty 标签页，并确认浏览器存储可用后重试。',
+    privacyDeleteFailed: '暂时无法从浏览器存储删除数据。当前数据已保留，请先导出尚未保存的数据，再刷新页面恢复存储访问后重试。',
     profileDeleteFailed: '暂时无法从浏览器存储删除档案。当前档案已保留，请先导出尚未保存的数据，再刷新页面恢复存储访问后重试。',
     restore: '恢复备份', restoreHint: '恢复为独立的新档案，保留现有数据。请选择备份文件，分卷备份需一次选中全部文件。只有你开始聊天后才会使用恢复的连接。',
     memoryTitle: '导入与导出记忆', memoryHint: '只包含当前档案的记忆，不包含来源消息、聊天历史或 API Key。',
@@ -99,7 +115,7 @@ interface Options {
   onReload: () => Promise<void>;
   onTab: (connection: boolean) => void;
   onBusy?: (busy: boolean) => void;
-  backup: (signal?: AbortSignal) => Promise<string | AsyncIterable<BackupDownloadFile>>;
+  backup: (signal?: AbortSignal, omitCredentials?: boolean) => Promise<string | AsyncIterable<BackupDownloadFile>>;
 }
 interface TextDraft {
   value: string;
@@ -348,7 +364,7 @@ export function createManagement(options: Options) {
     locked.clear();
     options.onBusy?.(false);
   }
-  async function run(id: string, origin: HTMLElement, action: () => Promise<void>, success: CopyKey | (() => CopyKey) = 'saved', failure: CopyKey = 'failed') {
+  async function run(id: string, origin: HTMLElement, action: () => Promise<void>, success: CopyKey | (() => CopyKey) = 'saved', failure: CopyKey | (() => CopyKey) = 'failed') {
     if (busy || !owns(id, origin)) return;
     busy = true;
     options.onBusy?.(true);
@@ -357,7 +373,8 @@ export function createManagement(options: Options) {
     try { await action(); if (!destroyed) say(typeof success === 'function' ? success() : success); }
     catch (error) {
       if (!destroyed) say(error instanceof ChatStorageError && error.code === 'profile-delete' ? 'profileDeleteFailed'
-        : error instanceof ChatStorageError && error.code === 'legacy-cleanup' ? 'legacyFailed' : failure, true);
+        : error instanceof ChatStorageError && error.code === 'privacy-delete' ? 'privacyDeleteFailed'
+        : error instanceof ChatStorageError && error.code === 'legacy-cleanup' ? 'legacyFailed' : typeof failure === 'function' ? failure() : failure, true);
     }
     finally {
       try {
@@ -591,7 +608,18 @@ export function createManagement(options: Options) {
       label.append(check, copy('span', key === 'useMemories' ? 'useMemory' : 'autoMemory')); page.append(label);
       check.addEventListener('change', () => {
         const checked = check.checked;
-        void run(profileId, check, async () => { await store.update(profileId, { [key]: checked }); await options.onReload(); });
+        if (busy || !owns(profileId, check)) { check.checked = store.profileInfo(profileId)?.[key] ?? info[key]; return; }
+        let saved = false;
+        void run(profileId, check, async () => {
+          try {
+            await store.update(profileId, { [key]: checked }); saved = true;
+            await options.onReload();
+          } finally {
+            // A failed write can leave the previous setting authoritative; a failed
+            // runtime reload can follow a successful write. Show the store in both cases.
+            if (!destroyed) refresh();
+          }
+        }, 'saved', () => saved ? 'memoryReloadFailed' : 'memorySaveFailed');
       });
     }
     page.append(copy('p', 'autoHint', 'pc-note'));
@@ -715,12 +743,27 @@ export function createManagement(options: Options) {
     const input = el('input'); input.type = 'file'; input.accept = '.json,application/json'; input.hidden = true; input.multiple = multiple;
     const trigger = button(key); trigger.dataset.focusKey = key; trigger.addEventListener('click', () => { if (!busy && owns(profileId, trigger)) input.click(); });
     input.addEventListener('change', () => {
-      const files = Array.from(input.files ?? []).slice(0, multiple ? undefined : 1); input.value = ''; if (!files.length) return;
+      const selected = input.files;
+      const count = multiple ? selected?.length ?? 0 : Math.min(selected?.length ?? 0, 1);
+      if (!count) { input.value = ''; return; }
+      // Reject count before materializing the FileList; never retain an unbounded array.
+      const tooMany = count > RESTORE_FILE_COUNT;
+      const files = tooMany ? [] : Array.from({ length: count }, (_, index) => selected![index]!);
+      input.value = '';
+      let limitsExceeded = tooMany;
       void run(profileId, input, async () => {
-        // Check every part before reading any, so an oversized later part does not allocate earlier bodies.
-        if (files.some(file => file.size > PROFILE_LIMITS.fileBytes)) throw new Error('File too large.');
-        const texts = await Promise.all(files.map(file => file.text())); requireOwner(profileId, input); await action(texts); if (!destroyed) refresh();
-      }, 'imported');
+        // Validate the complete selection before reading even the first body.
+        if (tooMany) throw new Error('Too many backup files.');
+        let total = 0;
+        for (const file of files) {
+          if (file.size > PROFILE_LIMITS.fileBytes || (total += file.size) > RESTORE_TOTAL_BYTES) {
+            limitsExceeded = true; throw new Error('Backup selection too large.');
+          }
+        }
+        const texts: string[] = [];
+        for (const file of files) { texts.push(await file.text()); requireOwner(profileId, input); }
+        await action(texts); if (!destroyed) refresh();
+      }, 'imported', () => limitsExceeded ? 'restoreLimits' : 'failed');
     });
     const group = el('div', 'pc-row-actions'); group.append(trigger, input); return group;
   }
@@ -730,13 +773,14 @@ export function createManagement(options: Options) {
     const backup = button('backup', 'pc-primary'); backup.classList.add('pc-backup'); backup.dataset.focusKey = 'backup';
     const cancelDownload = button('cancelDownload'); cancelDownload.hidden = true; cancelDownload.dataset.cancelDownload = '';
     cancelDownload.addEventListener('click', () => activeDownload?.abort());
-    backup.addEventListener('click', () => {
+    const withoutCredentials = button('backupWithoutCredentials'); withoutCredentials.dataset.focusKey = 'backup-without-credentials';
+    function startBackup(origin: HTMLButtonElement, omitCredentials = false) {
       let multipart = false;
       let canceled = false;
-      void run(profileId, backup, async () => {
+      void run(profileId, origin, async () => {
         const controller = new AbortController(); activeDownload = controller; cancelDownload.hidden = false;
         try {
-          const pending = options.backup(controller.signal);
+          const pending = options.backup(controller.signal, omitCredentials);
           // Cancellation can precede snapshot creation. Close an eventual unused producer too.
           void pending.then(result => {
             if (controller.signal.aborted && typeof result !== 'string') {
@@ -744,7 +788,7 @@ export function createManagement(options: Options) {
             }
           }, () => {});
           const result = await untilCanceled(pending, controller.signal);
-          if (typeof result === 'string') download(result, `peetty-backup-${new Date().toISOString().slice(0, 10)}.json`);
+          if (typeof result === 'string') download(result, `peetty-backup${omitCredentials ? '-without-credentials' : ''}-${new Date().toISOString().slice(0, 10)}.json`);
           else { multipart = true; say('multipartWorking'); await downloadParts(result, controller.signal); }
         } catch (error) {
           if (!controller.signal.aborted) throw error;
@@ -754,9 +798,13 @@ export function createManagement(options: Options) {
           if (activeDownload === controller) activeDownload = undefined;
           cancelDownload.hidden = true;
         }
-      }, () => canceled ? 'downloadCanceled' : multipart ? 'multipartDownloaded' : 'downloaded');
-    });
-    page.append(backup, cancelDownload, copy('p', 'restoreHint', 'pc-note'), fileButton(profileId, 'restore', (texts) => transition(() => store.restoreFiles(texts)), true));
+      }, () => canceled ? 'downloadCanceled' : multipart ? 'multipartDownloaded' : 'downloaded', omitCredentials ? 'failed' : 'backupFailed');
+    }
+    backup.addEventListener('click', () => startBackup(backup));
+    withoutCredentials.addEventListener('click', () => startBackup(withoutCredentials, true));
+    page.append(backup, withoutCredentials, copy('p', 'backupWithoutCredentialsHint', 'pc-note'), cancelDownload,
+      copy('p', 'restoreHint', 'pc-note'), copy('p', 'restoreLimits', 'pc-note'),
+      fileButton(profileId, 'restore', (texts) => transition(() => store.restoreFiles(texts)), true));
     page.append(copy('h4', 'memoryTitle'), copy('p', 'memoryHint', 'pc-note'));
     const actions = el('div', 'pc-row-actions'); const json = button('exportMemory'); const markdown = button('exportMarkdown');
     json.dataset.focusKey = 'exportMemory'; markdown.dataset.focusKey = 'exportMarkdown';

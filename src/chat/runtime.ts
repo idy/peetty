@@ -152,6 +152,7 @@ export class ChatRuntime {
   private savedConnection: StoredConnection | undefined;
   private history: ChatEntry[] = [];
   private currentError: string | null = null;
+  private clearFailed = false;
   private replyId: string | undefined;
   private storageFailed = false;
   private active: Run | undefined;
@@ -195,7 +196,9 @@ export class ChatRuntime {
   /** Only a reply produced by this runtime's latest turn, never one imported from another tab. */
   get reply(): ChatEntry | undefined { return this.history.find((entry) => entry.id === this.replyId); }
   get busy(): boolean { return this.active !== undefined; }
-  get error(): string | null { return this.currentError; }
+  get error(): string | null { return this.currentError ?? this.clearError; }
+  /** A failed deletion remains visible even when a later model error owns error. */
+  get clearError(): string | null { return this.clearFailed ? CLEAR_HISTORY_FAILED : null; }
   get persistenceWarning(): boolean { return this.storageFailed || this.storage.persistenceWarning; }
 
   private changed(): void {
@@ -672,8 +675,11 @@ export class ChatRuntime {
     const saving = this.persist(() => this.storage.clearEntries());
     const clearing = saving.then((saved) => {
       if (!saved && this.options.chat?.persist !== false) throw new Error('Clear failed.');
-      if (owner === this.clearOwner) { this.clearSnapshot = undefined; this.pendingHistory.clear(); }
-      else this.clearSnapshot = { entries: [], pending: new Map(), changed: new Set(), replyId: undefined, historyTouched: true, revision: this.revision };
+      if (owner === this.clearOwner) { this.clearSnapshot = undefined; this.pendingHistory.clear(); this.clearFailed = false; }
+      else {
+        this.clearFailed = false;
+        this.clearSnapshot = { entries: [], pending: new Map(), changed: new Set(), replyId: undefined, historyTouched: true, revision: this.revision };
+      }
     }).catch(async () => {
       if (owner !== this.clearOwner || this.destroyed) return;
       const snapshot = this.clearSnapshot;
@@ -686,7 +692,7 @@ export class ChatRuntime {
       }
       this.clearSnapshot = undefined;
       this.historySave = undefined;
-      if (!snapshot || snapshot.revision === this.revision) this.currentError = CLEAR_HISTORY_FAILED;
+      this.clearFailed = true;
       this.changed();
       if (snapshot && !snapshot.historyTouched) {
         // A clear may fail before the first load completed, when the optimistic

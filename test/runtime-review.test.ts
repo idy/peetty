@@ -774,6 +774,76 @@ describe('input acceptance after preflight', () => {
 });
 
 describe('owned clear failure recovery', () => {
+  for (const newerError of [false, true]) {
+    it(`reports failed clear independently after model replacement with newer error ${newerError}`, async (t) => {
+      const storage = new MemoryChatStorage({ entries: [entry('before-clear', 'Retained transcript')] });
+      const started = deferred<void>(); const release = deferred<void>();
+      let fail = true;
+      t.mock.method(storage, 'clearEntries', async () => {
+        if (!fail) { storage.state.entries = []; return; }
+        started.resolve(); await release.promise;
+        throw new ChatStorageError('privacy-delete', 'Could not delete this data. Restore browser storage and try again.');
+      });
+      let changes = 0;
+      const runtime = createRuntime(t, { model: MODEL, storage, onChange: () => { changes++; } });
+      await runtime.initialize();
+      const clearing = runtime.clear(); await started.promise;
+      const replacement = { ...MODEL, id: 'replacement-model' };
+      await runtime.setModel(replacement);
+      if (newerError) await assert.rejects(runtime.setModel({ ...replacement, baseUrl: 'invalid' }), /valid API base URL/u);
+      const changesBeforeFailure = changes;
+      release.resolve(); await clearing;
+      assert.deepEqual(runtime.entries.map((value) => value.text), ['Retained transcript']);
+      assert.deepEqual(storage.state.entries.map((value) => value.text), ['Retained transcript']);
+      assert.equal(runtime.model!.id, 'replacement-model');
+      assert.equal(runtime.clearError, 'Could not clear conversation. Close other tabs and try again.');
+      assert.equal(runtime.error, newerError ? 'Enter a valid API base URL and model ID.' : runtime.clearError);
+      assert.ok(changes > changesBeforeFailure);
+      if (newerError) {
+        await runtime.setModel(replacement);
+        assert.equal(runtime.error, runtime.clearError, 'clearing the model error must reveal the retained clear failure');
+      }
+      fail = false;
+      await runtime.clear();
+      assert.deepEqual(runtime.entries, []);
+      assert.equal(runtime.error, null);
+      assert.equal(runtime.clearError, null);
+    });
+  }
+
+  it('restores history and reports a real aborted clear across a concurrent model change, then succeeds after reload', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const namespace = 'runtime-durable-clear-abort';
+    const manager = await profileStore(t, namespace); const id = manager.activeProfileId;
+    await manager.storage(id).saveEntries([entry('committed', 'Disk transcript')]);
+    const started = deferred<void>(); const release = deferred<void>();
+    const seam = manager as unknown as { run: (...args: unknown[]) => Promise<unknown> };
+    const run = seam.run.bind(manager); let once = true;
+    t.mock.method(seam, 'run', async (...args: unknown[]) => {
+      if (once && args[3] === true) { once = false; started.resolve(); await release.promise; idb.fail('commit'); }
+      return run(...args);
+    });
+    const runtime = createRuntime(t, { model: MODEL, storage: manager.runtimeStorage(id) });
+    await runtime.initialize();
+    const clearing = runtime.clear(); await started.promise;
+    await runtime.setModel({ ...MODEL, id: 'new-model' });
+    release.resolve(); await clearing;
+    assert.deepEqual(runtime.entries.map((value) => value.text), ['Disk transcript']);
+    assert.equal(runtime.error, runtime.clearError);
+    assert.ok(runtime.clearError);
+    assert.equal(runtime.persistenceWarning, true);
+    idb.fail('none');
+    await runtime.clear();
+    assert.deepEqual(runtime.entries.map((value) => value.text), ['Disk transcript'], 'sticky failed manager must not report a RAM-only retry as deletion');
+    const reopened = await profileStore(t, namespace);
+    assert.deepEqual(reopened.historyPage(id, '', 10).entries.map((value) => value.text), ['Disk transcript']);
+    const retry = createRuntime(t, { model: MODEL, storage: reopened.runtimeStorage(id) });
+    await retry.initialize(); await retry.clear();
+    assert.equal(retry.clearError, null);
+    assert.deepEqual(retry.entries, []);
+    assert.equal((await profileStore(t, namespace)).profileInfo(id)!.entryCount, 0);
+  });
+
   for (const initialized of [false, true]) {
     it(`restores real history after failed legacy CAS with runtime initialized ${initialized} and permits retry`, async (t) => {
       const idb = installChatIndexedDB(t);

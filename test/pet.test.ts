@@ -170,6 +170,39 @@ async function mountProfileChatPet(t: Parameters<typeof installPetDOM>[0], optio
 }
 
 describe('Pet profile figure integration', () => {
+  for (const interruption of ['ready', 'superseded', 'destroyed', 'failed'] as const) {
+    it(`applies and settles a figure before stalled chat initialization is ${interruption}`, async (t) => {
+      const module = deferred<{ createChatPanel: typeof createChatPanel }>();
+      const entered = deferred<void>();
+      const updates: (string | object)[] = [];
+      const panel = { ...chatPanelStub(), async setFigure(figure: string | object) { updates.push(figure); } };
+      const IsolatedPeetty = await petWithChatLoader(() => { entered.resolve(); return module.promise; });
+      const dom = installPetDOM(t);
+      const pet = new IsolatedPeetty({ greet: false }); dom.cleanup(() => pet.destroy());
+      await pet.mount();
+      const opening = pet.openChat(); await entered.promise;
+      const changing = pet.setFigure('elsie');
+      for (let i = 0; i < 100 && controller(pet).figure.id !== 'elsie'; i++) await Promise.resolve();
+      assert.equal(controller(pet).figure.id, 'elsie', 'loaded artwork is independent of the stalled module');
+      const settled = await Promise.race([changing.then(() => true), new Promise<false>((resolve) => setImmediate(() => resolve(false)))]);
+      assert.equal(settled, true, 'setFigure must not retain a chat-loading wait');
+      if (interruption === 'superseded') await pet.setFigure('koharu');
+      if (interruption === 'destroyed') pet.destroy();
+      if (interruption === 'failed') module.reject(new Error('Synthetic chat module failure'));
+      else module.resolve({ createChatPanel: async () => panel });
+      await opening;
+      if (interruption === 'destroyed') {
+        assert.deepEqual(updates, []); assert.equal(pet.mounted, false);
+      } else if (interruption === 'failed') {
+        assert.deepEqual(updates, []); assert.equal(controller(pet).figure.id, 'elsie');
+      } else {
+        const expected = interruption === 'superseded' ? 'koharu' : 'elsie';
+        assert.equal(controller(pet).figure.id, expected);
+        assert.deepEqual(updates, [expected], 'only the newest selection reconciles into the panel');
+        assert.equal(panel.isOpen, true);
+      }
+    });
+  }
   it('restores skipped saved artwork after an SDK request fails during panel construction', async (t) => {
     installChatIndexedDB(t);
     const namespace = 'sdk-figure-init-failed-restore';

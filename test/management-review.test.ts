@@ -21,7 +21,7 @@ async function mount(t: TestContext, options: {
   onSelect?: () => Promise<void>;
   onReload?: () => Promise<void>;
   onBusy?: (busy: boolean) => void;
-  backup?: (signal?: AbortSignal) => Promise<string | AsyncIterable<BackupDownloadFile>>;
+  backup?: (signal?: AbortSignal, omitCredentials?: boolean) => Promise<string | AsyncIterable<BackupDownloadFile>>;
 } = {}) {
   const window = new Window({ url: 'https://host.example/' });
   const document = window.document as unknown as Document;
@@ -147,6 +147,23 @@ describe('multipart backup UI', () => {
     });
   }
 
+  it('discloses the credential-free route and cancels its pending snapshot without downloading late data', async (t) => {
+    installChatIndexedDB(t); const pending = deferred<string>(); let signal: AbortSignal | undefined;
+    const ui = await mount(t, { backup: async (received, omitCredentials) => { assert.equal(omitCredentials, true); signal = received; return pending.promise; } });
+    ui.tab('data');
+    assert.match(ui.root.textContent!, /Credential callbacks are not called/);
+    assert.match(ui.root.textContent!, /Credentials typed into messages or memories are not removed/);
+    const create = t.mock.method(URL, 'createObjectURL', () => 'blob:late-recovery');
+    ui.click('Download backup without credentials'); await flush();
+    assert.equal(signal?.aborted, false);
+    ui.click('Cancel remaining downloads'); await flush();
+    assert.equal(signal?.aborted, true); assert.equal(ui.query<HTMLButtonElement>('[data-focus-key="backup-without-credentials"]').disabled, false);
+    assert.match(ui.query('.pc-manage-status').textContent!, /canceled.*incomplete/);
+    pending.resolve('synthetic late recovery archive'); await flush(); assert.equal(create.mock.callCount(), 0);
+    ui.language('zh'); assert.match(ui.root.textContent!, /省略全部已保存及会话连接的 API Key 和认证请求头/);
+    assert.match(ui.root.textContent!, /恢复后需重新输入凭据/);
+  });
+
   it('requests producer closure promptly when cancellation interrupts a pending next()', async (t) => {
     installChatIndexedDB(t); const next = deferred<IteratorResult<BackupDownloadFile>>(); let returned = 0;
     const producer: AsyncIterable<BackupDownloadFile> = { [Symbol.asyncIterator]: () => ({ next: () => next.promise, return: async () => { returned++; return { done: true, value: undefined }; } }) };
@@ -171,6 +188,37 @@ describe('multipart backup UI', () => {
     assert.equal(restore.mock.callCount(), 1);
     assert.deepEqual(restore.mock.calls[0]!.arguments[0], ['first fixture part', 'second fixture part']);
     assert.equal(ui.query<HTMLInputElement>('input[type="file"]:not([multiple])').multiple, false);
+    assert.match(ui.query('.pc-manage-status').textContent!, /Import complete/);
+  });
+
+  for (const invalid of ['count', 'aggregate'] as const) {
+    it(`rejects an excessive restore ${invalid} before reading bodies or materializing an unbounded file list`, async (t) => {
+      installChatIndexedDB(t); const ui = await mount(t); ui.tab('data');
+      let reads = 0; let accesses = 0;
+      const file = { size: 50 * 1_024 * 1_024, text: async () => { reads++; return '{}'; } };
+      const selected = invalid === 'count'
+        ? new Proxy({ length: 129 }, { get(target, key) { if (key === 'length') return target.length; accesses++; throw new Error('Unbounded FileList accessed'); } })
+        : Array.from({ length: 6 }, () => file);
+      const input = ui.query<HTMLInputElement>('input[type="file"][multiple]');
+      Object.defineProperty(input, 'files', { configurable: true, value: selected });
+      const restore = t.mock.method(ui.store, 'restoreFiles', async (_texts: readonly string[]) => {});
+      input.dispatchEvent(new ui.window.Event('change') as unknown as Event); await flush();
+      assert.equal(reads, 0); assert.equal(accesses, 0); assert.equal(restore.mock.callCount(), 0);
+      assert.match(ui.query('.pc-manage-status').textContent!, /128 files totaling 256 MiB/);
+      assert.equal(ui.query('.pc-manage-status').hasAttribute('data-error'), true);
+      assert.equal(ui.query<HTMLButtonElement>('[data-focus-key="restore"]').disabled, false);
+    });
+  }
+
+  it('accepts multipart selections larger than 50 MiB within the aggregate bound', async (t) => {
+    installChatIndexedDB(t); const ui = await mount(t); ui.tab('data');
+    let reads = 0;
+    const files = Array.from({ length: 2 }, (_, index) => ({ size: 40 * 1_024 * 1_024, text: async () => { reads++; return `fixture part ${index}`; } }));
+    const restore = t.mock.method(ui.store, 'restoreFiles', async (_texts: readonly string[]) => {});
+    const input = ui.query<HTMLInputElement>('input[type="file"][multiple]');
+    Object.defineProperty(input, 'files', { configurable: true, value: files });
+    input.dispatchEvent(new ui.window.Event('change') as unknown as Event); await flush();
+    assert.equal(reads, 2); assert.deepEqual(restore.mock.calls[0]!.arguments[0], ['fixture part 0', 'fixture part 1']);
     assert.match(ui.query('.pc-manage-status').textContent!, /Import complete/);
   });
 
@@ -523,6 +571,57 @@ describe('management profile ownership', () => {
     await ui.select(secondId); oldEditor.value = 'Wrongly applied memory'; oldForm.dispatchEvent(new ui.window.Event('submit', { cancelable: true }) as unknown as Event); await flush();
     assert.equal(ui.store.memoryPage(firstId, '', 30).entries[0]!.text, 'Original A memory'); assert.equal(ui.store.profileInfo(secondId)!.memoryCount, 0);
     assert.equal(ui.root.querySelector('.pc-record'), null); assert.equal(ui.query<HTMLSelectElement>('.pc-profile-select').value, secondId);
+  });
+
+  for (const setting of ['useMemories', 'autoRemember'] as const) {
+    it(`reconciles ${setting} after failed writes and failed reloads, then recovers on retry`, async (t) => {
+      installChatIndexedDB(t);
+      let rejectReload = false; let reloads = 0;
+      const ui = await mount(t, { onReload: async () => { reloads++; if (rejectReload) throw new Error('Synthetic reload failure'); } });
+      const original = ui.store.profileInfo(ui.store.activeProfileId)![setting];
+      const update = ui.store.update.bind(ui.store); let rejectWrite = true;
+      t.mock.method(ui.store, 'update', async (...args: Parameters<BrowserProfileStore['update']>) => {
+        if (rejectWrite) throw new Error('Synthetic update failure');
+        await update(...args);
+      });
+      ui.tab('memory');
+      const change = () => {
+        const check = ui.query<HTMLInputElement>(`[data-setting="${setting}"]`);
+        check.checked = !original; check.dispatchEvent(new ui.window.Event('change') as unknown as Event);
+      };
+      change(); await flush();
+      assert.equal(ui.query<HTMLInputElement>(`[data-setting="${setting}"]`).checked, original);
+      assert.equal(reloads, 0); assert.match(ui.query('.pc-manage-status').textContent!, /Could not save this memory setting/);
+      rejectWrite = false; rejectReload = true;
+      change(); await flush();
+      assert.equal(ui.store.profileInfo(ui.store.activeProfileId)![setting], !original);
+      assert.equal(ui.query<HTMLInputElement>(`[data-setting="${setting}"]`).checked, !original);
+      assert.match(ui.query('.pc-manage-status').textContent!, /was saved.*could not reload/);
+      assert.equal(ui.query<HTMLInputElement>(`[data-setting="${setting}"]`).disabled, false);
+      rejectReload = false;
+      change(); await flush();
+      assert.equal(reloads, 2); assert.match(ui.query('.pc-manage-status').textContent!, /Changes saved/);
+      ui.management.show(false); ui.management.show(true);
+      assert.equal(ui.query<HTMLInputElement>(`[data-setting="${setting}"]`).checked, !original, 'authoritative setting survives reopening');
+    });
+  }
+
+  it('localizes failed verified deletion and retains the memory for retry', async (t) => {
+    installChatIndexedDB(t);
+    const ui = await mount(t, { seed: async store => { await store.saveMemory(store.activeProfileId, { text: 'Keep this recovery memory' }); } });
+    const remove = ui.store.removeMemory.bind(ui.store); let reject = true;
+    t.mock.method(ui.store, 'removeMemory', async (...args: Parameters<BrowserProfileStore['removeMemory']>) => {
+      if (reject) throw new ChatStorageError('privacy-delete', 'Synthetic private storage error');
+      await remove(...args);
+    });
+    ui.tab('memory'); ui.click('Delete'); ui.click('Confirm deletion'); await flush();
+    assert.match(ui.query('.pc-record-list').textContent!, /Keep this recovery memory/);
+    assert.match(ui.query('.pc-manage-status').textContent!, /data has been kept.*Export unsaved changes before reloading/);
+    assert.doesNotMatch(ui.query('.pc-manage-status').textContent!, /Synthetic|CORS/);
+    ui.language('zh'); assert.match(ui.query('.pc-manage-status').textContent!, /当前数据已保留.*导出尚未保存的数据/);
+    reject = false; ui.click('确认删除'); await flush();
+    assert.equal(ui.root.querySelector('.pc-record'), null);
+    assert.equal(ui.query('.pc-manage-status').hasAttribute('data-error'), false);
   });
 
   it('shows committed history edits and deletion even when runtime reload rejects', async (t) => {

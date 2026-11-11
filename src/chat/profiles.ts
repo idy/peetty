@@ -37,7 +37,7 @@ export interface ProfileRecord {
 
 export type ProfileInfo = Omit<ProfileRecord, 'entries' | 'memories' | 'connection'> & { memoryCount: number; entryCount: number };
 export interface BackupSession extends StoredSessionConnection { profileId: string }
-type BackupOptions = { sessions: readonly BackupSession[] };
+type BackupOptions = { sessions?: readonly BackupSession[]; omitCredentials?: boolean };
 export interface BackupDownloadFile { name: string; text: string; final?: boolean }
 type BackupDownloadOptions = Partial<BackupOptions> & { signal?: AbortSignal; _testing?: { fileBytes: number } };
 interface BackupPart { format: 'peetty-backup-part'; version: 1; backupId: string; index: number; count: number; digest: string; text: string }
@@ -475,8 +475,9 @@ export class BrowserProfileStore {
   }
 
   /** Read/modify/write within ONE transaction; only dirty records are written, never a cached directory. */
-  private async run<T>(selection: readonly string[] | 'all', write: boolean, action: (draft: Draft) => T): Promise<T> {
+  private async run<T>(selection: readonly string[] | 'all', write: boolean, action: (draft: Draft) => T, durable = false): Promise<T> {
     const db = await this.open();
+    if (durable && this.persist && !db) throw new ChatStorageError('privacy-delete', 'Could not delete this data. Restore browser storage and try again.');
     let proof = this.legacyProof;
     let draft: Draft | undefined;
     let result!: T;
@@ -533,7 +534,12 @@ export class BrowserProfileStore {
           });
       });
       if (domainError) throw domainError;
-      if (!ok) this.fail();
+      if (!ok) {
+        this.fail();
+        // Privacy deletion cannot publish a RAM-only draft after a failed disk
+        // commit. Keep prior archive, source links, barriers and sessions intact.
+        if (durable) throw new ChatStorageError('privacy-delete', 'Could not delete this data. Restore browser storage and try again.');
+      }
     }
     if (!completedAction) apply(this.state);
     this.state = { directory: draft!.directory, records: draft!.records };
@@ -544,11 +550,12 @@ export class BrowserProfileStore {
   }
 
   private ready(): void { check(this.initialized, 'Initialize profile storage first.'); }
-  private queued<T>(selection: readonly string[], write: boolean, action: (draft: Draft) => T, privacyMutation = false): Promise<T> {
+  private queued<T>(selection: readonly string[], write: boolean, action: (draft: Draft) => T, privacyMutation = false, durable = false): Promise<T> {
     return this.enqueue(async () => {
       this.ready();
+      if (durable && this.persist && this.failed) throw new ChatStorageError('privacy-delete', 'Could not delete this data. Restore browser storage and try again.');
       if (privacyMutation) await this.reconcileLegacy(true, 'history');
-      return this.run(selection, write, action);
+      return this.run(selection, write, action, durable);
     });
   }
 
@@ -1103,15 +1110,17 @@ export class BrowserProfileStore {
         if (closing) return;
         await this.enqueue(async () => {
           this.ready();
+          if (this.persist && this.failed) throw new ChatStorageError('privacy-delete', 'Could not delete this data. Restore browser storage and try again.');
           await this.reconcileLegacy(true, 'history');
-          await this.run([profileId], true, (draft) => {
+          const clearedEpoch = await this.run([profileId], true, (draft) => {
             const record = touchMemories(draft, profileId);
             detachSources(record.profile, record.profile.entries);
             record.profile.entries = [];
             record.epoch = freshId();
-            epoch = record.epoch;
-            snapshot = [];
-          });
+            return record.epoch;
+          }, true);
+          epoch = clearedEpoch;
+          snapshot = [];
         });
       },
       // A runtime owns this adapter only; queued writes finish and session state belongs to the manager.
@@ -1160,7 +1169,7 @@ export class BrowserProfileStore {
       const profile = touch(draft, profileId).profile;
       check(profile.memories.some((memory) => memory.id === memoryId), MISSING);
       profile.memories = profile.memories.filter((memory) => memory.id !== memoryId);
-    });
+    }, false, true);
   }
   async editEntry(profileId: string, entryId: string, body: string): Promise<void> {
     const copy = text(body, PROFILE_LIMITS.entryText);
@@ -1182,7 +1191,7 @@ export class BrowserProfileStore {
       check(entry, MISSING);
       detachSources(record.profile, [entry]);
       record.profile.entries = record.profile.entries.filter((value) => value.id !== entryId);
-    }, true);
+    }, true, true);
   }
 
   /** Bounded legacy API. UI downloads use backupDownload to preserve larger archives. */
@@ -1233,6 +1242,10 @@ export class BrowserProfileStore {
   private async backupSnapshot(options?: Partial<BackupOptions>, signal?: AbortSignal): Promise<Backup> {
     checkBackupSignal(signal);
     const supplied = options?.sessions?.map(sessionFrom) ?? [];
+    const portableConnection = (connection: StoredConnection) => {
+      const validated = connectionFrom(connection);
+      return options?.omitCredentials ? prepareSavedConnection(validated, undefined, false) : validated;
+    };
     return this.enqueue(async () => {
       this.ready();
       checkBackupSignal(signal);
@@ -1241,19 +1254,21 @@ export class BrowserProfileStore {
         const profiles = draft.directory.ids.map((profileId) => {
           // Histories and memories are already validated; serialization needs no second deep copy.
           const profile = { ...getRecord(draft, profileId).profile };
-          if (profile.connection) profile.connection = connectionFrom(profile.connection);
+          if (profile.connection) profile.connection = portableConnection(profile.connection);
           return profile;
         });
         const byProfile = new Map<string, Map<string, StoredSessionConnection>>();
         for (const profileId of draft.directory.ids) {
           const sessions = new Map<string, StoredSessionConnection>();
-          for (const session of this.sessions.get(profileId) ?? []) addSession(sessions, { connection: connectionFrom(session.connection), rememberKey: boolean(session.rememberKey) });
+          for (const session of this.sessions.get(profileId) ?? []) addSession(sessions, {
+            connection: portableConnection(session.connection), rememberKey: options?.omitCredentials ? false : boolean(session.rememberKey),
+          });
           byProfile.set(profileId, sessions);
         }
         // Credential callbacks may have resolved while another tab deleted their profile.
         for (const session of supplied) {
           const sessions = byProfile.get(session.profileId);
-          if (sessions) addSession(sessions, session);
+          if (sessions) addSession(sessions, options?.omitCredentials ? { connection: portableConnection(session.connection), rememberKey: false } : session);
         }
         const sessions = Array.from(byProfile, ([profileId, values]) => Array.from(values.values(), (session) => ({ profileId, ...session }))).flat();
         return { format: 'peetty-backup', version: 2, createdAt: Date.now(),

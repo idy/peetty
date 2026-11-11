@@ -85,6 +85,7 @@ export class Peetty {
   private figure: Figure | null = null;
   private figureRequest: FigureRequest | null = null;
   private sdkFigureRequest: FigureRequest | null = null;
+  private pendingPanelFigure: { figure: string | object; request: FigureRequest; current: () => boolean } | null = null;
   private deferredProfileFigure: string | object | undefined;
   private figureOwnership = 0;
   /** Only pending work is shared; a later selection can fetch fresh data from the same URL. */
@@ -200,6 +201,7 @@ export class Peetty {
     this.generation++;
     this.figureRequest?.supersede();
     this.figureRequest = this.sdkFigureRequest = null;
+    this.pendingPanelFigure = null;
     this.deferredProfileFigure = undefined;
     this.figureOwnership++;
     for (const load of this.figureLoads.values()) load.abort();
@@ -235,27 +237,31 @@ export class Peetty {
     const ownership = this.figureOwnership;
     const request = this.requestFigure(figure);
     this.sdkFigureRequest = request;
+    this.pendingPanelFigure = null;
     const current = () => generation === this.generation && ownership === this.figureOwnership && this.figureRequest === request;
     try {
       const loaded = await this.loadCurrent(request, generation);
       if (!loaded || !current()) return;
-      // A panel under construction owns its initial profile before it becomes public.
-      // Wait for that owner, then reconcile the SDK selection into it.
-      const panel = this.chatPanel ?? (this.chatLoading ? await this.chatLoading : null);
-      if (!current()) return;
       this.applyLoadedFigure(figure, loaded);
       this.deferredProfileFigure = undefined;
-      if (current()) await panel?.setFigure?.(figure, current);
-    } finally {
-      if (this.sdkFigureRequest === request) {
-        this.sdkFigureRequest = null;
-        const deferred = this.deferredProfileFigure;
-        this.deferredProfileFigure = undefined;
-        if (deferred !== undefined && current()) {
-          const panel = this.chatPanel ?? (this.chatLoading ? await this.chatLoading : null);
-          if (current()) await panel?.retryProfileFigure?.();
-        }
+      if (this.chatPanel) await this.chatPanel.setFigure?.(figure, current);
+      else if (this.chatLoading) {
+        // Artwork is ready independently of chat. Keep only the latest selection
+        // for the initial owning Profile when the panel eventually becomes ready.
+        this.pendingPanelFigure = { figure, request, current };
       }
+    } finally {
+      if (this.pendingPanelFigure?.request !== request) await this.finishSDKFigure(request, current);
+    }
+  }
+
+  private async finishSDKFigure(request: FigureRequest, current: () => boolean): Promise<void> {
+    if (this.sdkFigureRequest !== request) return;
+    this.sdkFigureRequest = null;
+    const deferred = this.deferredProfileFigure;
+    if (this.chatPanel) {
+      this.deferredProfileFigure = undefined;
+      if (deferred !== undefined && current()) await this.chatPanel.retryProfileFigure?.();
     }
   }
 
@@ -382,6 +388,7 @@ export class Peetty {
             this.figureOwnership++;
             this.figureRequest?.supersede();
             this.sdkFigureRequest = null;
+            this.pendingPanelFigure = null;
             this.deferredProfileFigure = undefined;
           },
           onFigure: async (figure) => {
@@ -417,13 +424,32 @@ export class Peetty {
           onGesture: () => { if (generation === this.generation) this.sounds.unlock(); },
           onClose: () => this.chatClosed(),
         });
-      }).then((panel) => {
+      }).then(async (panel) => {
         if (generation !== this.generation) { panel?.destroy(); return null; }
         panel?.setLanguage(languageOf(this.options.language));
         this.chatPanel = panel;
+        const selection = this.pendingPanelFigure;
+        if (selection) {
+          this.pendingPanelFigure = null;
+          try {
+            if (selection.current()) await panel?.setFigure?.(selection.figure, selection.current);
+          } catch {
+            if (selection.current()) this.say(this.text.chatFailed);
+          } finally { await this.finishSDKFigure(selection.request, selection.current); }
+        } else if (!this.sdkFigureRequest && this.deferredProfileFigure !== undefined) {
+          this.deferredProfileFigure = undefined;
+          await panel?.retryProfileFigure?.();
+        }
+        if (generation !== this.generation) return null;
         return panel;
       }).catch(() => {
-        if (generation === this.generation) { this.chatLoading = null; this.say(this.text.chatFailed); }
+        if (generation === this.generation) {
+          this.chatLoading = null;
+          if (this.pendingPanelFigure?.request === this.sdkFigureRequest) this.sdkFigureRequest = null;
+          this.pendingPanelFigure = null;
+          this.deferredProfileFigure = undefined;
+          this.say(this.text.chatFailed);
+        }
         return null;
       });
       this.chatLoading = pending;

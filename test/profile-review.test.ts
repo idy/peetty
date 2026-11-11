@@ -2190,6 +2190,156 @@ describe('adapter-observed authentication and deletion source races', () => {
   });
 });
 
+describe('durable privacy deletion transactions', () => {
+  const sourced = () => profile('privacy-target', { connection, entries: [entry('source', 'Private source'), entry('keep', 'Keep this entry')],
+    memories: [{ ...fact('memory', 'Linked fact'), sourceEntryId: 'source', sourceText: 'Private source' }] });
+  for (const operation of ['clear', 'entry', 'memory'] as const) {
+    for (const failure of ['write', 'put', 'commit', 'open'] as const) {
+      it(`rejects ${operation} deletion on ${failure} failure without changing archive, sources, epoch or session`, async (t) => {
+        const idb = installChatIndexedDB(t);
+        const namespace = `durable-privacy-${operation}-${failure}`;
+        const manager = await store(t, namespace);
+        await manager.restore(document([sourced()], [{ profileId: 'privacy-target', connection: { ...connection, apiKey: 'private-session' }, rememberKey: false }]));
+        const id = manager.activeProfileId; const adapter = manager.runtimeStorage(id);
+        const loaded = await adapter.load(); const before = manager.profiles;
+        const rawBefore = structuredClone(idb.databases.get(`${namespace}:profiles`)!.get(`profile:${id}`));
+        const writesBefore = idb.writes.length;
+        const sourceId = loaded.entries[0]!.id;
+        const memoryId = manager.memoryPage(id, '', 1).entries[0]!.id;
+        const seam = manager as unknown as { run: (...args: unknown[]) => Promise<unknown>; db?: IDBDatabase; opening?: Promise<IDBDatabase | undefined> };
+        const run = seam.run.bind(manager); let once = true;
+        t.mock.method(seam, 'run', async (...args: unknown[]) => {
+          if (once && args[3] === true) {
+            once = false;
+            if (failure === 'open') { seam.db?.close(); delete seam.db; delete seam.opening; }
+            idb.fail(failure);
+          }
+          return run(...args);
+        });
+        const perform = () => operation === 'clear' ? adapter.clearEntries() : operation === 'entry' ? manager.removeEntry(id, sourceId) : manager.removeMemory(id, memoryId);
+        await assert.rejects(perform(), { code: 'privacy-delete' });
+        assert.deepEqual(manager.profiles, before);
+        assert.deepEqual((await adapter.load()).sessionConnections, loaded.sessionConnections);
+        assert.equal(manager.activeProfileId, id);
+        assert.deepEqual(idb.databases.get(`${namespace}:profiles`)!.get(`profile:${id}`), rawBefore);
+        assert.equal(idb.writes.filter((write) => write.database === `${namespace}:profiles`).length,
+          idb.writes.slice(0, writesBefore).filter((write) => write.database === `${namespace}:profiles`).length);
+        assert.equal(manager.persistenceWarning, true);
+        idb.fail('none');
+        await assert.rejects(perform(), { code: 'privacy-delete' });
+        assert.deepEqual(manager.profiles, before, 'sticky RAM fallback cannot falsely report a later successful deletion');
+        const reopened = await store(t, namespace);
+        assert.deepEqual(reopened.profiles, before);
+        const retry = reopened.runtimeStorage(id); await retry.load();
+        if (operation === 'clear') await retry.clearEntries();
+        else if (operation === 'entry') await reopened.removeEntry(id, sourceId);
+        else await reopened.removeMemory(id, memoryId);
+        const verified = await store(t, namespace);
+        if (operation === 'clear') {
+          assert.equal(verified.profileInfo(id)!.entryCount, 0);
+          assert.equal(verified.memoryPage(id, '', 1).entries[0]!.sourceEntryId, undefined);
+          const rawAfter = idb.databases.get(`${namespace}:profiles`)!.get(`profile:${id}`) as { epoch: string };
+          assert.notEqual(rawAfter.epoch, (rawBefore as { epoch: string }).epoch);
+        } else if (operation === 'entry') {
+          assert.equal(verified.profileInfo(id)!.entryCount, 1);
+          assert.equal(verified.memoryPage(id, '', 1).entries[0]!.sourceEntryId, undefined);
+        } else {
+          assert.equal(verified.profileInfo(id)!.memoryCount, 0);
+          assert.equal(verified.profileInfo(id)!.entryCount, 2);
+        }
+        assert.equal(verified.storedConnection(id)!.apiKey, connection.apiKey);
+      });
+    }
+
+    it(`rejects ${operation} deletion when startup storage is unknown and leaves prior persistent data intact`, async (t) => {
+      const idb = installChatIndexedDB(t);
+      const namespace = `unknown-privacy-${operation}`;
+      const committed = await store(t, namespace);
+      await committed.restore(document([sourced()]));
+      const before = structuredClone(idb.databases.get(`${namespace}:profiles`));
+      idb.fail('open');
+      const unknown = await store(t, namespace); const id = unknown.activeProfileId;
+      await unknown.storage(id).saveEntries([entry('ram-source')]);
+      await unknown.saveMemory(id, { text: 'RAM fact', sourceEntryId: 'ram-source' });
+      const local = unknown.profiles;
+      const perform = () => operation === 'clear' ? unknown.storage(id).clearEntries() : operation === 'entry' ? unknown.removeEntry(id, 'ram-source')
+        : unknown.removeMemory(id, unknown.memoryPage(id, '', 1).entries[0]!.id);
+      await assert.rejects(perform(), { code: 'privacy-delete' });
+      assert.deepEqual(unknown.profiles, local);
+      assert.deepEqual(idb.databases.get(`${namespace}:profiles`), before);
+      assert.equal(unknown.persistenceWarning, true);
+      idb.fail('none');
+      assert.deepEqual((await store(t, namespace)).profiles, committed.profiles);
+    });
+
+    it(`preserves unsaved RAM turns and warning when ${operation} deletion is attempted after failed history persistence`, async (t) => {
+      const idb = installChatIndexedDB(t);
+      const namespace = `sticky-privacy-${operation}`;
+      const manager = await store(t, namespace); const id = manager.activeProfileId;
+      await manager.storage(id).saveEntries([entry('disk-source')]);
+      await manager.saveMemory(id, { text: 'Saved memory', sourceEntryId: 'disk-source' });
+      const persisted = structuredClone(idb.databases.get(`${namespace}:profiles`)!.get(`profile:${id}`));
+      idb.fail('write');
+      const adapter = manager.runtimeStorage(id); await adapter.load();
+      await adapter.saveEntries([entry('disk-source'), entry('unsaved-turn')], ['unsaved-turn']);
+      const local = manager.profiles;
+      idb.fail('none');
+      const perform = () => operation === 'clear' ? adapter.clearEntries() : operation === 'entry' ? manager.removeEntry(id, 'disk-source')
+        : manager.removeMemory(id, manager.memoryPage(id, '', 1).entries[0]!.id);
+      await assert.rejects(perform(), { code: 'privacy-delete' });
+      assert.deepEqual(manager.profiles, local);
+      assert.equal(manager.persistenceWarning, true);
+      assert.deepEqual(idb.databases.get(`${namespace}:profiles`)!.get(`profile:${id}`), persisted);
+      assert.ok(decode(await manager.backup()).profiles[0]!.entries.some((value) => value.id === 'unsaved-turn'));
+    });
+
+    it(`allows intentional ${operation} deletion in persist:false RAM storage`, async (t) => {
+      const idb = installChatIndexedDB(t);
+      const manager = await store(t, `ram-privacy-${operation}`, false);
+      await manager.restore(document([sourced()])); const id = manager.activeProfileId;
+      const sourceId = manager.historyPage(id, '', 2).entries[1]!.id;
+      if (operation === 'clear') await manager.storage(id).clearEntries();
+      else if (operation === 'entry') await manager.removeEntry(id, sourceId);
+      else await manager.removeMemory(id, manager.memoryPage(id, '', 1).entries[0]!.id);
+      assert.equal(manager.profileInfo(id)!.entryCount, operation === 'clear' ? 0 : operation === 'entry' ? 1 : 2);
+      assert.equal(manager.profileInfo(id)!.memoryCount, operation === 'memory' ? 0 : 1);
+      assert.equal(manager.persistenceWarning, false);
+      assert.deepEqual(idb.opened, []);
+    });
+  }
+
+  it('exports credential-free saved and RAM session connections without mutating sources or archive snapshots', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const manager = await store(t, 'backup-without-credentials');
+    const saved = { ...connection, headers: { authorization: 'Bearer saved-secret', 'x-safe-route': 'public-route' }, nonCredentialHeaders: ['x-safe-route'] };
+    const session = { ...connection, apiKey: 'restored-session-secret', headers: { authorization: 'Bearer session-secret' } };
+    await manager.restore(document([profile('backup-source', { connection: saved, entries: [entry('archive')], memories: [fact('fact')] })], [
+      { profileId: 'backup-source', connection: session, rememberKey: true },
+    ]));
+    const id = manager.activeProfileId;
+    const original = manager.profiles;
+    const originalSessions = (await manager.storage(id).load()).sessionConnections;
+    const disk = structuredClone(idb.databases.get('backup-without-credentials:profiles'));
+    const supplied = { profileId: id, connection: { ...connection, apiKey: 'supplied-session-secret', headers: { 'x-auth': 'supplied-header-secret' } }, rememberKey: true };
+    const output = await manager.backupDownload({ omitCredentials: true, sessions: [supplied] });
+    assert.equal(typeof output, 'string');
+    const backupDoc = JSON.parse(output as string) as { profiles: ProfileRecord[]; sessions: BackupSession[] };
+    for (const value of backupDoc.profiles.flatMap((profile) => profile.connection ? [profile.connection] : []).concat(backupDoc.sessions.map((session) => session.connection))) {
+      assert.equal(value.apiKey, undefined);
+      assert.equal(value.headers?.authorization, undefined);
+      assert.equal(value.headers?.['x-auth'], undefined);
+      assert.equal(value.baseUrl, connection.baseUrl);
+    }
+    assert.ok(backupDoc.sessions.every((session) => session.rememberKey === false));
+    assert.deepEqual(backupDoc.profiles.find((profile) => profile.id === id)!.entries, original.find((profile) => profile.id === id)!.entries);
+    assert.deepEqual(manager.profiles, original);
+    assert.deepEqual((await manager.storage(id).load()).sessionConnections, originalSessions);
+    assert.deepEqual(idb.databases.get('backup-without-credentials:profiles'), disk);
+    assert.ok((await manager.backup()).includes('restored-session-secret'));
+    assert.equal(supplied.connection.apiKey, 'supplied-session-secret');
+  });
+});
+
 describe('safe legacy retirement after authoritative migration', () => {
   it('removes copied legacy state so clear and credential opt-out leave no raw duplicates', async (t) => {
     const idb = installChatIndexedDB(t);

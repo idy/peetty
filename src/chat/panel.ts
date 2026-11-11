@@ -409,7 +409,7 @@ export async function createChatPanel({
       profileFigurePending = false;
       render();
     }
-    async function backup(signal?: AbortSignal): Promise<string | AsyncIterable<BackupDownloadFile>> {
+    async function backup(signal?: AbortSignal, omitCredentials = false): Promise<string | AsyncIterable<BackupDownloadFile>> {
       canceledTurn = true; runtime.stop(); cacheSession();
       const controller = new AbortController(); activeBackups.add(controller);
       const cancel = () => controller.abort();
@@ -424,7 +424,9 @@ export async function createChatPanel({
       try {
         const sessions = await Promise.all([...sessionModels].filter(([id]) => liveIds.has(id)).map(async ([profileId, session]) => {
           const model = session.model;
-          const apiKey = model.getApiKey ? await abortable(Promise.resolve().then(() => model.getApiKey!()), controller.signal) : model.apiKey;
+          // Recovery export never invokes callbacks; the store strips authentication
+          // from every saved/restored/session connection in the same snapshot.
+          const apiKey = omitCredentials ? undefined : model.getApiKey ? await abortable(Promise.resolve().then(() => model.getApiKey!()), controller.signal) : model.apiKey;
           const resolvedKey = apiKey?.trim() || undefined;
           if (resolvedKey) secretRegistries.get(profileId)?.add(resolvedKey);
           const connection = toStoredConnection(model, resolvedKey);
@@ -432,7 +434,7 @@ export async function createChatPanel({
         }));
         // The deadline protects credential callbacks, not archive size or background-tab throughput.
         clearTimeout(timer);
-        const result = await abortable(profiles.backupDownload({ sessions, signal: controller.signal }), controller.signal);
+        const result = await abortable(profiles.backupDownload({ sessions, omitCredentials, signal: controller.signal }), controller.signal);
         if (typeof result === 'string') return result;
         streaming = true;
         return {
@@ -465,12 +467,17 @@ export async function createChatPanel({
     content.insertBefore(management.element, setup);
 
     function updateError() {
-      const text = shownError?.() ?? '';
+      // A verified deletion failure remains visible independently of newer model
+      // errors or setup messages, and never receives network/CORS guidance.
+      const text = [...new Set([runtime?.clearError ? t.clearFailed : '', shownError?.() ?? ''].filter(Boolean))].join('\n');
       error.textContent = text;
       error.hidden = !text;
     }
     function showError(content?: () => string) { shownError = content ?? (figureFailure ? () => t.figureFailed : undefined); updateError(); }
-    function showRuntimeError(message: string) { showError(() => message === CLEAR_HISTORY_FAILED ? t.clearFailed : `${message}\n${t.network}`); }
+    function showRuntimeError(message: string) {
+      // The independent clearError projection disappears after a verified retry.
+      showError(message === CLEAR_HISTORY_FAILED ? undefined : () => `${message}\n${t.network}`);
+    }
     function isLocalMagpie(): boolean {
       try { return normalizeBaseUrl(url.value) === LOCAL_MAGPIE.baseUrl; } catch { return false; }
     }
@@ -658,7 +665,8 @@ export async function createChatPanel({
         else { showError(); if (announce && last?.text) onReply(last.text, target => renderMarkdownBubble(target, last.text)); }
       }
       wasBusy = runtime.busy;
-      if (runtime.error && !shownError) showRuntimeError(runtime.error);
+      if (runtime.error && (!shownError || runtime.clearError)) showRuntimeError(runtime.error);
+      else updateError();
       if (nearBottom && !settingsOpen) content.scrollTop = content.scrollHeight;
     }
     function cancelDiscovery() { discovery?.abort(); discovery = null; load.disabled = false; load.textContent = t.load; }

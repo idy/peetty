@@ -252,6 +252,66 @@ describe('backup preflight and producer lifetime', () => {
     assert.equal(query('.pc-manage-status').hasAttribute('data-error'), true);
   });
 
+  for (const failure of ['reject', 'hang'] as const) {
+    it(`recovers all profiles and history without connection credentials after a cached callback ${failure}s`, async (t) => {
+      installChatIndexedDB(t);
+      const namespace = `credential-free-${failure}`;
+      const source = new BrowserProfileStore(`${namespace}-source`, false); await source.initialize({ name: 'First recovery profile', personality: 'Recovery personality' }); t.after(() => source.close());
+      const original = source.activeProfileId;
+      await source.storage(original).saveConnection({ ...MODEL, id: 'saved-recovery-model', apiKey: 'synthetic-saved-recovery-key', headers: { Authorization: 'Bearer synthetic-saved-recovery-header', 'X-Unknown': 'synthetic-unknown-secret' } });
+      await source.storage(original).saveEntries([{ id: 'recover-history', role: 'user', text: 'Preserved recovery conversation', createdAt: 1 }]);
+      await source.saveMemory(original, { text: 'Preserved recovery memory' });
+      await source.create({ name: 'Second recovery profile' }); await source.select(original);
+      const fixture = JSON.parse(await source.backup());
+      const seed = new BrowserProfileStore(namespace); await seed.initialize(); await seed.restore(JSON.stringify(fixture)); t.after(() => seed.close());
+      const first = seed.activeProfileId; const second = seed.listProfiles().find(profile => profile.name === 'Second recovery profile')!.id;
+      let callbacks = 0;
+      const callbackModel = { ...MODEL, id: 'callback-recovery-model', getApiKey() {
+        callbacks++;
+        return failure === 'hang' ? new Promise<string>(() => {}) : Promise.reject(new Error('synthetic callback error must not be displayed'));
+      } };
+      const { panel, query, root, window } = await mountPanel(t, undefined, { chat: { storageKey: namespace } });
+      await panel.setModel(callbackModel); panel.open(true);
+      const selector = query<HTMLSelectElement>('.pc-profile-select'); selector.value = second; selector.dispatchEvent(new window.Event('change') as unknown as Event);
+      await eventually(() => !selector.disabled); await panel.setModel({ ...MODEL, id: 'second-session-model', apiKey: 'synthetic-live-session-key', headers: { 'x-api-key': 'synthetic-live-session-header' } });
+      panel.open(true); query<HTMLButtonElement>('[data-tab="data"]').click();
+      let downloaded: Blob | undefined; let filename = '';
+      t.mock.method(URL, 'createObjectURL', (blob: Blob) => { downloaded = blob; return 'blob:credential-free-recovery'; }); t.mock.method(URL, 'revokeObjectURL', () => {});
+      root.addEventListener('click', event => { const link = (event.target as Element).closest<HTMLAnchorElement>('a[download]'); if (link) { event.preventDefault(); filename = link.download; } });
+      t.mock.timers.enable({ apis: ['setTimeout'] });
+      query<HTMLButtonElement>('.pc-backup').click(); await eventually(() => callbacks === 1);
+      if (failure === 'hang') t.mock.timers.tick(20_000);
+      await eventually(() => !query<HTMLButtonElement>('.pc-backup').disabled);
+      assert.equal(downloaded, undefined); assert.match(query('.pc-manage-status').textContent!, /full backup.*credential callback.*20-second/);
+      assert.equal(query('.pc-manage-status').hasAttribute('data-error'), true);
+      assert.match(root.textContent!, /omits API keys and authentication headers from all saved and session connections/);
+      assert.match(root.textContent!, /Reenter credentials after restore/);
+      // Restore real zero-delay yields for the actual archive serializer.
+      t.mock.timers.reset();
+      query<HTMLButtonElement>('[data-focus-key="backup-without-credentials"]').click();
+      await eventually(() => !!downloaded && !query<HTMLButtonElement>('.pc-backup').disabled);
+      assert.equal(callbacks, 1, 'explicit recovery never resolves the failing cached callback again');
+      assert.match(filename, /without-credentials/);
+      const text = await downloaded!.text(); const backup = JSON.parse(text) as { profiles: ProfileRecord[]; sessions: { connection: StoredConnection; rememberKey: boolean }[] };
+      assert.equal(backup.profiles.length, seed.listProfiles().length);
+      assert.equal(backup.profiles.find(profile => profile.id === first)!.personality, 'Recovery personality');
+      assert.equal(backup.profiles.find(profile => profile.id === first)!.entries[0]!.text, 'Preserved recovery conversation');
+      assert.equal(backup.profiles.find(profile => profile.id === first)!.memories[0]!.text, 'Preserved recovery memory');
+      assert.equal(backup.profiles.find(profile => profile.id === first)!.connection!.id, 'saved-recovery-model');
+      for (const connection of [...backup.profiles.map(profile => profile.connection), ...backup.sessions.map(session => session.connection)].filter(Boolean)) {
+        assert.equal(connection!.apiKey, undefined); assert.equal(connection!.headers, undefined);
+      }
+      assert.ok(backup.sessions.some(session => session.connection.id === 'callback-recovery-model'));
+      assert.ok(backup.sessions.some(session => session.connection.id === 'second-session-model'));
+      assert.ok(backup.sessions.every(session => !session.rememberKey));
+      assert.doesNotMatch(text, /synthetic-(?:saved|unknown|restored|live)/);
+      const target = new BrowserProfileStore(`${namespace}-restored`, false); await target.initialize(); t.after(() => target.close());
+      await target.restore(text);
+      assert.ok(target.profiles.some(profile => profile.entries.some(entry => entry.text === 'Preserved recovery conversation')));
+      assert.match(query('.pc-manage-status').textContent!, /Download ready/);
+    });
+  }
+
   it('allows serialization beyond the credential deadline after credentials resolve', async (t) => {
     const gate = deferred<string>(); let scan: AbortSignal | undefined;
     const { query, root } = await mountPanel(t, { ...MODEL, getApiKey: async () => 'synthetic-resolved-backup-key' });
