@@ -201,6 +201,11 @@ void main() {
       expect(rows.$2, closeTo(90, 0.01));
     });
 
+    test('a nearly constant weight keeps every host row', () {
+      final rows = overhangRows(Matrix4.identity()..setEntry(3, 1, 1e-20), 300, 5.6843418860808015e-14, 600, 192);
+      expect(rows, (0.0, 600.0));
+    });
+
     test('rows a hair past the horizon are judged without cancellation', () {
       // X = 100·x, Y = y, W = y − 1000: at y = 1000.0000000000002 a 1.4e-14 overhang shows as ~6 pixels.
       final transform = Matrix4.identity()

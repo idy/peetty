@@ -35,7 +35,10 @@ import 'physics.dart';
   final List<double> wa, xa, ya;
   final double Function(double t) rowOf;
   final double t0, t1;
-  if (wy != 0) {
+  // Measuring rows by Wa only pays off when Wa changes appreciably across the host
+  // (a horizon inside it needs Wa to change sign); a nearly constant weight would
+  // collapse the rows into one value of t, so they are measured directly instead.
+  if (wy != 0 && (wy * height).abs() >= 1e-3 * base.abs()) {
     wa = [0, 1];
     xa = [xx * edge + xc - xy * base / wy, xy / wy];
     ya = [yx * edge + yc - yy * base / wy, yy / wy];
@@ -43,7 +46,7 @@ import 'physics.dart';
     final (a, b) = (base, wy * height + base);
     (t0, t1) = a <= b ? (a, b) : (b, a);
   } else {
-    wa = [base, 0];
+    wa = [base, wy];
     xa = [xx * edge + xc, xy];
     ya = [yx * edge + yc, yy];
     rowOf = (t) => t;
