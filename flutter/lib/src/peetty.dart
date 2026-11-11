@@ -14,52 +14,101 @@ import 'physics.dart';
 /// millionth of a pixel past it, in front of the viewer; null when there is none.
 ///
 /// Along a row the projection `(X/W, Y/W)` moves from the edge by exactly
-/// `overhang · (xx·W − wx·X, yx·W − wx·Y) / (W(edge)·W(edge + overhang))`, whose
-/// numerators are linear in the row. Runs are located on 512 rows and their ends
-/// refined by bisection.
+/// `overhang · |(xx·W − wx·X, yx·W − wx·Y)| / (W(edge)·W(edge + overhang))`, whose
+/// numerators and denominators are linear in the row. So the admissible rows are
+/// where a quartic is non-negative and both W are positive: every boundary is a
+/// root of one of those polynomials, found exactly, and no run can be missed.
 @visibleForTesting
 (double, double)? overhangRows(Matrix4 transform, double edge, double overhang, double height, double need) {
   final m = transform.storage;
   final (xx, xy, xc) = (m[0], m[4], m[12]);
   final (yx, yy, yc) = (m[1], m[5], m[13]);
   final (wx, wy, wc) = (m[3], m[7], m[15]);
-  bool ok(double y) {
-    final wa = wx * edge + wy * y + wc, wb = wa + wx * overhang;
-    if (wa <= 0 || wb <= 0) return false;
-    final nx = xx * (wy * y + wc) - wx * (xy * y + xc);
-    final ny = yx * (wy * y + wc) - wx * (yy * y + yc);
-    return overhang * math.sqrt(nx * nx + ny * ny) <= 1e-6 * wa * wb;
+  const tolerance = 1e-6;
+  // Polynomials in the row y, as coefficient lists from the constant term up.
+  final wa = [wx * edge + wc, wy];
+  final wb = [wx * (edge + overhang) + wc, wy];
+  final nx = [xx * wc - wx * xc, xx * wy - wx * xy];
+  final ny = [yx * wc - wx * yc, yx * wy - wx * yy];
+  final ab = _multiply(wa, wb);
+  final margin = _subtract(
+    _scale(_multiply(ab, ab), tolerance * tolerance),
+    _scale(_add(_multiply(nx, nx), _multiply(ny, ny)), overhang * overhang),
+  );
+  bool ok(double y) => _evaluate(wa, y) > 0 && _evaluate(wb, y) > 0 && _evaluate(margin, y) >= 0;
+
+  final cuts = <double>{0, height, ..._roots(margin, 0, height), ..._roots(wa, 0, height), ..._roots(wb, 0, height)}.toList()..sort();
+  (double, double)? best;
+  double? start;
+  void close(double end) {
+    if (start != null && end - start! >= need && (best == null || end - start! > best!.$2 - best!.$1)) best = (start!, end);
+    start = null;
   }
 
-  double refine(double good, double bad) {
-    for (var i = 0; i < 60; i++) {
-      final mid = (good + bad) / 2;
-      if (ok(mid)) {
-        good = mid;
+  // Between consecutive boundaries every row is admissible or none is.
+  for (var i = 0; i + 1 < cuts.length; i++) {
+    if (ok((cuts[i] + cuts[i + 1]) / 2)) {
+      start ??= cuts[i];
+    } else {
+      close(cuts[i]);
+    }
+  }
+  close(height);
+  return best;
+}
+
+double _evaluate(List<double> p, double y) {
+  var value = 0.0;
+  for (var i = p.length - 1; i >= 0; i--) {
+    value = value * y + p[i];
+  }
+  return value;
+}
+
+List<double> _multiply(List<double> a, List<double> b) {
+  final out = List.filled(a.length + b.length - 1, 0.0);
+  for (var i = 0; i < a.length; i++) {
+    for (var j = 0; j < b.length; j++) {
+      out[i + j] += a[i] * b[j];
+    }
+  }
+  return out;
+}
+
+List<double> _add(List<double> a, List<double> b) =>
+    [for (var i = 0; i < math.max(a.length, b.length); i++) (i < a.length ? a[i] : 0.0) + (i < b.length ? b[i] : 0.0)];
+
+List<double> _scale(List<double> a, double k) => [for (final c in a) c * k];
+
+List<double> _subtract(List<double> a, List<double> b) => _add(a, _scale(b, -1));
+
+/// The real roots of [p] in (lo, hi): between consecutive roots of its derivative
+/// a polynomial is monotone, so each sign change there is bisected.
+List<double> _roots(List<double> p, double lo, double hi) {
+  if (p.length < 2) return const [];
+  final derivative = [for (var i = 1; i < p.length; i++) p[i] * i];
+  final points = [lo, ..._roots(derivative, lo, hi), hi];
+  final roots = <double>[];
+  for (var i = 0; i + 1 < points.length; i++) {
+    var a = points[i], b = points[i + 1];
+    var fa = _evaluate(p, a);
+    final fb = _evaluate(p, b);
+    if (fa == 0 && a > lo) roots.add(a);
+    if (fa.sign * fb.sign >= 0) continue;
+    for (var k = 0; k < 200 && b - a > 0; k++) {
+      final mid = a + (b - a) / 2;
+      if (mid <= a || mid >= b) break;
+      final fm = _evaluate(p, mid);
+      if (fm.sign == fa.sign) {
+        a = mid;
+        fa = fm;
       } else {
-        bad = mid;
+        b = mid;
       }
     }
-    return good;
+    roots.add((a + b) / 2);
   }
-
-  (double, double)? best;
-  void consider(double start, double end) {
-    if (end - start >= need && (best == null || end - start > best!.$2 - best!.$1)) best = (start, end);
-  }
-
-  const samples = 512;
-  var start = 0.0, previous = 0.0, previousOk = false;
-  for (var i = 0; i <= samples; i++) {
-    final y = height * i / samples;
-    final good = ok(y);
-    if (good && !previousOk) start = i == 0 ? 0.0 : refine(y, previous);
-    if (!good && previousOk) consider(start, refine(previous, y));
-    previousOk = good;
-    previous = y;
-  }
-  if (previousOk) consider(start, height);
-  return best;
+  return roots;
 }
 
 /// How often she moves on her own.

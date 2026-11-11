@@ -187,6 +187,20 @@ void main() {
       expect(overhangRows(transform, 1, 5e-10, 2, 1), isNull);
     });
 
+    test('a narrow admissible run between widely spaced rows is still found', () {
+      // X = 200·(y − 50), Y = x, W = 1 + 0.01·x: only rows near 10 to 90 of 51,200 qualify.
+      final transform = Matrix4.identity()
+        ..setEntry(0, 0, 0)
+        ..setEntry(0, 1, 200)
+        ..setEntry(0, 3, -10000)
+        ..setEntry(1, 0, 1)
+        ..setEntry(1, 1, 0)
+        ..setEntry(3, 0, 0.01);
+      final rows = overhangRows(transform, 100, 5e-8, 51200, 50)!;
+      expect(rows.$1, closeTo(10, 0.01));
+      expect(rows.$2, closeTo(90, 0.01));
+    });
+
     test('only the rows where the overhang stays invisible are used', () {
       // W = 1 − (1 − 1e-9)·x + y: near y = 0 the overhang is magnified, lower down it is not.
       final transform = Matrix4.identity()
