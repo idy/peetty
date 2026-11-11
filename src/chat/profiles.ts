@@ -47,7 +47,7 @@ type SettingsInput = Omit<Partial<Settings>, 'figure'> & { figure?: string | obj
 interface Directory { version: 1; ids: string[]; activeProfileId: string; bootstrapProfileId?: string }
 interface RecordState { profile: ProfileRecord; epoch: string }
 interface State { directory: Directory; records: Map<string, RecordState> }
-interface LegacySnapshot { entries: unknown; connection: unknown; epoch: unknown }
+interface LegacySnapshot { entries: unknown; connection: unknown; epoch: unknown; connectionEpoch: unknown }
 interface LegacyMigration extends StoredChat { used: boolean; retire?: LegacySnapshot }
 interface LegacyProof { version: 1; entries: string[]; connections: string[] }
 function legacyProofFrom(value: unknown): LegacyProof | undefined {
@@ -551,6 +551,7 @@ export class BrowserProfileStore {
       let entries: unknown;
       let connection: unknown;
       let epoch: unknown;
+      let connectionEpoch: unknown;
       const ok = await stateTransaction(db, false, (store) => {
         const history = store.get('entries');
         history.onsuccess = () => { entries = history.result; };
@@ -558,6 +559,8 @@ export class BrowserProfileStore {
         setup.onsuccess = () => { connection = setup.result; };
         const barrier = store.get('entriesEpoch');
         barrier.onsuccess = () => { epoch = barrier.result; };
+        const credentialBarrier = store.get('connectionEpoch');
+        credentialBarrier.onsuccess = () => { connectionEpoch = credentialBarrier.result; };
       });
       if (!ok) return { entries: [], used: true };
       // Legacy data was less strict: salvage each valid entry independently and
@@ -581,11 +584,14 @@ export class BrowserProfileStore {
         }
         if (connection !== undefined) connectionFrom(connection);
         check(epoch === undefined || typeof epoch === 'string');
+        check(connectionEpoch === undefined || typeof connectionEpoch === 'string');
         complete = true;
       } catch { /* Leave malformed/partially copied legacy data available for recovery. */ }
-      const used = entries !== undefined || connection !== undefined || epoch !== undefined;
+      // Invalidation sentinels protect old writers; they are not user data and
+      // must not make a fresh destination look like an already-used profile.
+      const used = entries !== undefined || connection !== undefined;
       return { entries: salvaged, used, ...(saved ? { connection: saved } : {}),
-        ...(complete && used ? { retire: { entries, connection, epoch } } : {}) };
+        ...(complete && used ? { retire: { entries, connection, epoch, connectionEpoch } } : {}) };
     } finally { db.close(); }
   }
 
@@ -596,14 +602,17 @@ export class BrowserProfileStore {
     const knownEntries = new Set(proof.entries); const knownConnections = new Set(proof.connections);
     const original = snapshot.entries === undefined ? undefined : array(snapshot.entries, PROFILE_LIMITS.entries, entryFrom);
     const remainingEntries = original?.filter((entry) => !knownEntries.has(jsonFingerprint(entry)));
-    const changedEntries = original !== undefined && (original.length === 0 || remainingEntries!.length !== original.length);
+    // A partial retirement cannot distinguish unproven history from an active
+    // old-tab turn. Keep the complete original history and its epoch until all
+    // entries are proven copied, or the user explicitly requests legacy deletion.
+    const changedEntries = original !== undefined && remainingEntries!.length === 0;
     const removeConnection = snapshot.connection !== undefined && knownConnections.has(jsonFingerprint(connectionFrom(snapshot.connection)));
     if (!changedEntries && !removeConnection) return;
     const db = await openStateDatabase(`${this.namespace}:chat`, { isClosed: () => this.closed, onFailure: () => {} });
     if (!db) return;
     try {
       await stateTransaction(db, true, (store, abort) => {
-        const fields = [['entries', 'entries'], ['connection', 'connection'], ['entriesEpoch', 'epoch']] as const;
+        const fields = [['entries', 'entries'], ['connection', 'connection'], ['entriesEpoch', 'epoch'], ['connectionEpoch', 'connectionEpoch']] as const;
         const current = {} as LegacySnapshot;
         let remaining = fields.length;
         for (const [recordKey, field] of fields) {
@@ -612,11 +621,11 @@ export class BrowserProfileStore {
             try {
               current[field] = request.result;
               if (--remaining || !sameLegacyValue(current, snapshot)) return;
-              if (changedEntries) {
-                if (remainingEntries!.length) store.put(remainingEntries, 'entries');
-                else store.delete('entries');
-              }
+              if (changedEntries) store.delete('entries');
               if (removeConnection) store.delete('connection');
+              // A retired history also invalidates a pending first setup save,
+              // even when the old client had not stored its connection yet.
+              if (changedEntries || removeConnection) store.put(freshId(), 'connectionEpoch');
               // Any history removal invalidates stale legacy clients, including
               // clients whose original database had no epoch record at all.
               if (changedEntries) store.put(freshId(), 'entriesEpoch');
@@ -681,7 +690,10 @@ export class BrowserProfileStore {
           const barrier = freshId();
           const ok = await stateTransaction(db, true, (store) => {
             for (const key of keys) store.delete(key);
-            if (database === `${this.namespace}:chat`) store.put(barrier, 'entriesEpoch');
+            if (database === `${this.namespace}:chat`) {
+              store.put(barrier, 'entriesEpoch');
+              store.put(freshId(), 'connectionEpoch');
+            }
           });
           check(ok, 'Could not remove legacy data. Try again.');
         } finally { db.close(); }

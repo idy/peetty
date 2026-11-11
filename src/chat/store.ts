@@ -29,8 +29,8 @@ export interface StoredChat {
 
 /** Domain failures must not be mistaken for unavailable browser persistence. */
 export class ChatStorageError extends Error {
-  readonly code: 'missing-profile' | 'capacity';
-  constructor(code: 'missing-profile' | 'capacity', message: string) { super(message); this.code = code; this.name = 'ChatStorageError'; }
+  readonly code: 'missing-profile' | 'capacity' | 'stale-connection';
+  constructor(code: 'missing-profile' | 'capacity' | 'stale-connection', message: string) { super(message); this.code = code; this.name = 'ChatStorageError'; }
 }
 
 export interface HistoryProjection {
@@ -98,6 +98,8 @@ export class BrowserChatStore implements ChatStorage {
   private state: StoredChat = { entries: [] };
   private snapshot: ChatEntry[] = [];
   private epoch: string | undefined;
+  /** Independent from history: forgetting a key must not cancel an active reply. */
+  private connectionEpoch: string | undefined;
   private db: IDBDatabase | undefined;
   private opening: Promise<IDBDatabase | undefined> | undefined;
   private writes: Promise<void> = Promise.resolve();
@@ -147,6 +149,7 @@ export class BrowserChatStore implements ChatStorage {
       const restored: StoredChat = { entries: [] };
       let rawEntries: unknown;
       let epoch = '';
+      let connectionEpoch = '';
       const ok = await this.transact(false, (store) => {
         const connection = store.get('connection');
         connection.onsuccess = () => {
@@ -157,11 +160,13 @@ export class BrowserChatStore implements ChatStorage {
         entries.onsuccess = () => { rawEntries = entries.result; };
         const barrier = store.get('entriesEpoch');
         barrier.onsuccess = () => { if (typeof barrier.result === 'string') epoch = barrier.result; };
+        const credentialBarrier = store.get('connectionEpoch');
+        credentialBarrier.onsuccess = () => { if (typeof credentialBarrier.result === 'string') connectionEpoch = credentialBarrier.result; };
       });
       projection?.registerConnections?.(ok ? restored : this.state);
       if (ok) {
         restored.entries = boundedEntries(rawEntries, projection?.sanitizeText);
-        this.state = restored; this.epoch = epoch;
+        this.state = restored; this.epoch = epoch; this.connectionEpoch = connectionEpoch;
       } else this.state.entries = boundedEntries(this.state.entries, projection?.sanitizeText);
       this.snapshot = structuredClone(this.state.entries);
       return structuredClone(this.state);
@@ -177,18 +182,38 @@ export class BrowserChatStore implements ChatStorage {
   saveConnection(connection: StoredConnection, options?: { rememberCredentials: boolean }): Promise<StoredConnection | void> {
     const copy = connectionFrom(connection);
     if (!copy || this.closing) return Promise.resolve();
+    // Capture when requested, not when a delayed queue resumes. An uninitialized
+    // writer may save only before any invalidation; load() explicitly refreshes it.
+    const expectedEpoch = this.connectionEpoch ?? '';
     return this.enqueue(async () => {
       const retained = (known?: StoredConnection) => prepareSavedConnection(copy, known, options?.rememberCredentials);
-      let saved = retained(this.state.connection);
-      await this.transact(true, (store) => {
-        const request = store.get('connection');
-        request.onsuccess = () => {
-          saved = retained(connectionFrom(request.result));
-          store.put(saved, 'connection');
+      let saved: StoredConnection | undefined = retained(this.state.connection);
+      let stale = false; let committedEpoch = expectedEpoch;
+      const ok = await this.transact(true, (store) => {
+        const barrier = store.get('connectionEpoch');
+        barrier.onsuccess = () => {
+          const currentEpoch = typeof barrier.result === 'string' ? barrier.result : '';
+          const request = store.get('connection');
+          request.onsuccess = () => {
+            const current = connectionFrom(request.result);
+            if (expectedEpoch !== currentEpoch) {
+              stale = true; saved = current;
+              return;
+            }
+            saved = retained(current);
+            store.put(saved, 'connection');
+            if (options?.rememberCredentials === false) {
+              committedEpoch = Array.from(crypto.getRandomValues(new Uint32Array(4)), (part) => part.toString(36)).join('-');
+              store.put(committedEpoch, 'connectionEpoch');
+            }
+          };
         };
       });
-      this.state.connection = saved;
-      return structuredClone(saved);
+      if (saved) this.state.connection = saved;
+      else delete this.state.connection;
+      if (ok && stale) throw new ChatStorageError('stale-connection', 'Connection settings changed. Reload before saving again.');
+      if (ok) this.connectionEpoch = committedEpoch;
+      return saved ? structuredClone(saved) : undefined;
     });
   }
 

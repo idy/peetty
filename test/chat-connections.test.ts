@@ -100,6 +100,19 @@ describe('explicit nonsecret header classification', () => {
     }
   });
 
+  it('keeps prefixed and compound secret-bearing names sensitive', () => {
+    for (const prefix of ['Client', 'Auth', 'Session', 'Gateway', 'Service', 'Private', 'Refresh']) {
+      for (const suffix of ['Secret', 'SecretKey', 'Token', 'Credential', 'Password', 'Cookie']) {
+        const name = `X-${prefix}${suffix}`;
+        assert.throws(() => normalizeModelOptions({ ...base, headers: { [name]: 'synthetic-compound-secret' }, nonCredentialHeaders: [name] }));
+        assert.equal(isCredentialHeader(name, [name]), true);
+        const connection = { ...base, headers: { [name]: 'synthetic-compound-secret' } };
+        assert.equal(prepareSavedConnection(connection, connection, false).headers, undefined);
+        assert.equal(hasStoredCredentials({ ...connection, apiKey: '' }), true);
+      }
+    }
+  });
+
   it('opts newly declared routing metadata into persistence without key consent', () => {
     const chosen = normalizeModelOptions({ ...base, headers: { 'X-Route': 'fixture-route', 'X-Undeclared': 'fixture-sensitive' }, nonCredentialHeaders: ['X-Route'] });
     const saved = prepareSavedConnection(toStoredConnection(chosen, chosen.apiKey), undefined, false);

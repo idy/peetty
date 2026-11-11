@@ -217,31 +217,61 @@ describe('explicit nonsecret setup headers', () => {
 });
 
 describe('backup preflight and producer lifetime', () => {
-  for (const ending of ['cancel', 'timeout'] as const) {
-    it(`aborts the actual backup preflight on ${ending} and preserves the unsent draft`, async (t) => {
-      let scan: AbortSignal | undefined; let running = false;
-      t.mock.method(BrowserProfileStore.prototype, 'backupDownload', async function(options?: Parameters<BrowserProfileStore['backupDownload']>[0]) {
-        scan = options?.signal; assert.ok(scan); running = true;
-        return await new Promise<string>((_resolve, reject) => {
-          const stop = () => { running = false; reject(new DOMException('Fixture scan stopped.', 'AbortError')); };
-          scan!.addEventListener('abort', stop, { once: true }); if (scan!.aborted) stop();
-        });
+  it('aborts the actual backup preflight on cancel and preserves the unsent draft', async (t) => {
+    let scan: AbortSignal | undefined; let running = false;
+    t.mock.method(BrowserProfileStore.prototype, 'backupDownload', async function(options?: Parameters<BrowserProfileStore['backupDownload']>[0]) {
+      scan = options?.signal; assert.ok(scan); running = true;
+      return await new Promise<string>((_resolve, reject) => {
+        const stop = () => { running = false; reject(new DOMException('Fixture scan stopped.', 'AbortError')); };
+        scan!.addEventListener('abort', stop, { once: true }); if (scan!.aborted) stop();
       });
-      const { query, window } = await mountPanel(t, MODEL);
-      const draft = query<HTMLTextAreaElement>('[name="message"]'); draft.value = 'Keep this unsent draft'; draft.dispatchEvent(new window.Event('input') as unknown as Event);
-      const urls = t.mock.method(URL, 'createObjectURL', () => 'blob:unexpected-preflight');
-      t.mock.timers.enable({ apis: ['setTimeout'] });
-      query<HTMLButtonElement>('[data-tab="data"]').click(); query<HTMLButtonElement>('.pc-backup').click();
-      await eventually(() => running);
-      if (ending === 'cancel') query<HTMLButtonElement>('[data-cancel-download]').click(); else t.mock.timers.tick(20_000);
-      await eventually(() => !query<HTMLButtonElement>('.pc-backup').disabled);
-      assert.equal(scan!.aborted, true); assert.equal(running, false); assert.equal(urls.mock.callCount(), 0);
-      assert.equal(draft.value, 'Keep this unsent draft');
-      const status = query('.pc-manage-status');
-      if (ending === 'cancel') assert.match(status.textContent!, /canceled.*incomplete/);
-      else { assert.equal(status.hasAttribute('data-error'), true); assert.doesNotMatch(status.textContent!, /ready|canceled/); }
     });
-  }
+    const { query, window } = await mountPanel(t, MODEL);
+    const draft = query<HTMLTextAreaElement>('[name="message"]'); draft.value = 'Keep this unsent draft'; draft.dispatchEvent(new window.Event('input') as unknown as Event);
+    const urls = t.mock.method(URL, 'createObjectURL', () => 'blob:unexpected-preflight');
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    query<HTMLButtonElement>('[data-tab="data"]').click(); query<HTMLButtonElement>('.pc-backup').click();
+    await eventually(() => running);
+    query<HTMLButtonElement>('[data-cancel-download]').click();
+    await eventually(() => !query<HTMLButtonElement>('.pc-backup').disabled);
+    assert.equal(scan!.aborted, true); assert.equal(running, false); assert.equal(urls.mock.callCount(), 0);
+    assert.equal(draft.value, 'Keep this unsent draft');
+    assert.match(query('.pc-manage-status').textContent!, /canceled.*incomplete/);
+  });
+
+  it('bounds unresolved credentials without starting archive serialization', async (t) => {
+    let requested = false;
+    const { query } = await mountPanel(t, { ...MODEL, getApiKey: () => { requested = true; return new Promise<string>(() => {}); } });
+    const snapshot = t.mock.method(BrowserProfileStore.prototype, 'backupDownload');
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    query<HTMLButtonElement>('[data-tab="data"]').click(); query<HTMLButtonElement>('.pc-backup').click();
+    await eventually(() => requested);
+    t.mock.timers.tick(20_000);
+    await eventually(() => !query<HTMLButtonElement>('.pc-backup').disabled);
+    assert.equal(snapshot.mock.callCount(), 0);
+    assert.equal(query('.pc-manage-status').hasAttribute('data-error'), true);
+  });
+
+  it('allows serialization beyond the credential deadline after credentials resolve', async (t) => {
+    const gate = deferred<string>(); let scan: AbortSignal | undefined;
+    const { query, root } = await mountPanel(t, { ...MODEL, getApiKey: async () => 'synthetic-resolved-backup-key' });
+    t.mock.method(BrowserProfileStore.prototype, 'backupDownload', async function(options?: Parameters<BrowserProfileStore['backupDownload']>[0]) {
+      scan = options?.signal; return gate.promise;
+    });
+    root.addEventListener('click', event => { if ((event.target as Element).closest('a[download]')) event.preventDefault(); });
+    const urls = t.mock.method(URL, 'createObjectURL', () => 'blob:slow-valid-backup');
+    t.mock.method(URL, 'revokeObjectURL', () => {});
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    query<HTMLButtonElement>('[data-tab="data"]').click(); query<HTMLButtonElement>('.pc-backup').click();
+    await eventually(() => scan !== undefined);
+    t.mock.timers.tick(120_000);
+    assert.equal(scan!.aborted, false, 'archive throughput is not subject to the credential timeout');
+    assert.equal(query<HTMLButtonElement>('.pc-backup').disabled, true);
+    gate.resolve('{}');
+    await eventually(() => !query<HTMLButtonElement>('.pc-backup').disabled);
+    assert.equal(urls.mock.callCount(), 1);
+    assert.match(query('.pc-manage-status').textContent!, /ready/);
+  });
 
   for (const ending of ['final', 'error', 'before first next'] as const) {
     it(`releases the backup signal lifecycle on ${ending} without aborting successful preflight`, async (t) => {
@@ -442,7 +472,7 @@ describe('profile management and migration UI', () => {
     const { query, root } = await mountPanel(t, model, { chat: { storageKey: 'backup-ui' } });
     root.addEventListener('click', (event) => { if ((event.target as Element).closest('a[download]')) event.preventDefault(); });
     query<HTMLButtonElement>('[data-tab="data"]').click(); click(root, 'Download full backup');
-    for (let i = 0; i < 50 && !downloaded; i++) await new Promise<void>((resolve) => setImmediate(resolve));
+    await eventually(() => downloaded !== undefined);
     assert.ok(downloaded, 'backup was downloaded');
     const text = await downloaded.text();
     const backup = JSON.parse(text) as { profiles: ProfileRecord[]; sessions: { profileId: string; connection: StoredConnection; rememberKey: boolean }[] };

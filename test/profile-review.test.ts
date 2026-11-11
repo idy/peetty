@@ -987,12 +987,12 @@ describe('bounded JSON compatibility and retryable migration', () => {
     const legacy = new Map<string, unknown>([['entries', [entry('copied'), entry('uncopied')]], ['connection', connection], ['entriesEpoch', 'old']]);
     idb.databases.set('old-migration:chat', legacy);
     const reopened = await store(t, 'old-migration');
-    assert.deepEqual(legacy.get('entries'), [entry('uncopied')]);
+    assert.deepEqual(legacy.get('entries'), [entry('copied'), entry('uncopied')]);
     assert.equal(legacy.has('connection'), false);
     assert.deepEqual(reopened.activeProfile.entries, [entry('copied')]);
     await reopened.storage(id).clearEntries();
     await reopened.storage(id).saveConnection(connection, { rememberCredentials: false });
-    assert.deepEqual(legacy.get('entries'), [entry('uncopied')]);
+    assert.deepEqual(legacy.get('entries'), [entry('copied'), entry('uncopied')]);
     assert.equal(legacy.has('connection'), false);
   });
 
@@ -1034,7 +1034,7 @@ describe('bounded JSON compatibility and retryable migration', () => {
     const manager = await store(t, 'retry-concurrent');
     assert.deepEqual(legacy.get('entries'), [entry('copied'), entry('new-legacy')]);
     await manager.storage(manager.activeProfileId).clearEntries();
-    assert.deepEqual(legacy.get('entries'), [entry('new-legacy')]);
+    assert.deepEqual(legacy.get('entries'), [entry('copied'), entry('new-legacy')]);
     await manager.storage(manager.activeProfileId).saveEntries([entry('new-legacy')]);
     await manager.storage(manager.activeProfileId).clearEntries();
     assertLegacyRetired(legacy);
@@ -1329,6 +1329,84 @@ describe('fresh legacy privacy barriers and abortable download preflight', () =>
     active.abort();
     await assert.rejects(iterator.next(), { name: 'AbortError' });
     await iterator.return?.();
+  });
+});
+
+describe('legacy active-work and empty-sentinel lifecycle', () => {
+  for (const epoch of [undefined, 'old-live-epoch']) {
+    it(`preserves a real old-tab pending reply during partial automatic retirement with epoch ${epoch ?? 'absent'}`, async (t) => {
+      const idb = installChatIndexedDB(t);
+      const namespace = `partial-live-${epoch ?? 'none'}`;
+      const manager = await store(t, namespace);
+      const id = manager.activeProfileId;
+      await manager.storage(id).saveEntries([entry('copied')]);
+      await manager.storage(id).saveConnection(connection);
+      const original = [entry('copied'), entry('active-user', 'A user turn not copied to profiles')];
+      const legacy = new Map<string, unknown>([['entries', original], ['connection', connection]]);
+      if (epoch) legacy.set('entriesEpoch', epoch);
+      idb.databases.set(`${namespace}:chat`, legacy);
+      const active = new BrowserChatStore(namespace); t.after(() => active.close());
+      const snapshot = (await active.load()).entries;
+      const reopened = await store(t, namespace);
+      assert.deepEqual(legacy.get('entries'), original, 'partial automatic retirement must keep the full source history');
+      assert.equal(legacy.get('entriesEpoch'), epoch, 'active history barrier must not change');
+      assert.equal(legacy.has('connection'), false, 'copied credentials can retire independently');
+      assert.equal(typeof legacy.get('connectionEpoch'), 'string');
+      const reply = { ...entry('pending-reply', 'The delayed response completed'), role: 'assistant' as const };
+      await active.saveEntries([...snapshot, reply]);
+      assert.deepEqual(legacy.get('entries'), [...original, reply]);
+      // Once all work has actually been copied, ordinary privacy cleanup can
+      // retire it completely and use the history barrier again.
+      await reopened.storage(id).saveEntries([...original, reply]);
+      await reopened.storage(id).clearEntries();
+      assertLegacyRetired(legacy);
+      assert.notEqual(legacy.get('entriesEpoch'), epoch);
+    });
+  }
+
+  it('invalidates a pending first setup save when only durable history provenance authorizes cleanup', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const namespace = 'history-proof-only';
+    const manager = await store(t, namespace);
+    const copied = entry('copied');
+    // Model a restart after the destination was cleared and cleanup interrupted:
+    // only the committed hash proof remains, never the raw source or credentials.
+    idb.databases.get(`${namespace}:profiles`)!.set('legacyMigration', { version: 1, entries: [jsonFingerprint(copied)], connections: [] });
+    const legacy = new Map<string, unknown>([['entries', [copied]]]);
+    idb.databases.set(`${namespace}:chat`, legacy);
+    const stale = new BrowserChatStore(namespace); t.after(() => stale.close());
+    await stale.load();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    t.after(() => release());
+    (stale as unknown as { writes: Promise<void> }).writes = gate;
+    const saving = stale.saveConnection(connection);
+    const reopened = await store(t, namespace);
+    assert.deepEqual(reopened.activeProfile.entries, []);
+    assertLegacyRetired(legacy);
+    assert.equal(typeof legacy.get('connectionEpoch'), 'string');
+    release();
+    await assert.rejects(saving, /Reload before saving/u);
+    assert.equal(legacy.has('connection'), false);
+    assert.equal(manager.activeProfile.connection, undefined);
+  });
+
+  it('treats barrier-only legacy state after a memory-only cleanup as pristine for a maximum restore', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const legacy = new Map<string, unknown>([['entries', [entry('erased')]], ['connection', connection]]);
+    idb.databases.set('sentinel-bootstrap:chat', legacy);
+    const memoryOnly = await store(t, 'sentinel-bootstrap', false);
+    await memoryOnly.clearLegacyData();
+    assertLegacyRetired(legacy);
+    assert.equal(typeof legacy.get('connectionEpoch'), 'string');
+    const fresh = await store(t, 'sentinel-bootstrap');
+    assert.deepEqual(fresh.activeProfile.entries, []);
+    assert.equal(fresh.activeProfile.connection, undefined);
+    await fresh.restore(fullBackup());
+    assert.equal(fresh.listProfiles().length, PROFILE_LIMITS.profiles);
+    assert.equal(fresh.profileInfo(fresh.activeProfileId)!.name, 'import-99');
+    assertLegacyRetired(legacy);
+    assert.equal(JSON.stringify([...idb.databases.get('sentinel-bootstrap:profiles')!]).includes(connection.apiKey!), false);
   });
 });
 

@@ -426,6 +426,8 @@ export async function createChatPanel({
           const connection = toStoredConnection(model, resolvedKey);
           return { profileId, connection, rememberKey: session.rememberKey && !model.getApiKey };
         }));
+        // The deadline protects credential callbacks, not archive size or background-tab throughput.
+        clearTimeout(timer);
         const result = await abortable(profiles.backupDownload({ sessions, signal: controller.signal }), controller.signal);
         if (typeof result === 'string') return result;
         streaming = true;
