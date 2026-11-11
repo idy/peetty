@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 
@@ -39,8 +40,7 @@ const _retryMs = 1200.0;
 enum _Mode { paused, ground, jump, fall, hang, drag }
 
 class _Flight {
-  _Flight({required this.from, required this.plan, required this.target, required this.hang, required this.fright})
-      : origin = Offset(target.left, target.y);
+  _Flight({required this.from, required this.plan, required this.target, required this.hang, required this.fright}) : origin = Offset(target.left, target.y);
   final Offset from;
   final Jump plan;
   Perch target;
@@ -105,6 +105,8 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
   Duration _lastTick = Duration.zero;
   bool _reducedMotion = false;
   EdgeInsets _padding = EdgeInsets.zero;
+  Size? _screen;
+  AssetBundle? _bundle;
 
   /// Frame time in ms; every timing decision uses this clock.
   double _clock = 0;
@@ -135,7 +137,6 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
     super.initState();
     _random = widget.random ?? math.Random().nextDouble;
     _ticker = createTicker(_tick);
-    _load();
   }
 
   @override
@@ -143,7 +144,15 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
     super.didUpdateWidget(oldWidget);
     if (widget.random != oldWidget.random) _random = widget.random ?? math.Random().nextDouble;
     if (widget.figure != oldWidget.figure || widget.figureData != oldWidget.figureData || widget.scale != oldWidget.scale) _load();
-    if (widget.visible != oldWidget.visible && !widget.visible) _park();
+    if (widget.visible != oldWidget.visible) {
+      if (widget.visible) {
+        _startTicker();
+      } else {
+        // Hidden: park her and stop scheduling frames until she is shown again.
+        _park();
+        _ticker.stop();
+      }
+    }
   }
 
   @override
@@ -151,7 +160,25 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
     super.didChangeDependencies();
     _reducedMotion = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
     _padding = MediaQuery.maybePaddingOf(context) ?? EdgeInsets.zero;
+    _screen = MediaQuery.maybeSizeOf(context);
+    // Inherited lookups belong here, not in initState.
+    final bundle = DefaultAssetBundle.of(context);
+    if (bundle != _bundle) {
+      final first = _bundle == null;
+      _bundle = bundle;
+      if (first || widget.figureData == null) _load();
+    }
   }
+
+  void _startTicker() {
+    if (_ticker.isActive || _view == null || !widget.visible) return;
+    // A restarted ticker counts from zero again.
+    _lastTick = Duration.zero;
+    _ticker.start();
+  }
+
+  /// Disposes a replaced controller once the widgets listening to it have let go.
+  void _retire(FigureController controller) => WidgetsBinding.instance.addPostFrameCallback((_) => controller.dispose());
 
   @override
   void dispose() {
@@ -165,9 +192,11 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
     _loading = request;
     final Figure figure;
     try {
-      figure = widget.figureData ?? await loadFigure(widget.figure, bundle: DefaultAssetBundle.of(context));
+      figure = widget.figureData ?? await loadFigure(widget.figure, bundle: _bundle);
     } catch (error, stack) {
-      FlutterError.reportError(FlutterErrorDetails(exception: error, stack: stack, library: 'peetty', context: ErrorDescription('loading figure "${widget.figure}"')));
+      FlutterError.reportError(
+        FlutterErrorDetails(exception: error, stack: stack, library: 'peetty', context: ErrorDescription('loading figure "${widget.figure}"')),
+      );
       return;
     }
     if (!mounted || _loading != request) return;
@@ -178,10 +207,10 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
       view
         ..setFacing(previous.facing)
         ..play(previous.motion.current);
-      previous.dispose();
+      _retire(previous);
     }
     setState(() => _view = view);
-    if (!_ticker.isActive) _ticker.start();
+    _startTicker();
   }
 
   /// Asks her to do something now. Walking and jumping pick their own target;
@@ -244,13 +273,22 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
   Limits? _limits(RenderBox host) {
     final view = _view!;
     final size = host.size;
-    final padding = _padding;
+    final (insetTop, insetBottom) = _insets(host);
     final left = view.anchor.dx;
     final right = size.width - (view.width - view.anchor.dx);
-    final top = view.anchor.dy + padding.top;
-    final bottom = size.height - padding.bottom;
+    final top = view.anchor.dy + insetTop;
+    final bottom = size.height - insetBottom;
     if (right < left || bottom < top) return null;
     return Limits(left, right, top, bottom);
+  }
+
+  /// The safe-area insets that overlap the host, in host coordinates.
+  (double, double) _insets(RenderBox host) {
+    final screen = _screen;
+    if (screen == null) return (0, 0);
+    final top = host.localToGlobal(Offset.zero).dy;
+    final bottom = top + host.size.height;
+    return (math.max(0.0, _padding.top - top), math.max(0.0, bottom - (screen.height - _padding.bottom)));
   }
 
   List<Perch> _scan(RenderBox host) {
@@ -293,9 +331,11 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
   void _ground(RenderBox host, double now, double dt) {
     final live = _perch == null ? null : _refresh(host, _perch!);
     if (live == null) return _startFall();
+    // Ride along with the surface as it moves sideways, then stay on its visible span.
+    _x = (_x + live.origin - _perch!.origin).clamp(live.left, live.right);
+    _walkTo += live.origin - _perch!.origin;
     _perch = live;
     _y = live.y;
-    _x = _x.clamp(live.left, live.right);
 
     if (_action == FigureState.walk) {
       _walkTo = _walkTo.clamp(live.left, live.right);
@@ -391,8 +431,8 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
   void _hanging(RenderBox host, double now) {
     final live = _perch == null ? null : _refresh(host, _perch!);
     if (live == null) return _startFall();
+    _x = (_x + live.origin - _perch!.origin).clamp(live.left, live.right);
     _perch = live;
-    _x = _x.clamp(live.left, live.right);
     _y = live.y;
     if (now > _hangUntil) _land(live, 0.25);
   }
@@ -516,6 +556,12 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
 
   void _onPointer(PointerEvent event) => _pointer = event.localPosition;
 
+  /// A lifted finger or stylus, or a mouse that left, is no longer near her.
+  void _onPointerGone(PointerEvent event) {
+    if (event is PointerUpEvent && event.kind == PointerDeviceKind.mouse) return;
+    _pointer = null;
+  }
+
   void _greet() {
     if (_mode != _Mode.ground) return;
     _lastGreet = _clock;
@@ -562,28 +608,41 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
         onPointerHover: _onPointer,
         onPointerMove: _onPointer,
         onPointerDown: _onPointer,
-        child: Stack(
-          key: _hostKey,
-          fit: StackFit.expand,
-          children: [
-            widget.child,
-            if (view != null && widget.visible && _mode != _Mode.paused)
-              ListenableBuilder(
-                listenable: view,
-                builder: (context, child) {
-                  final topLeft = _topLeft(view);
-                  return Positioned(left: topLeft.dx, top: topLeft.dy, child: child!);
-                },
-                child: GestureDetector(
-                  onTap: _greet,
-                  onPanStart: _dragStart,
-                  onPanUpdate: (details) => _dragTo(details.globalPosition),
-                  onPanEnd: (details) => _dragEnd(details.velocity.pixelsPerSecond),
-                  onPanCancel: () => _dragEnd(Offset.zero),
-                  child: MouseRegion(cursor: SystemMouseCursors.grab, child: FigureCanvas(controller: view)),
+        onPointerUp: _onPointerGone,
+        onPointerCancel: _onPointerGone,
+        child: MouseRegion(
+          opaque: false,
+          hitTestBehavior: HitTestBehavior.translucent,
+          onExit: _onPointerGone,
+          child: Stack(
+            key: _hostKey,
+            fit: StackFit.expand,
+            children: [
+              widget.child,
+              if (view != null && widget.visible && _mode != _Mode.paused)
+                ListenableBuilder(
+                  listenable: view,
+                  builder: (context, child) {
+                    final topLeft = _topLeft(view);
+                    return Positioned(left: topLeft.dx, top: topLeft.dy, child: child!);
+                  },
+                  child: GestureDetector(
+                    onTap: _greet,
+                    onPanStart: _dragStart,
+                    onPanUpdate: (details) => _dragTo(details.globalPosition),
+                    onPanEnd: (details) => _dragEnd(details.velocity.pixelsPerSecond),
+                    onPanCancel: () => _dragEnd(Offset.zero),
+                    // Defer to the painted figure, so taps on transparent areas reach the app.
+                    // (A non-opaque MouseRegion would also hide hits from the gesture detector.)
+                    child: MouseRegion(
+                      cursor: SystemMouseCursors.grab,
+                      hitTestBehavior: HitTestBehavior.deferToChild,
+                      child: FigureCanvas(controller: view),
+                    ),
+                  ),
                 ),
-              ),
-          ],
+            ],
+          ),
         ),
       ),
     );

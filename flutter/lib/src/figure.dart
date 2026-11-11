@@ -56,6 +56,16 @@ const autonomousActions = [
 
 const heldProps = ['book', 'cup', 'camera'];
 
+/// Size limits for untrusted figure data, matching the web validator's `LIMITS`.
+const maxParts = 200;
+const maxShapesPerPart = 64;
+const maxPathLength = 20000;
+const maxPaletteEntries = 64;
+const maxGradients = 64;
+const maxClips = 64;
+const maxGradientStops = 16;
+final _pathData = RegExp(r'^[MmLlHhVvCcSsQqTtAaZz0-9eE.,\s+-]*$');
+
 /// Thrown when figure data is not a valid rig figure.
 class FigureFormatException extends FormatException {
   const FigureFormatException(super.message);
@@ -213,7 +223,9 @@ class Figure {
     final vb = _numbers(f['viewBox'], 'viewBox', 4);
     if (vb[2] <= 0 || vb[3] <= 0) throw const FigureFormatException('viewBox needs a positive size');
     final palette = <String, String>{};
-    for (final MapEntry(:key, :value) in _obj(f['palette'], 'palette').entries) {
+    final paletteJson = _obj(f['palette'], 'palette');
+    if (paletteJson.length > maxPaletteEntries) throw const FigureFormatException('palette has more than $maxPaletteEntries entries');
+    for (final MapEntry(:key, :value) in paletteJson.entries) {
       if (value is! String || parseColor(value) == null) throw FigureFormatException('palette.$key must be a color');
       palette[key] = value;
     }
@@ -224,21 +236,29 @@ class Figure {
     };
 
     final gradients = <String, FigureGradient>{};
-    for (final MapEntry(:key, :value) in _obj(f['gradients'] ?? const {}, 'gradients').entries) {
+    final gradientsJson = _obj(f['gradients'] ?? const {}, 'gradients');
+    if (gradientsJson.length > maxGradients) throw const FigureFormatException('gradients has more than $maxGradients entries');
+    for (final MapEntry(:key, :value) in gradientsJson.entries) {
       gradients[key] = _gradient(_obj(value, 'gradients.$key'), 'gradients.$key');
     }
 
     final clips = <String, Path>{};
-    for (final MapEntry(:key, :value) in _obj(f['clips'] ?? const {}, 'clips').entries) {
-      final union = Path();
-      for (final shape in _list(value, 'clips.$key')) {
-        union.addPath(_geometry(_obj(shape, 'clips.$key[]'), 'clips.$key'), Offset.zero);
+    final clipsJson = _obj(f['clips'] ?? const {}, 'clips');
+    if (clipsJson.length > maxClips) throw const FigureFormatException('clips has more than $maxClips entries');
+    for (final MapEntry(:key, :value) in clipsJson.entries) {
+      // A geometric union, as an SVG clipPath combines its children; appending
+      // contours to one nonzero path would cancel overlaps of opposite winding.
+      Path? union;
+      for (final shape in _shapeList(value, 'clips.$key')) {
+        final path = _geometry(_obj(shape, 'clips.$key[]'), 'clips.$key');
+        union = union == null ? path : Path.combine(PathOperation.union, union, path);
       }
-      clips[key] = union;
+      clips[key] = union!;
     }
 
     final parts = <FigurePart>[];
     final partsJson = _list(f['parts'], 'parts');
+    if (partsJson.isEmpty || partsJson.length > maxParts) throw const FigureFormatException('parts needs 1–$maxParts parts');
     for (var i = 0; i < partsJson.length; i++) {
       parts.add(_part(_obj(partsJson[i], 'parts[$i]'), 'parts[$i]', clips));
     }
@@ -269,14 +289,14 @@ FigurePart _part(Map<String, Object?> p, String at, Map<String, Path> clips) {
   final boneName = _string(p['bone'], '$at.bone');
   final bone = Bone.values.where((b) => b.name == boneName).firstOrNull;
   if (bone == null) throw FigureFormatException('$at.bone is not a standard bone');
-  final clip = p['clip'] as String?;
+  final clip = _optionalString(p['clip'], '$at.clip');
   if (clip != null && !clips.containsKey(clip)) throw FigureFormatException('$at.clip is not defined');
   final spring = p['spring'] == null ? null : _obj(p['spring'], '$at.spring');
   return FigurePart(
     id: _string(p['id'], '$at.id'),
     bone: bone,
     z: _number(p['z'], '$at.z'),
-    slot: p['slot'] as String?,
+    slot: _optionalString(p['slot'], '$at.slot'),
     pivot: p['pivot'] == null ? null : _point(p['pivot'], '$at.pivot'),
     look: p['look'] == null ? null : _point(p['look'], '$at.look'),
     clip: clip,
@@ -289,14 +309,14 @@ FigurePart _part(Map<String, Object?> p, String at, Map<String, Path> clips) {
             limit: _optionalNumber(spring['limit']),
             hang: _optionalNumber(spring['hang']),
           ),
-    shapes: [for (final shape in _list(p['shapes'], '$at.shapes')) _shape(_obj(shape, '$at.shapes[]'), '$at.shapes')],
+    shapes: [for (final shape in _shapeList(p['shapes'], '$at.shapes')) _shape(_obj(shape, '$at.shapes[]'), '$at.shapes')],
   );
 }
 
 FigureShape _shape(Map<String, Object?> s, String at) => FigureShape(
       path: _geometry(s, at),
-      fill: s['fill'] as String?,
-      stroke: s['stroke'] as String?,
+      fill: _optionalString(s['fill'], '$at.fill'),
+      stroke: _optionalString(s['stroke'], '$at.stroke'),
       strokeWidth: _optionalNumber(s['strokeWidth']) ?? 1,
       opacity: _optionalNumber(s['opacity']),
       lineCap: switch (s['lineCap']) { 'butt' => StrokeCap.butt, 'square' => StrokeCap.square, _ => StrokeCap.round },
@@ -312,9 +332,13 @@ FigureShape _shape(Map<String, Object?> s, String at) => FigureShape(
 Path _geometry(Map<String, Object?> s, String at) {
   switch (s['type']) {
     case 'path':
+      final d = _string(s['d'], '$at.d');
+      if (d.length > maxPathLength || !_pathData.hasMatch(d)) {
+        throw FigureFormatException('$at.d must be SVG path data of at most $maxPathLength characters');
+      }
       final path = Path();
       try {
-        writeSvgPathDataToPath(_string(s['d'], '$at.d'), _PathWriter(path));
+        writeSvgPathDataToPath(d, _PathWriter(path));
       } on StateError catch (e) {
         throw FigureFormatException('$at.d: ${e.message}');
       }
@@ -341,8 +365,10 @@ Path _geometry(Map<String, Object?> s, String at) {
 }
 
 FigureGradient _gradient(Map<String, Object?> g, String at) {
+  final stopsJson = _list(g['stops'], '$at.stops');
+  if (stopsJson.isEmpty || stopsJson.length > maxGradientStops) throw FigureFormatException('$at.stops needs 1–$maxGradientStops stops');
   final stops = [
-    for (final stop in _list(g['stops'], '$at.stops'))
+    for (final stop in stopsJson)
       if (_obj(stop, '$at.stops[]') case final s)
         GradientStop(_number(s['offset'], '$at.stops.offset'), _string(s['color'], '$at.stops.color'), _optionalNumber(s['opacity'])),
   ];
@@ -370,8 +396,8 @@ FigureBehavior _behavior(Object? json) {
     weights: weights,
     walkSpeed: _optionalNumber(b['walkSpeed']) ?? 1,
     jumpPower: _optionalNumber(b['jumpPower']) ?? 1,
-    idleProp: b['idleProp'] as String? ?? 'none',
-    fallProp: b['fallProp'] as String? ?? 'none',
+    idleProp: _optionalString(b['idleProp'], 'behavior.idleProp') ?? 'none',
+    fallProp: _optionalString(b['fallProp'], 'behavior.fallProp') ?? 'none',
   );
 }
 
@@ -396,6 +422,17 @@ Map<String, Object?> _obj(Object? v, String at) {
 List<Object?> _list(Object? v, String at) {
   if (v is List) return v.cast<Object?>();
   throw FigureFormatException('$at must be an array');
+}
+
+List<Object?> _shapeList(Object? v, String at) {
+  final list = _list(v, at);
+  if (list.isEmpty || list.length > maxShapesPerPart) throw FigureFormatException('$at needs 1–$maxShapesPerPart shapes');
+  return list;
+}
+
+String? _optionalString(Object? v, String at) {
+  if (v == null || v is String) return v as String?;
+  throw FigureFormatException('$at must be a string');
 }
 
 String _string(Object? v, String at) {

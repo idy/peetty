@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'package:flutter/rendering.dart' show RenderOffstage;
 import 'package:flutter/widgets.dart';
 
 import 'physics.dart';
@@ -70,7 +71,7 @@ abstract interface class PerchSource {
 
 /// A top edge in host coordinates. [source] is null for the floor.
 class Perch implements Edge {
-  const Perch({required this.left, required this.right, required this.y, this.source, this.preferred = false});
+  const Perch({required this.left, required this.right, required this.y, this.origin = 0, this.source, this.preferred = false});
 
   @override
   final double left;
@@ -80,6 +81,9 @@ class Perch implements Edge {
   final double y;
   final PerchSource? source;
   final bool preferred;
+
+  /// The surface's unclipped left edge, for following it as it moves sideways.
+  final double origin;
 
   bool get isFloor => source == null;
 
@@ -121,14 +125,15 @@ class PerchRegistry {
     if (box == null || !host.attached) return null;
     final visible = visibleRect(box, host);
     if (visible == null || visible.isEmpty) return null;
-    final top = MatrixUtils.transformRect(box.getTransformTo(host), Offset.zero & box.size).top;
+    final bounds = MatrixUtils.transformRect(box.getTransformTo(host), Offset.zero & box.size);
+    final top = bounds.top;
     // Her feet need the top edge itself on screen, and her body room above it.
     if (top < visible.top - 0.5 || top > visible.bottom || top < limits.top || top > limits.bottom) return null;
     final inset = math.min(12.0, visible.width * 0.15);
     final left = math.max(visible.left + inset, limits.left);
     final right = math.min(visible.right - inset, limits.right);
     if (right < left) return null;
-    return Perch(left: left, right: right, y: top, source: source, preferred: source.preferred);
+    return Perch(left: left, right: right, y: top, origin: bounds.left, source: source, preferred: source.preferred);
   }
 }
 
@@ -139,6 +144,8 @@ Rect? visibleRect(RenderBox box, RenderBox host) {
   while (child != host) {
     final parent = child.parent;
     if (parent == null) return null; // Not inside the host.
+    // Offstage children stay laid out but are never painted.
+    if (parent is RenderOffstage && parent.offstage) return null;
     final clip = parent.describeApproximatePaintClip(child);
     if (clip != null) rect = rect.intersect(MatrixUtils.transformRect(parent.getTransformTo(host), clip));
     if (rect.isEmpty) return null;

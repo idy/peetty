@@ -104,6 +104,7 @@ class Rig {
   final _available = <String>{};
   final _slots = <String, String>{};
   final _shaders = <String, ui.Shader>{};
+  final _outlines = Expando<List<Offset>>();
   late final Offset _mouth;
   Offset _look = Offset.zero;
   Map<Bone, Affine> _world = {};
@@ -156,13 +157,8 @@ class Rig {
       canvas.save();
       canvas.transform(_world[part.bone]!.storage);
       if (part.clip != null) canvas.clipPath(figure.clips[part.clip]!);
-      if (part.look != null) canvas.translate(_look.dx * part.look!.dx, _look.dy * part.look!.dy);
-      if (part.spring != null && part.pivot != null && view.angle != 0) {
-        final p = part.pivot!;
-        canvas.translate(p.dx, p.dy);
-        canvas.rotate(view.angle * math.pi / 180);
-        canvas.translate(-p.dx, -p.dy);
-      }
+      // The clip sits outside the look/spring transform, so an iris can move inside its eye.
+      if (_inner(view) case final inner?) canvas.transform(inner.storage);
       for (final shape in part.shapes) {
         _drawShape(canvas, shape);
       }
@@ -172,20 +168,76 @@ class Rig {
     canvas.restore();
   }
 
-  /// Whether a point in viewBox coordinates lands on a drawn part.
+  /// The look and spring transform inside a part's clip, or null when it has none.
+  Affine? _inner(_PartView view) {
+    final part = view.part;
+    var m = Affine.identity;
+    var moved = false;
+    if (part.look != null) {
+      m = Affine(1, 0, 0, 1, _look.dx * part.look!.dx, _look.dy * part.look!.dy);
+      moved = true;
+    }
+    if (part.spring != null && part.pivot != null && view.angle != 0) {
+      final p = part.pivot!;
+      final r = view.angle * math.pi / 180;
+      final cos = math.cos(r), sin = math.sin(r);
+      // rotate(angle) around the pivot.
+      m = m * Affine(cos, sin, -sin, cos, p.dx - cos * p.dx + sin * p.dy, p.dy - sin * p.dx - cos * p.dy);
+      moved = true;
+    }
+    return moved ? m : null;
+  }
+
+  /// Whether a point in viewBox coordinates lands on painted fill or stroke,
+  /// through the same bone, clip, look and spring transforms used to paint.
   bool hitTest(Offset point) {
     for (final view in _views.reversed) {
       if (!view.visible) continue;
-      final inverse = _world[view.part.bone]!.inverse;
+      final part = view.part;
+      final inverse = _world[part.bone]!.inverse;
       if (inverse == null) continue;
-      final local = inverse.apply(point);
-      for (final shape in view.part.shapes) {
-        if ((shape.fill != null || shape.stroke != null) && shape.path.getBounds().inflate(shape.strokeWidth).contains(local) && shape.path.contains(local)) {
-          return true;
-        }
+      final boneLocal = inverse.apply(point);
+      if (part.clip != null && !figure.clips[part.clip]!.contains(boneLocal)) continue;
+      final inner = _inner(view);
+      final innerInverse = inner?.inverse;
+      if (inner != null && innerInverse == null) continue;
+      final local = innerInverse?.apply(boneLocal) ?? boneLocal;
+      for (final shape in part.shapes) {
+        if (_hitsShape(shape, local)) return true;
       }
     }
     return false;
+  }
+
+  bool _hitsShape(FigureShape shape, Offset local) {
+    final fill = _paint(shape.fill);
+    final stroke = _paint(shape.stroke);
+    if (fill == null && stroke == null) return false;
+    final half = stroke == null ? 0.0 : shape.strokeWidth / 2;
+    if (!shape.path.getBounds().inflate(half + 0.5).contains(local)) return false;
+    if (fill != null && shape.path.contains(local)) return true;
+    return stroke != null && _nearOutline(shape, local, half + 0.5);
+  }
+
+  /// Whether [local] lies within [reach] of the shape's outline, sampled once per shape.
+  bool _nearOutline(FigureShape shape, Offset local, double reach) {
+    final samples = _outlines[shape] ??= _sampleOutline(shape.path, math.max(0.5, shape.strokeWidth / 4));
+    final limit = reach * reach;
+    for (final p in samples) {
+      final d = p - local;
+      if (d.dx * d.dx + d.dy * d.dy <= limit) return true;
+    }
+    return false;
+  }
+
+  static List<Offset> _sampleOutline(Path path, double spacing) {
+    final points = <Offset>[];
+    for (final metric in path.computeMetrics()) {
+      for (var d = 0.0; d <= metric.length; d += spacing) {
+        if (metric.getTangentForOffset(d) case final t?) points.add(t.position);
+      }
+    }
+    return points;
   }
 
   void _drawShape(Canvas canvas, FigureShape shape) {

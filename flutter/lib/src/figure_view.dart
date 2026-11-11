@@ -69,7 +69,7 @@ class FigureController extends ChangeNotifier {
   void play(FigureState state) => motion.play(state);
 
   void setFacing(int direction) {
-    if (direction == 0 || direction.sign == _facing) return;
+    if (_disposed || direction == 0 || direction.sign == _facing) return;
     _facing = direction.sign;
     notifyListeners();
   }
@@ -88,6 +88,10 @@ class FigureController extends ChangeNotifier {
       final dy = (p.dy - height * 0.4) / (height * 2);
       rig.setLook(dx, dy);
       motion.setGaze(dx, dy);
+    } else {
+      // No override and no pointer: look ahead again rather than keep the last action's gaze.
+      rig.setLook(0, 0);
+      motion.setGaze(0, 0);
     }
     rig.setSlots(frame.slots);
     rig.setSoul(frame.soul);
@@ -225,7 +229,9 @@ class _PeettyFigureState extends State<PeettyFigure> with SingleTickerProviderSt
   void didUpdateWidget(PeettyFigure oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.figure != widget.figure || oldWidget.scale != widget.scale) {
-      _controller.dispose();
+      // The canvas still listens to the old controller until this frame rebuilds it.
+      final previous = _controller;
+      WidgetsBinding.instance.addPostFrameCallback((_) => previous.dispose());
       _controller = _create();
     }
     _controller
