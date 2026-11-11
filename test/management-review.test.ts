@@ -13,6 +13,10 @@ import { installChatIndexedDB } from './helpers/chat-storage.ts';
 import { deferred } from './helpers/pet-dom.ts';
 
 const flush = async () => { for (let i = 0; i < 100; i++) await Promise.resolve(); };
+async function eventually(condition: () => boolean) {
+  for (let i = 0; i < 1_000 && !condition(); i++) await new Promise<void>(resolve => setImmediate(resolve));
+  assert.ok(condition(), 'expected management operation completed');
+}
 const memory = (id: string, text: string) => ({ id, text, manual: true, createdAt: 1, updatedAt: 2 });
 
 async function mount(t: TestContext, options: {
@@ -227,6 +231,67 @@ describe('multipart backup UI', () => {
     input.dispatchEvent(new ui.window.Event('change') as unknown as Event); await flush();
     assert.equal(reads, 0); assert.equal(restore.mock.callCount(), 0);
     assert.equal(ui.query('.pc-manage-status').hasAttribute('data-error'), true);
+  });
+});
+
+describe('import view lifetime', () => {
+  for (const kind of ['restore', 'memory'] as const) {
+    for (const discard of ['same-profile refresh', 'other-profile refresh', 'destroy'] as const) {
+      it(`cancels a deferred ${kind} read on ${discard} without importing, selecting or reading more files`, async (t) => {
+        installChatIndexedDB(t); let selections = 0; let reloads = 0; let secondId = '';
+        const ui = await mount(t, { onSelect: async () => { selections++; }, onReload: async () => { reloads++; }, seed: async store => {
+          const first = store.activeProfileId; secondId = (await store.create({ name: 'Other existing profile' })).id; await store.select(first);
+        } });
+        const originalId = ui.store.activeProfileId; const before = ui.store.listProfiles().length;
+        const source = new BrowserProfileStore(`import-lifetime-${crypto.randomUUID()}`, false); await source.initialize({ name: 'Imported profile must not appear' }); t.after(() => source.close());
+        await source.saveMemory(source.activeProfileId, { text: 'Imported memory must not appear' });
+        let texts: string[];
+        if (kind === 'restore') {
+          await source.storage(source.activeProfileId).saveEntries([{ id: 'source-history', role: 'user', text: 'Synthetic conversation '.repeat(100), createdAt: 1 }]);
+          const parts = await source.backupDownload({ _testing: { fileBytes: 1_024 } }); assert.notEqual(typeof parts, 'string');
+          texts = []; for await (const part of parts as AsyncIterable<BackupDownloadFile>) texts.push(part.text);
+          assert.ok(texts.length > 1);
+        } else texts = [await source.exportMemories(source.activeProfileId), 'unused second memory file'];
+        ui.tab('data'); const pending = deferred<string>(); let reads = 0;
+        const files = texts.map((text, index) => ({ size: new TextEncoder().encode(text).length, text: async () => { reads++; return index === 0 ? pending.promise : text; } }));
+        const input = ui.query<HTMLInputElement>(kind === 'restore' ? 'input[type="file"][multiple]' : 'input[type="file"]:not([multiple])');
+        Object.defineProperty(input, 'files', { configurable: true, value: files });
+        input.dispatchEvent(new ui.window.Event('change') as unknown as Event); await eventually(() => reads === 1);
+        if (discard === 'other-profile refresh') { await ui.store.select(secondId); ui.management.refresh(); }
+        else if (discard === 'same-profile refresh') ui.management.refresh();
+        else ui.management.destroy();
+        await flush();
+        const status = ui.query('.pc-manage-status').textContent;
+        assert.equal(status, '', 'discard clears only the abandoned working status');
+        if (discard !== 'destroy') assert.equal(ui.query<HTMLButtonElement>('[data-focus-key="restore"]').disabled, false, 'cancellation unlocks the current view before File.text settles');
+        pending.resolve(texts[0]!); await flush();
+        assert.equal(reads, 1, 'the next file is never read');
+        assert.equal(ui.store.listProfiles().length, before);
+        assert.equal(ui.store.activeProfileId, discard === 'other-profile refresh' ? secondId : originalId);
+        assert.equal(ui.store.profileInfo(originalId)!.memoryCount, 0);
+        assert.equal(ui.store.profileInfo(secondId)!.memoryCount, 0);
+        assert.equal(selections, 0); assert.equal(reloads, 0);
+        assert.equal(ui.query('.pc-manage-status').textContent, status, 'a late result cannot announce completion or failure');
+      });
+    }
+  }
+
+  it('keeps successful restore current until commit and permits its own selection refresh', async (t) => {
+    installChatIndexedDB(t); let selections = 0;
+    const ui = await mount(t, { onSelect: async () => { selections++; } });
+    const originalId = ui.store.activeProfileId; const text = await ui.store.backup();
+    const restore = ui.store.restoreFileSelection.bind(ui.store); let signal: AbortSignal | undefined;
+    t.mock.method(ui.store, 'restoreFileSelection', async (...args: Parameters<BrowserProfileStore['restoreFileSelection']>) => {
+      signal = args[1]?.signal; assert.equal(args[1]?.current?.(), true);
+      await restore(...args); assert.equal(signal?.aborted, false, 'the owner remains live through commit');
+    });
+    ui.tab('data'); const input = ui.query<HTMLInputElement>('input[type="file"][multiple]');
+    Object.defineProperty(input, 'files', { configurable: true, value: [new ui.window.File([text], 'backup.json')] });
+    input.dispatchEvent(new ui.window.Event('change') as unknown as Event);
+    await eventually(() => ui.query('.pc-manage-status').textContent === 'Import complete.');
+    assert.equal(signal?.aborted, false, 'successful UI refresh does not cancel the committed import');
+    assert.equal(selections, 1); assert.notEqual(ui.store.activeProfileId, originalId);
+    assert.equal(ui.query<HTMLSelectElement>('.pc-profile-select').value, ui.store.activeProfileId);
   });
 });
 

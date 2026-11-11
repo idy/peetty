@@ -316,6 +316,37 @@ describe('Pet profile figure integration', () => {
     });
   }
 
+  it('protects a successful figure while its pending Profile write outlives a failed replacement', async (t) => {
+    installChatIndexedDB(t);
+    const namespace = 'sdk-figure-write-protected';
+    const seed = new BrowserProfileStore(namespace); await seed.initialize({ figure: 'riley' }); t.after(() => seed.close());
+    const { pet, state, settle } = await mountProfileChatPet(t, { chat: { storageKey: namespace } });
+    const initialized = deferred<void>(); const releaseInit = deferred<void>();
+    const writing = deferred<void>(); const releaseWrite = deferred<void>(); const failed = deferred<Response>();
+    const initialize = BrowserProfileStore.prototype.initialize;
+    mock.method(BrowserProfileStore.prototype, 'initialize', async function(this: BrowserProfileStore, ...args: Parameters<typeof initialize>) {
+      await initialize.apply(this, args); initialized.resolve(); await releaseInit.promise;
+    });
+    const update = BrowserProfileStore.prototype.update;
+    mock.method(BrowserProfileStore.prototype, 'update', async function(this: BrowserProfileStore, ...args: Parameters<typeof update>) {
+      if (args[1].figure === 'elsie') { writing.resolve(); await releaseWrite.promise; }
+      return update.apply(this, args);
+    });
+    mock.method(globalThis, 'fetch', () => failed.promise);
+    const opening = pet.openChat(); await initialized.promise;
+    await pet.setFigure('elsie');
+    const replacement = assert.rejects(pet.setFigure('/synthetic-write-race.json'), /HTTP 503/);
+    releaseInit.resolve(); await writing.promise;
+    assert.equal(state.view.renderer.figure.id, 'elsie');
+    failed.resolve(new Response('', { status: 503 })); await replacement; await settle();
+    assert.equal(state.view.renderer.figure.id, 'elsie', 'a failed newer request cannot retry the old saved figure before the write commits');
+    releaseWrite.resolve(); await opening; await settle();
+    const inspect = new BrowserProfileStore(namespace); await inspect.initialize(); t.after(() => inspect.close());
+    assert.equal(inspect.activeProfile.figure, 'elsie');
+    assert.equal(state.view.renderer.figure.id, 'elsie');
+    await pet.configure(); assert.equal(state.view.renderer.figure.id, 'elsie');
+  });
+
   it('reconciles an SDK figure requested during panel construction into the initial owning profile', async (t) => {
     installChatIndexedDB(t);
     const namespace = 'sdk-figure-during-chat-loading';

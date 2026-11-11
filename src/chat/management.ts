@@ -230,6 +230,11 @@ export function createManagement(options: Options) {
   let busy = false;
   let destroyed = false;
   let activeDownload: AbortController | undefined;
+  let activeImport: AbortController | undefined;
+  function cancelImport() {
+    const controller = activeImport; activeImport = undefined;
+    if (controller) { controller.abort(); say(); }
+  }
   // Completion promises retain neither serialized parts nor Blobs, across canceled runs too.
   const downloadSlots: Promise<void>[] = [];
 
@@ -360,15 +365,21 @@ export function createManagement(options: Options) {
     locked.clear();
     options.onBusy?.(false);
   }
-  async function run(id: string, origin: HTMLElement, action: () => Promise<void>, success: CopyKey | (() => CopyKey) = 'saved', failure: CopyKey | (() => CopyKey) = 'failed') {
+  async function run(id: string, origin: HTMLElement, action: () => Promise<void>, success: CopyKey | (() => CopyKey) = 'saved', failure: CopyKey | (() => CopyKey) = 'failed', signal?: AbortSignal) {
     if (busy || !owns(id, origin)) return;
     busy = true;
     options.onBusy?.(true);
     const focus = captureFocus();
     captureDrafts(); say('working'); lockControls();
-    try { await action(); if (!destroyed) say(typeof success === 'function' ? success() : success); }
+    let canceled = false;
+    try {
+      if (signal?.aborted) throw new DOMException('Import canceled.', 'AbortError');
+      await (signal ? untilCanceled(action(), signal) : action());
+      if (!destroyed && !signal?.aborted) say(typeof success === 'function' ? success() : success);
+    }
     catch (error) {
-      if (!destroyed) say(error instanceof ChatStorageError && error.code === 'profile-delete' ? 'profileDeleteFailed'
+      canceled = !!signal && (signal.aborted || error instanceof DOMException && error.name === 'AbortError');
+      if (!destroyed && !canceled) say(error instanceof ChatStorageError && error.code === 'profile-delete' ? 'profileDeleteFailed'
         : error instanceof ChatStorageError && error.code === 'privacy-delete' ? 'privacyDeleteFailed'
         : error instanceof ChatStorageError && error.code === 'settings-save' ? 'memorySaveFailed'
         : error instanceof ChatStorageError && error.code === 'legacy-cleanup' ? 'legacyFailed' : typeof failure === 'function' ? failure() : failure, true);
@@ -377,9 +388,9 @@ export function createManagement(options: Options) {
       try {
         // Authoritative exports can discover that a peer deleted the selected profile.
         // Keep the sibling lock until the runtime adopts the store's fallback too.
-        if (!destroyed && boundProfileId !== store.activeProfileId) await transition(async () => {});
-      } catch { if (!destroyed) say('failed', true); }
-      finally { releaseBusy(); restoreFocus(focus); }
+        if (!destroyed && !canceled && !signal?.aborted && boundProfileId !== store.activeProfileId) await transition(async () => {});
+      } catch { if (!destroyed && !canceled && !signal?.aborted) say('failed', true); }
+      finally { releaseBusy(); if (!canceled && !signal?.aborted) restoreFocus(focus); }
     }
   }
   async function transition(action: () => Promise<unknown>) {
@@ -736,18 +747,29 @@ export function createManagement(options: Options) {
       close();
     }
   }
-  function fileButton(profileId: string, key: CopyKey, action: (files: FileList, origin: HTMLInputElement) => Promise<void>, multiple = false) {
+  function fileButton(profileId: string, key: CopyKey, action: (files: FileList, origin: HTMLInputElement, signal: AbortSignal) => Promise<void>, multiple = false) {
     const input = el('input'); input.type = 'file'; input.accept = '.json,application/json'; input.hidden = true; input.multiple = multiple;
     const trigger = button(key); trigger.dataset.focusKey = key; trigger.addEventListener('click', () => { if (!busy && owns(profileId, trigger)) input.click(); });
     input.addEventListener('change', () => {
       const selected = input.files;
       if (!selected?.length) { input.value = ''; return; }
+      if (busy || !owns(profileId, input)) return;
+      const controller = new AbortController(); activeImport = controller;
       void run(profileId, input, async () => {
-        // Keep the original FileList: the store validates and reads backup parts
-        // sequentially without retaining every body or restricting valid archive totals.
-        try { await action(selected, input); if (!destroyed) refresh(); }
-        finally { input.value = ''; }
-      }, 'imported');
+        // Keep the original FileList. The store reads sequentially and rechecks
+        // this exact view's lifetime before parsing and committing restored data.
+        try {
+          await action(selected, input, controller.signal);
+          if (controller.signal.aborted || activeImport !== controller) return;
+          // The import has committed. Its own successful refresh must not cancel it.
+          activeImport = undefined;
+          if (multiple) await transition(async () => {});
+          else if (!destroyed) refresh();
+        } finally {
+          if (activeImport === controller) activeImport = undefined;
+          input.value = '';
+        }
+      }, 'imported', 'failed', controller.signal);
     });
     const group = el('div', 'pc-row-actions'); group.append(trigger, input); return group;
   }
@@ -788,17 +810,19 @@ export function createManagement(options: Options) {
     withoutCredentials.addEventListener('click', () => startBackup(withoutCredentials, true));
     page.append(backup, withoutCredentials, copy('p', 'backupWithoutCredentialsHint', 'pc-note'), cancelDownload,
       copy('p', 'restoreHint', 'pc-note'), copy('p', 'restoreLimits', 'pc-note'),
-      fileButton(profileId, 'restore', (files) => transition(() => store.restoreFileSelection(files)), true));
+      fileButton(profileId, 'restore', (files, origin, signal) => store.restoreFileSelection(files, { signal, current: () => owns(profileId, origin) }), true));
     page.append(copy('h4', 'memoryTitle'), copy('p', 'memoryHint', 'pc-note'));
     const actions = el('div', 'pc-row-actions'); const json = button('exportMemory'); const markdown = button('exportMarkdown');
     json.dataset.focusKey = 'exportMemory'; markdown.dataset.focusKey = 'exportMarkdown';
     json.addEventListener('click', () => { void run(profileId, json, async () => { download(await store.exportMemories(profileId), 'peetty-memories.json'); }, 'downloaded'); });
     markdown.addEventListener('click', () => { void run(profileId, markdown, async () => { download(await store.exportMemoryMarkdown(profileId), 'peetty-memories.md', 'text/markdown'); }, 'downloaded'); });
-    actions.append(json, markdown); page.append(actions, fileButton(profileId, 'importMemory', async (files, origin) => {
+    actions.append(json, markdown); page.append(actions, fileButton(profileId, 'importMemory', async (files, origin, signal) => {
       const file = files[0]!;
       if (file.size > PROFILE_LIMITS.fileBytes) throw new Error('File too large.');
-      const text = await file.text(); requireOwner(profileId, origin);
-      await store.importMemories(profileId, text);
+      const text = await file.text();
+      if (signal.aborted) throw new DOMException('Import canceled.', 'AbortError');
+      requireOwner(profileId, origin);
+      await store.importMemories(profileId, text, { signal, current: () => owns(profileId, origin) });
     }));
     page.append(copy('h4', 'legacyTitle'), copy('p', 'legacyHint', 'pc-note'));
     const clearLegacy = button('clearLegacy', 'pc-link pc-danger'); clearLegacy.dataset.focusKey = 'clear-legacy';
@@ -823,6 +847,7 @@ export function createManagement(options: Options) {
     legacyConfirmation.append(confirmLegacy, cancelLegacy); page.append(clearLegacy, legacyConfirmation);
   }
   function renderPage() {
+    cancelImport();
     page.replaceChildren(); page.dataset.connection = String(tab === 'connection');
     page.hidden = tab === 'connection'; options.onTab(visible && tab === 'connection');
     const info = store.profileInfo(boundProfileId);
@@ -860,12 +885,12 @@ export function createManagement(options: Options) {
   return {
     element: root,
     get connectionVisible() { return visible && tab === 'connection'; },
-    show(show: boolean) { visible = show; root.hidden = !show; if (show) refresh(); else options.onTab(false); },
+    show(show: boolean) { visible = show; root.hidden = !show; if (show) refresh(); else { cancelImport(); options.onTab(false); } },
     refresh,
     translate,
     focus() { (page.querySelector<HTMLElement>('input,textarea,select,button') ?? selector).focus(); },
     destroy() {
-      destroyed = true; activeDownload?.abort(); activeDownload = undefined; releaseBusy(); views.clear();
+      destroyed = true; cancelImport(); activeDownload?.abort(); activeDownload = undefined; releaseBusy(); views.clear();
     },
   };
 }

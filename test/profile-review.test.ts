@@ -2550,6 +2550,222 @@ describe('durable explicit memory settings', () => {
   }
 });
 
+describe('bounded backup collections and restore ownership', () => {
+  function latch<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((done) => { resolve = done; });
+    return { promise, resolve };
+  }
+  const asFile = (text: string) => ({ size: new TextEncoder().encode(text).length, text: async () => text });
+  const table = Uint32Array.from({ length: 256 }, (_, i) => {
+    let crc = i; for (let bit = 0; bit < 8; bit++) crc = crc & 1 ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1; return crc >>> 0;
+  });
+  function envelopes(chunks: string[]) {
+    let crc = 0xffffffff; let length = 0;
+    for (const text of chunks) {
+      length += text.length;
+      for (let i = 0; i < text.length; i++) {
+        const code = text.charCodeAt(i);
+        crc = table[(crc ^ code) & 255]! ^ (crc >>> 8);
+        crc = table[(crc ^ (code >>> 8)) & 255]! ^ (crc >>> 8);
+      }
+    }
+    const digest = `crc32:${((crc ^ 0xffffffff) >>> 0).toString(16).padStart(8, '0')}:${length}`;
+    return chunks.map((text, index) => JSON.stringify({ format: 'peetty-backup-part', version: 1, backupId: 'bounded-fixture', count: chunks.length, index, digest, text }));
+  }
+
+  it('rejects the excess collection prefix before requesting the rest and counts distinct object keys', async () => {
+    const options = { collectionLimit: (_path: readonly string[], array: boolean) => array ? 3 : 2 };
+    assert.deepEqual(parseJSONChunks(['{"a":[1,2,3],"a":[3,2,1],"b":true}'], 1_000, undefined, options), { a: [3, 2, 1], b: true });
+    for (const prefix of ['[1,2,3,{', '{"a":1,"b":2,"c":']) {
+      let tail = false; let closed = false;
+      async function* chunks() { try { yield prefix; tail = true; yield 'untrusted remainder'; } finally { closed = true; } }
+      await assert.rejects(parseJSONChunksAsync(chunks(), 1_000, undefined, options), /Invalid/u);
+      assert.equal(tail, false); assert.equal(closed, true);
+      const sync: string[] = [prefix]; let read = false;
+      Object.defineProperty(sync, '1', { get() { read = true; return 'untrusted remainder'; } });
+      await assert.rejects(async () => parseJSONChunks(sync, 1_000, undefined, options), /Invalid/u);
+      assert.equal(read, false);
+    }
+    assert.deepEqual(parseJSONChunks(['{"__proto__":1,"__proto__":2,"constructor":3}'], 1_000, undefined, options), JSON.parse('{"__proto__":2,"constructor":3}'));
+    assert.equal(({} as { polluted?: boolean }).polluted, undefined);
+  });
+
+  for (const kind of ['profiles', 'entries', 'memories', 'null-sessions', 'empty-sessions', 'unknown-field'] as const) {
+    it(`rejects checksum-valid excessive/invalid ${kind} at its first bad element without decoding later parts`, async (t) => {
+      const idb = installChatIndexedDB(t);
+      let body: string; let boundary: number;
+      if (kind === 'profiles') {
+        body = document(Array.from({ length: PROFILE_LIMITS.profiles + 1 }, (_, i) => profile(`profile-${i}`)));
+        boundary = body.indexOf(`{"id":"profile-${PROFILE_LIMITS.profiles}"`) + 1;
+      } else if (kind === 'entries' || kind === 'memories') {
+        const count = kind === 'entries' ? PROFILE_LIMITS.entries : PROFILE_LIMITS.memories;
+        body = document([profile('one', kind === 'entries'
+          ? { entries: Array.from({ length: count + 1 }, (_, i) => entry(`item-${i}`)) }
+          : { memories: Array.from({ length: count + 1 }, (_, i) => fact(`item-${i}`)) })]);
+        boundary = body.indexOf(`{"id":"item-${count}"`) + 1;
+      } else if (kind === 'unknown-field') {
+        body = '{"format":"peetty-backup","unknown":[1,2,3]}'; boundary = body.indexOf(':[1') + 1;
+      } else {
+        const item = kind === 'null-sessions' ? 'null' : '{}';
+        body = `{"format":"peetty-backup","version":2,"createdAt":1,"activeProfileId":"one","profiles":[${JSON.stringify(profile('one'))}],"sessions":[${item},${item}]}`;
+        boundary = body.indexOf(`"sessions":[${item}`) + '"sessions":['.length + item.length;
+      }
+      assert.ok(boundary > 0 && boundary < body.length);
+      const texts = envelopes([body.slice(0, boundary), body.slice(boundary)]);
+      const reads = [0, 0];
+      const selection = texts.map((text, i) => ({ size: text.length, async text() { reads[i] = reads[i]! + 1; return text; } }));
+      const manager = await store(t, `collection-boundary-${kind}`);
+      const before = manager.profiles; const selected = manager.activeProfileId; const writes = idb.writes.length;
+      await assert.rejects(manager.restoreFileSelection(selection), /Invalid/u);
+      assert.deepEqual(reads, [2, 1], 'all envelopes validated, but only the prefix part decoded');
+      assert.deepEqual(manager.profiles, before); assert.equal(manager.activeProfileId, selected);
+      assert.equal(idb.writes.length, writes);
+      await assert.rejects(manager.restoreFiles(texts), /Invalid/u);
+      assert.deepEqual(manager.profiles, before);
+    });
+  }
+
+  it('accepts the maximum valid profile/history/memory counts and a large valid header map', async (t) => {
+    const headers = Object.fromEntries(Array.from({ length: 4_100 }, (_, i) => [`x-route-${i}`, `value-${i}`]));
+    const first = profile('max-0', { entries: Array.from({ length: PROFILE_LIMITS.entries }, (_, i) => entry(`entry-${i}`)),
+      memories: Array.from({ length: PROFILE_LIMITS.memories }, (_, i) => fact(`fact-${i}`)), connection: { ...connection, headers } });
+    const profiles = [first, ...Array.from({ length: PROFILE_LIMITS.profiles - 1 }, (_, i) => profile(`max-${i + 1}`))];
+    const body = document(profiles);
+    const middle = Math.floor(body.length / 2);
+    const files = envelopes([body.slice(0, middle), body.slice(middle)]).map(asFile);
+    const manager = await store(t, 'max-bounded-backup', false);
+    await manager.restoreFileSelection(files);
+    assert.equal(manager.listProfiles().length, PROFILE_LIMITS.profiles);
+    const restored = manager.profiles.find((profile) => profile.name === 'max-0')!;
+    assert.equal(restored.entries.length, PROFILE_LIMITS.entries);
+    assert.equal(restored.memories.length, PROFILE_LIMITS.memories);
+    assert.equal(Object.keys(restored.connection!.headers!).length, 4_100);
+  });
+
+  for (const cancellation of ['signal', 'owner'] as const) {
+    it(`rejects a late first file read on ${cancellation} cancellation without imports`, async (t) => {
+      const idb = installChatIndexedDB(t);
+      const manager = await store(t, `late-restore-${cancellation}`);
+      const started = latch<void>(); const release = latch<string>();
+      const controller = new AbortController(); let current = true;
+      const body = document([profile('late')]); const before = manager.profiles; const selected = manager.activeProfileId; const writes = idb.writes.length;
+      const operation = manager.restoreFileSelection([{ size: body.length, text: () => { started.resolve(); return release.promise; } }], { signal: controller.signal, current: () => current });
+      const rejected = assert.rejects(operation, { name: 'AbortError' });
+      await started.promise;
+      if (cancellation === 'signal') { controller.abort(); await rejected; } else current = false;
+      release.resolve(body); await rejected;
+      assert.deepEqual(manager.profiles, before); assert.equal(manager.activeProfileId, selected); assert.equal(idb.writes.length, writes);
+      assert.equal(manager.persistenceWarning, false);
+    });
+  }
+
+  it('cancels between file passes before any second read or queued import', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const manager = await store(t, 'between-restore-passes');
+    const body = document([profile('between')]); const middle = Math.floor(body.length / 2);
+    const texts = envelopes([body.slice(0, middle), body.slice(middle)]); const reads = [0, 0];
+    const controller = new AbortController();
+    const files = texts.map((text, i) => ({ size: text.length, async text() {
+      reads[i] = reads[i]! + 1;
+      if (i === 1 && reads[i] === 1) setTimeout(() => controller.abort(), 0);
+      return text;
+    } }));
+    const before = manager.profiles; const writes = idb.writes.length;
+    await assert.rejects(manager.restoreFileSelection(files, { signal: controller.signal }), { name: 'AbortError' });
+    assert.deepEqual(reads, [1, 1]); assert.deepEqual(manager.profiles, before); assert.equal(idb.writes.length, writes);
+  });
+
+  it('cancels during bounded parse CPU batches and stops requesting later part bodies', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const source = await store(t, 'parse-cancel-source', false);
+    await source.storage(source.activeProfileId).saveEntries([entry('large', 'x'.repeat(900_000)), entry('large-two', 'y'.repeat(900_000))]);
+    const files = await downloadFiles(source, { _testing: { fileBytes: 1_048_576 } });
+    const controller = new AbortController(); const reads = files.map(() => 0);
+    const selection = files.map((file, i) => ({ size: file.text.length, async text() {
+      reads[i] = reads[i]! + 1;
+      if (i === 0 && reads[i] === 2) setTimeout(() => controller.abort(), 0);
+      return file.text;
+    } }));
+    const manager = await store(t, 'parse-cancel-target'); const before = manager.profiles; const writes = idb.writes.length;
+    await assert.rejects(manager.restoreFileSelection(selection, { signal: controller.signal }), { name: 'AbortError' });
+    assert.ok(reads[0] === 2 && reads.some((count) => count === 1));
+    const stopped = [...reads]; await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(reads, stopped); assert.deepEqual(manager.profiles, before); assert.equal(idb.writes.length, writes);
+    assert.equal(manager.persistenceWarning, false);
+  });
+
+  it('closes the asynchronous parser source when a timer cancels escape-heavy input', async () => {
+    const controller = new AbortController(); let tail = false; let closed = false; let started = false;
+    async function* chunks() { try { yield `"${'\\u0061'.repeat(80_000)}`; tail = true; yield '"'; } finally { closed = true; } }
+    const check = () => { if (controller.signal.aborted) throw new DOMException('Stopped', 'AbortError'); };
+    await assert.rejects(parseJSONChunksAsync(chunks(), 100_000, { onStringBuffers() {
+      if (!started) { started = true; setTimeout(() => controller.abort(), 0); }
+    } }, { check }), { name: 'AbortError' });
+    assert.equal(tail, false); assert.equal(closed, true);
+  });
+
+  for (const cancellation of ['signal', 'owner'] as const) {
+    it(`rejects queued restore and memory import after ${cancellation} invalidation before transaction execution`, async (t) => {
+      const idb = installChatIndexedDB(t);
+      const manager = await store(t, `queued-restore-${cancellation}`); const selected = manager.activeProfileId;
+      const release = latch<void>(); const ready = latch<void>(); t.after(() => release.resolve());
+      (manager as unknown as { queue: Promise<void> }).queue = release.promise;
+      const seam = manager as unknown as { restoreBackup: (...args: unknown[]) => Promise<void> };
+      const restore = seam.restoreBackup.bind(manager);
+      t.mock.method(seam, 'restoreBackup', (...args: unknown[]) => { ready.resolve(); return restore(...args); });
+      const controller = new AbortController(); let current = true;
+      const body = document([profile('queued')]); const before = manager.profiles; const writes = idb.writes.length;
+      const memory = JSON.stringify({ format: 'peetty-memories', version: 1, memories: [fact('queued-memory')] });
+      const options = { signal: controller.signal, current: () => current };
+      const restoring = manager.restoreFileSelection([asFile(body)], options);
+      const rejected = assert.rejects(restoring, { name: 'AbortError' });
+      const importing = manager.importMemories(selected, memory, options);
+      const memoryRejected = assert.rejects(importing, { name: 'AbortError' });
+      await ready.promise;
+      if (cancellation === 'signal') controller.abort(); else current = false;
+      release.resolve(); await Promise.all([rejected, memoryRejected]);
+      assert.deepEqual(manager.profiles, before); assert.equal(manager.activeProfileId, selected); assert.equal(idb.writes.length, writes);
+      assert.equal(manager.persistenceWarning, false);
+    });
+  }
+
+  it('aborts an active restore transaction after puts were staged without publishing Profiles or selection', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const manager = await store(t, 'active-restore-abort');
+    const before = manager.profiles; const selected = manager.activeProfileId; const writes = idb.writes.length;
+    const controller = new AbortController(); let staged = 0;
+    const database = (manager as unknown as { db: IDBDatabase }).db;
+    const transaction = database.transaction.bind(database);
+    t.mock.method(database, 'transaction', (...args: Parameters<IDBDatabase['transaction']>) => {
+      const tx = transaction(...args);
+      const objectStore = tx.objectStore.bind(tx);
+      t.mock.method(tx, 'objectStore', (name: string) => {
+        const store = objectStore(name); const put = store.put.bind(store);
+        t.mock.method(store, 'put', (...args: Parameters<IDBObjectStore['put']>) => {
+          const result = put(...args); staged++; controller.abort(); return result;
+        });
+        return store;
+      });
+      return tx;
+    });
+    await assert.rejects(manager.restoreFileSelection([asFile(document([profile('incoming')]))], { signal: controller.signal }), { name: 'AbortError' });
+    assert.ok(staged > 0); assert.deepEqual(manager.profiles, before); assert.equal(manager.activeProfileId, selected);
+    assert.equal(idb.writes.length, writes); assert.equal(manager.persistenceWarning, false);
+    assert.deepEqual((await store(t, 'active-restore-abort')).profiles, before);
+  });
+
+  it('does not retroactively cancel a committed restore when its own active selection changes', async (t) => {
+    const manager = await store(t, 'restore-success-owner'); const selected = manager.activeProfileId;
+    const controller = new AbortController();
+    await manager.restoreFileSelection([asFile(document([profile('successful')]))], { signal: controller.signal, current: () => manager.activeProfileId === selected });
+    assert.notEqual(manager.activeProfileId, selected);
+    assert.equal(manager.activeProfile.name, 'successful');
+    controller.abort();
+    assert.equal(manager.listProfiles().length, 2);
+  });
+});
+
 describe('safe legacy retirement after authoritative migration', () => {
   it('removes copied legacy state so clear and credential opt-out leave no raw duplicates', async (t) => {
     const idb = installChatIndexedDB(t);

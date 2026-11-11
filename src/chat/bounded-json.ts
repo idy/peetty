@@ -38,12 +38,21 @@ export function* jsonChunks(value: unknown, chunkChars: number): Generator<strin
 
 type TokenLimit = number | ((path: readonly string[], key: boolean) => number);
 interface ParserTesting { onStringBuffers?: (buffers: number, pending: number, decoded: number) => void }
+export interface JSONParseOptions {
+  collectionLimit?: (path: readonly string[], array: boolean) => number;
+  allowedKey?: (path: readonly string[], key: string) => boolean;
+  allowedType?: (path: readonly string[], type: 'object' | 'array' | 'string' | 'number' | 'boolean' | 'null') => boolean;
+  validateValue?: (path: readonly string[], value: unknown) => void;
+  check?: () => void;
+}
 interface JSONFrame {
   array: boolean;
   value: unknown[] | Record<string, unknown>;
   state: 'keyOrEnd' | 'key' | 'colon' | 'valueOrEnd' | 'value' | 'commaOrEnd';
   path: readonly string[];
   field: string;
+  limit: number;
+  count: number;
 }
 interface StringToken { key: boolean; limit: number; size: number; pieces: string[]; pending: string; escape: boolean; unicode: string | undefined }
 const invalidJSON = (): never => { throw new Error('Invalid or unsupported profile data.'); };
@@ -60,15 +69,22 @@ class JSONChunkParser {
   private primitive: string | undefined;
   private readonly maxTokenChars: TokenLimit;
   private readonly testing: ParserTesting | undefined;
-  constructor(maxTokenChars: TokenLimit, testing?: ParserTesting) { this.maxTokenChars = maxTokenChars; this.testing = testing; }
+  private readonly options: JSONParseOptions;
+  constructor(maxTokenChars: TokenLimit, testing?: ParserTesting, options: JSONParseOptions = {}) {
+    this.maxTokenChars = maxTokenChars; this.testing = testing; this.options = options;
+  }
   private path(): readonly string[] {
     const frame = this.stack.at(-1);
     return frame ? [...frame.path, frame.array ? '*' : frame.field] : [];
   }
   private accept(value: unknown): void {
+    this.options.validateValue?.(this.path(), value);
     const frame = this.stack.at(-1);
     if (!frame) { if (this.complete) invalidJSON(); this.root = value; this.complete = true; return; }
     if (frame.state !== 'value' && frame.state !== 'valueOrEnd') invalidJSON();
+    const newItem = frame.array || !Object.hasOwn(frame.value, frame.field);
+    if (newItem && frame.count >= frame.limit) invalidJSON();
+    if (newItem) frame.count++;
     if (frame.array) (frame.value as unknown[]).push(value);
     else Object.defineProperty(frame.value, frame.field, { configurable: true, enumerable: true, writable: true, value });
     frame.state = 'commaOrEnd';
@@ -126,8 +142,12 @@ class JSONChunkParser {
         if (char !== '"') invalidJSON();
         if (token.pending) token.pieces.push(token.pending);
         const value = token.pieces.join(''); this.string = undefined;
-        if (token.key) { const frame = this.stack.at(-1)!; frame.field = value; frame.state = 'colon'; }
-        else this.accept(value);
+        if (token.key) {
+          const frame = this.stack.at(-1)!;
+          if (this.options.allowedKey && !this.options.allowedKey(frame.path, value)) invalidJSON();
+          if (!Object.hasOwn(frame.value, value) && frame.count >= frame.limit) invalidJSON();
+          frame.field = value; frame.state = 'colon';
+        } else this.accept(value);
         continue;
       }
       if (this.primitive !== undefined) {
@@ -156,11 +176,20 @@ class JSONChunkParser {
         if (char !== '"') invalidJSON(); this.startString(true); offset++; continue;
       }
       if (frame?.state === 'valueOrEnd' && char === ']') { offset++; this.close(); continue; }
+      // Reject the first excess item before allocating or parsing its value.
+      if (frame?.array && frame.count >= frame.limit) invalidJSON();
+      if (this.options.allowedType) {
+        const type = char === '{' ? 'object' : char === '[' ? 'array' : char === '"' ? 'string'
+          : char === 't' || char === 'f' ? 'boolean' : char === 'n' ? 'null' : 'number';
+        if (!this.options.allowedType(this.path(), type)) invalidJSON();
+      }
       if (char === '"') { this.startString(false); offset++; continue; }
       if (char === '{' || char === '[') {
         if (this.stack.length >= 128) invalidJSON();
         const array = char === '['; const path = this.path();
-        this.stack.push({ array, path, value: array ? [] : {}, state: array ? 'valueOrEnd' : 'keyOrEnd', field: '' });
+        const limit = this.options.collectionLimit?.(path, array) ?? Infinity;
+        if (limit < 0) invalidJSON();
+        this.stack.push({ array, path, value: array ? [] : {}, state: array ? 'valueOrEnd' : 'keyOrEnd', field: '', limit, count: 0 });
         offset++; continue;
       }
       if (!/[tfn0-9-]/.test(char)) invalidJSON();
@@ -174,17 +203,32 @@ class JSONChunkParser {
   }
 }
 
-export function parseJSONChunks(chunks: readonly string[], maxTokenChars: TokenLimit, testing?: ParserTesting): unknown {
-  const parser = new JSONChunkParser(maxTokenChars, testing);
-  for (const chunk of chunks) parser.feed(chunk);
+export function parseJSONChunks(chunks: readonly string[], maxTokenChars: TokenLimit, testing?: ParserTesting, options: JSONParseOptions = {}): unknown {
+  const parser = new JSONChunkParser(maxTokenChars, testing, options);
+  for (const chunk of chunks) {
+    for (let offset = 0; offset < chunk.length; offset += 65_536) { options.check?.(); parser.feed(chunk.slice(offset, offset + 65_536)); }
+  }
+  options.check?.();
   return parser.finish();
 }
 
 /** Consume one transport part at a time, releasing its source before requesting
  * the next. The retained object is the decoded backup, not its serialized input. */
-export async function parseJSONChunksAsync(chunks: AsyncIterable<string>, maxTokenChars: TokenLimit, testing?: ParserTesting): Promise<unknown> {
-  const parser = new JSONChunkParser(maxTokenChars, testing);
-  for await (const chunk of chunks) parser.feed(chunk);
+export async function parseJSONChunksAsync(chunks: AsyncIterable<string>, maxTokenChars: TokenLimit, testing?: ParserTesting, options: JSONParseOptions = {}): Promise<unknown> {
+  const parser = new JSONChunkParser(maxTokenChars, testing, options);
+  let batch = 0;
+  options.check?.();
+  for await (const chunk of chunks) {
+    for (let offset = 0; offset < chunk.length; offset += 65_536) {
+      options.check?.();
+      const piece = chunk.slice(offset, offset + 65_536);
+      parser.feed(piece); batch += piece.length;
+      if (options.check && batch >= 262_144) {
+        batch = 0; await new Promise<void>((resolve) => setTimeout(resolve, 0)); options.check();
+      }
+    }
+  }
+  options.check?.();
   return parser.finish();
 }
 

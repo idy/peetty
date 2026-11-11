@@ -1533,6 +1533,7 @@ describe('reviewed profile ownership and recovery', () => {
     const before = query<HTMLSelectElement>('.pc-profile-select').value;
     const input = query<HTMLInputElement>('input[type="file"][multiple]');
     Object.defineProperty(input, 'files', { configurable: true, value: texts.map((text, i) => new window.File([text], names[i]!)) });
+    t.mock.timers.reset(); // Restore parsing yields between cancellation checkpoints.
     input.dispatchEvent(new window.Event('change') as unknown as Event);
     await eventually(() => query<HTMLSelectElement>('.pc-profile-select').options.length === 2 && !query<HTMLSelectElement>('.pc-profile-select').disabled);
     assert.notEqual(query<HTMLSelectElement>('.pc-profile-select').value, before);

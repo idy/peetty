@@ -1,5 +1,5 @@
 import type { Figure } from '../figure/types.ts';
-import { validateFigure } from '../figure/validate.ts';
+import { LIMITS as FIGURE_LIMITS, validateFigure } from '../figure/validate.ts';
 import { COMPANION_ACTIONS, type ChatEntry } from './types.ts';
 import type { ChatStorage, StoredChat, StoredConnection, StoredSessionConnection } from './store.ts';
 import { boundedEntries, ChatStorageError, forgetConnectionCredentials } from './store.ts';
@@ -40,6 +40,7 @@ export interface BackupSession extends StoredSessionConnection { profileId: stri
 type BackupOptions = { sessions?: readonly BackupSession[]; omitCredentials?: boolean };
 export interface BackupDownloadFile { name: string; text: string; final?: boolean }
 export interface BackupRestoreFile { readonly size: number; text(): Promise<string> }
+export interface BackupRestoreOptions { signal?: AbortSignal; current?: () => boolean }
 type BackupDownloadOptions = Partial<BackupOptions> & { signal?: AbortSignal; _testing?: { fileBytes: number } };
 interface BackupPart { format: 'peetty-backup-part'; version: 1; backupId: string; index: number; count: number; digest: string; text: string }
 type Defaults = { name?: string; figure?: string | object; personality?: string };
@@ -344,6 +345,119 @@ function backupTokenLimit(path: readonly string[], key: boolean): number {
   return 200;
 }
 
+const BACKUP_HEADER_LIMIT = PROFILE_LIMITS.fileBytes; // Preserve the existing schema/file ceiling; no new smaller cap.
+function backupObjectFields(path: readonly string[]): readonly string[] | undefined {
+  switch (path.join('.')) {
+    case '': return ['format', 'version', 'createdAt', 'activeProfileId', 'profiles', 'sessions'];
+    case 'profiles.*': return ['id', 'name', 'figure', 'personality', 'useMemories', 'autoRemember', 'memories', 'entries', 'connection', 'createdAt', 'updatedAt'];
+    case 'profiles.*.entries.*': return ['id', 'role', 'text', 'createdAt'];
+    case 'profiles.*.memories.*': return ['id', 'text', 'createdAt', 'updatedAt', 'sourceEntryId', 'sourceText', 'manual'];
+    case 'sessions.*': return ['profileId', 'connection', 'rememberKey'];
+    case 'profiles.*.connection': case 'sessions.*.connection': return ['id', 'baseUrl', 'apiKey', 'tools', 'effort', 'provider', 'headers', 'nonCredentialHeaders'];
+    case 'profiles.*.connection.headers': case 'sessions.*.connection.headers': return undefined;
+    default: return path.includes('figure') ? undefined : [];
+  }
+}
+function backupCollectionLimit(path: readonly string[], array: boolean): number {
+  const location = path.join('.');
+  if (array) {
+    switch (location) {
+      case 'profiles': return PROFILE_LIMITS.profiles;
+      case 'profiles.*.entries': return PROFILE_LIMITS.entries;
+      case 'profiles.*.memories': return PROFILE_LIMITS.memories;
+      case 'sessions': return PROFILE_LIMITS.fileBytes; // Existing backup schema ceiling.
+      case 'profiles.*.connection.nonCredentialHeaders': case 'sessions.*.connection.nonCredentialHeaders': return BACKUP_HEADER_LIMIT;
+      default: {
+        if (!path.includes('figure')) return -1;
+        switch (path.at(-1)) {
+          case 'parts': return FIGURE_LIMITS.maxParts;
+          case 'shapes': return FIGURE_LIMITS.maxShapesPerPart;
+          case 'frames': return FIGURE_LIMITS.maxFrames;
+          case 'stops': return 16;
+          case 'notes': return 8;
+          case 'viewBox': return 4;
+          case 'anchor': case 'from': case 'to': case 'center': case 'focus': case 'pivot': case 'look': return 2;
+          default: return FIGURE_LIMITS.maxBytes;
+        }
+      }
+    }
+  }
+  if (location.endsWith('.connection.headers')) return BACKUP_HEADER_LIMIT;
+  const fields = backupObjectFields(path);
+  if (fields) return fields.length;
+  if (path.at(-1) === 'palette') return FIGURE_LIMITS.maxPaletteEntries;
+  if (path.at(-1) === 'gradients') return FIGURE_LIMITS.maxGradients;
+  return FIGURE_LIMITS.maxBytes;
+}
+function backupAllowedType(path: readonly string[], type: string): boolean {
+  if (path.includes('figure')) return true; // Figure schema validation owns its supported shapes.
+  const location = path.join('.');
+  if (location === '' || ['profiles.*', 'profiles.*.entries.*', 'profiles.*.memories.*', 'sessions.*',
+    'profiles.*.connection', 'sessions.*.connection', 'profiles.*.connection.headers', 'sessions.*.connection.headers'].includes(location)) return type === 'object';
+  if (['profiles', 'profiles.*.entries', 'profiles.*.memories', 'sessions',
+    'profiles.*.connection.nonCredentialHeaders', 'sessions.*.connection.nonCredentialHeaders'].includes(location)) return type === 'array';
+  if (path.includes('headers') || path.includes('nonCredentialHeaders')) return type === 'string';
+  if (['createdAt', 'updatedAt', 'version'].includes(path.at(-1) ?? '')) return type === 'number';
+  if (['useMemories', 'autoRemember', 'manual', 'rememberKey', 'tools'].includes(path.at(-1) ?? '')) return type === 'boolean';
+  return type === 'string';
+}
+function validateBackupValue(path: readonly string[], value: unknown): void {
+  switch (path.join('.')) {
+    case 'profiles.*.entries.*': entryFrom(value); break;
+    case 'profiles.*.memories.*': memoryFrom(value); break;
+    case 'sessions.*': sessionFrom(value); break;
+    case 'profiles.*.connection': case 'sessions.*.connection': connectionFrom(value); break;
+    case 'profiles.*': {
+      const fields = backupObjectFields(path)!; const profile = object(value, fields);
+      id(profile.id); text(profile.name, PROFILE_LIMITS.name); text(profile.personality, PROFILE_LIMITS.personality, true);
+      boolean(profile.useMemories); boolean(profile.autoRemember); timestamp(profile.createdAt); timestamp(profile.updatedAt);
+      check(Array.isArray(profile.entries) && Array.isArray(profile.memories));
+      check(typeof profile.figure === 'string' || profile.figure !== null && typeof profile.figure === 'object');
+      break;
+    }
+  }
+}
+const BACKUP_PARSE_BOUNDS = {
+  collectionLimit: backupCollectionLimit,
+  allowedKey: (path: readonly string[], key: string) => backupObjectFields(path)?.includes(key) ?? true,
+  allowedType: backupAllowedType,
+  validateValue: validateBackupValue,
+};
+function checkRestore(options?: BackupRestoreOptions): void {
+  if (options?.signal?.aborted || options?.current?.() === false) throw new DOMException('Restore stopped.', 'AbortError');
+}
+function restoreRead<T>(pending: Promise<T>, options: BackupRestoreOptions): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const cancel = () => { options.signal?.removeEventListener('abort', cancel); reject(new DOMException('Restore stopped.', 'AbortError')); };
+    options.signal?.addEventListener('abort', cancel, { once: true });
+    // File.text itself is not abortable. Stop awaiting it and release selection
+    // ownership now; late settlement is observed without resuming the import.
+    if (options.signal?.aborted) cancel();
+    pending.then((value) => { options.signal?.removeEventListener('abort', cancel); resolve(value); },
+      (error: unknown) => { options.signal?.removeEventListener('abort', cancel); reject(error); });
+  });
+}
+async function restoreTick(options?: BackupRestoreOptions): Promise<void> {
+  checkRestore(options);
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  checkRestore(options);
+}
+async function restoreDigest(value: string, options?: BackupRestoreOptions): Promise<string> {
+  let crc = 0xffffffff;
+  for (let offset = 0; offset < value.length; offset += 262_144) {
+    checkRestore(options);
+    const end = Math.min(offset + 262_144, value.length);
+    for (let i = offset; i < end; i++) {
+      const code = value.charCodeAt(i);
+      crc = CRC_TABLE[(crc ^ code) & 255]! ^ (crc >>> 8);
+      crc = CRC_TABLE[(crc ^ (code >>> 8)) & 255]! ^ (crc >>> 8);
+    }
+    if (options && end < value.length) await restoreTick(options);
+  }
+  checkRestore(options);
+  return `crc32:${((crc ^ 0xffffffff) >>> 0).toString(16).padStart(8, '0')}:${value.length}`;
+}
+
 function backupFrom(value: unknown): Backup {
   const backup = object(value, ['format', 'version', 'createdAt', 'activeProfileId', 'profiles', 'sessions']);
   check(backup.format === 'peetty-backup' && (backup.version === 1 || backup.version === 2));
@@ -517,8 +631,10 @@ export class BrowserProfileStore {
   }
 
   /** Read/modify/write within ONE transaction; only dirty records are written, never a cached directory. */
-  private async run<T>(selection: readonly string[] | 'all', write: boolean, action: (draft: Draft) => T, durable: boolean | 'settings' = false): Promise<T> {
+  private async run<T>(selection: readonly string[] | 'all', write: boolean, action: (draft: Draft) => T, durable: boolean | 'settings' = false, lifetime?: BackupRestoreOptions): Promise<T> {
+    checkRestore(lifetime);
     const db = await this.open();
+    checkRestore(lifetime);
     if (durable && this.persist && !db) throw new ChatStorageError(durable === 'settings' ? 'settings-save' : 'privacy-delete', durable === 'settings'
       ? 'Could not save memory settings. Restore browser storage and try again.' : 'Could not delete this data. Restore browser storage and try again.');
     let proof = this.legacyProof;
@@ -527,15 +643,21 @@ export class BrowserProfileStore {
     let completedAction = false;
     let domainError: unknown;
     const apply = (current: State, isolated = new Set<string>()) => {
+      checkRestore(lifetime);
       draft = { directory: { ...current.directory, ids: [...current.directory.ids] }, records: new Map(current.records), dirty: new Set(), isolated,
         isolatedMemories: new Set(isolated), directoryDirty: false, legacyProof: proof, legacyDirty: false };
       result = action(draft);
       completedAction = true;
     };
     if (db) {
+      let detachAbort = () => {};
       const ok = await stateTransaction(db, write, (store, abort) => {
+          const cancel = () => { abort(); };
+          lifetime?.signal?.addEventListener('abort', cancel, { once: true });
+          detachAbort = () => lifetime?.signal?.removeEventListener('abort', cancel);
+          if (lifetime?.signal?.aborted) { abort(); return; }
           const guard = (callback: () => void) => {
-            try { callback(); } catch (error) {
+            try { checkRestore(lifetime); callback(); } catch (error) {
               // Domain errors roll back. A failed put/delete after the action retains its draft in memory.
               if (!completedAction) domainError = error;
               abort();
@@ -576,8 +698,10 @@ export class BrowserProfileStore {
             }
           });
       });
+      detachAbort();
       if (domainError) throw domainError;
       if (!ok) {
+        checkRestore(lifetime);
         this.fail();
         // Privacy deletion cannot publish a RAM-only draft after a failed disk
         // commit. Keep prior archive, source links, barriers and sessions intact.
@@ -1331,44 +1455,66 @@ export class BrowserProfileStore {
 
   /** Read files sequentially twice. Retain only file handles and envelope/checksum
    * metadata between passes; never collect serialized parts into a source array. */
-  async restoreFileSelection(files: ArrayLike<BackupRestoreFile>): Promise<void> {
+  async restoreFileSelection(files: ArrayLike<BackupRestoreFile>, options?: BackupRestoreOptions): Promise<void> {
+    const lifetime: BackupRestoreOptions = { ...(options?.signal ? { signal: options.signal } : {}),
+      current: () => !this.closing && !this.closed && (options?.current?.() ?? true) };
+    checkRestore(lifetime);
     check(files != null && Number.isSafeInteger(files.length) && files.length > 0);
     const references = Array.from(files);
-    for (const file of references) check(file && Number.isSafeInteger(file.size) && file.size >= 0 && file.size <= PROFILE_LIMITS.fileBytes && typeof file.text === 'function');
-    const read = async (file: BackupRestoreFile): Promise<unknown> => {
-      try { return parseJSON(await file.text()); } catch { throw new Error(INVALID); }
-    };
-    if (references.length === 1) {
-      const value = await read(references[0]!);
-      // A lone multipart envelope still fails through normal schema validation.
-      return this.restoreBackup(backupFrom(value));
-    }
     type PartMetadata = Omit<BackupPart, 'text'> & { checksum: string; file: BackupRestoreFile };
     const metadata: PartMetadata[] = [];
-    let identity: Pick<BackupPart, 'backupId' | 'count' | 'digest'> | undefined;
-    const indices = new Set<number>();
-    for (const file of references) {
-      const part = backupPartFrom(await read(file), references.length);
-      identity ??= { backupId: part.backupId, count: part.count, digest: part.digest };
-      check(part.backupId === identity.backupId && part.digest === identity.digest && part.count === identity.count && !indices.has(part.index));
-      indices.add(part.index);
-      metadata.push({ format: part.format, version: part.version, backupId: part.backupId, index: part.index, count: part.count,
-        digest: part.digest, checksum: backupDigest([part.text]), file });
-    }
-    metadata.sort((a, b) => a.index - b.index);
-    check(combineBackupDigests(metadata.map((part) => part.checksum)) === identity!.digest);
-    async function* chunks() {
-      for (const expected of metadata) {
-        const part = backupPartFrom(await read(expected.file), references.length);
-        check(part.backupId === expected.backupId && part.index === expected.index && part.count === expected.count && part.digest === expected.digest);
-        check(backupDigest([part.text]) === expected.checksum);
-        // The parser consumes this string synchronously, then releases it before
-        // requesting the next decoded file envelope from this generator.
-        yield part.text;
+    const read = async (file: BackupRestoreFile): Promise<unknown> => {
+      checkRestore(lifetime);
+      try {
+        const source = await restoreRead(file.text(), lifetime);
+        checkRestore(lifetime);
+        return parseJSON(source);
+      } catch (error) {
+        checkRestore(lifetime);
+        if (error instanceof Error && error.name === 'AbortError') throw error;
+        throw new Error(INVALID);
       }
+    };
+    try {
+      for (const file of references) check(file && Number.isSafeInteger(file.size) && file.size >= 0 && file.size <= PROFILE_LIMITS.fileBytes && typeof file.text === 'function');
+      if (references.length === 1) {
+        const value = await read(references[0]!);
+        checkRestore(lifetime);
+        // A lone multipart envelope still fails through normal schema validation.
+        return await this.restoreBackup(backupFrom(value), lifetime);
+      }
+      let identity: Pick<BackupPart, 'backupId' | 'count' | 'digest'> | undefined;
+      const indices = new Set<number>();
+      for (const file of references) {
+        checkRestore(lifetime);
+        const part = backupPartFrom(await read(file), references.length);
+        identity ??= { backupId: part.backupId, count: part.count, digest: part.digest };
+        check(part.backupId === identity.backupId && part.digest === identity.digest && part.count === identity.count && !indices.has(part.index));
+        indices.add(part.index);
+        const checksum = await restoreDigest(part.text, lifetime);
+        metadata.push({ format: part.format, version: part.version, backupId: part.backupId, index: part.index, count: part.count,
+          digest: part.digest, checksum, file });
+      }
+      metadata.sort((a, b) => a.index - b.index);
+      checkRestore(lifetime);
+      check(combineBackupDigests(metadata.map((part) => part.checksum)) === identity!.digest);
+      await restoreTick(lifetime);
+      async function* chunks() {
+        for (const expected of metadata) {
+          checkRestore(lifetime);
+          const part = backupPartFrom(await read(expected.file), references.length);
+          check(part.backupId === expected.backupId && part.index === expected.index && part.count === expected.count && part.digest === expected.digest);
+          check(await restoreDigest(part.text, lifetime) === expected.checksum);
+          checkRestore(lifetime);
+          yield part.text;
+        }
+      }
+      const value = await parseJSONChunksAsync(chunks(), backupTokenLimit, undefined, { ...BACKUP_PARSE_BOUNDS, check: () => checkRestore(lifetime) });
+      await restoreTick(lifetime);
+      return await this.restoreBackup(backupFrom(value), lifetime);
+    } finally {
+      references.length = 0; metadata.length = 0;
     }
-    const value = await parseJSONChunksAsync(chunks(), backupTokenLimit);
-    return this.restoreBackup(backupFrom(value));
   }
 
   async restoreFiles(texts: readonly string[]): Promise<void> {
@@ -1384,19 +1530,23 @@ export class BrowserProfileStore {
       check(new Set(parts.map((part) => part.index)).size === parts.length);
       const chunks = parts.sort((a, b) => a.index - b.index).map((part) => part.text);
       check(backupDigest(chunks) === first.digest);
-      value = parseJSONChunks(chunks, backupTokenLimit);
+      value = parseJSONChunks(chunks, backupTokenLimit, undefined, BACKUP_PARSE_BOUNDS);
     } else check(values.length === 1);
     // Validate EVERY reconstructed profile and session before enqueueing a mutation.
     return this.restoreBackup(backupFrom(value));
   }
 
-  private restoreBackup(backup: Backup): Promise<void> {
+  private restoreBackup(backup: Backup, lifetime?: BackupRestoreOptions): Promise<void> {
+    checkRestore(lifetime);
     // Backup files carry credential values, never trusted SDK header classification.
     for (const profile of backup.profiles) if (profile.connection) delete profile.connection.nonCredentialHeaders;
     for (const session of backup.sessions ?? []) delete session.connection.nonCredentialHeaders;
+    checkRestore(lifetime);
     return this.enqueue(async () => {
+      checkRestore(lifetime);
       this.ready();
       const sessions = await this.run('all', true, (draft) => {
+        checkRestore(lifetime);
         if (draft.directory.ids.length + backup.profiles.length > PROFILE_LIMITS.profiles) {
           const bootstrapId = draft.directory.bootstrapProfileId;
           const shell = bootstrapId ? draft.records.get(bootstrapId)?.profile : undefined;
@@ -1441,9 +1591,10 @@ export class BrowserProfileStore {
           addSession(values, { connection: session.connection, rememberKey: session.rememberKey });
           sessions.set(profileId, values);
         }
+        checkRestore(lifetime);
         draft.directoryDirty = true;
         return new Map(Array.from(sessions, ([profileId, values]) => [profileId, Array.from(values.values())]));
-      });
+      }, false, lifetime);
       for (const [profileId, values] of sessions) this.sessions.set(profileId, values);
       this.selectedId = this.state.directory.activeProfileId;
     });
@@ -1467,11 +1618,16 @@ export class BrowserProfileStore {
     checkFile(result, LIMIT);
     return result;
   }
-  async importMemories(profileId: string, value: string): Promise<void> {
+  async importMemories(profileId: string, value: string, lifetime?: BackupRestoreOptions): Promise<void> {
+    checkRestore(lifetime);
     const document = object(parseJSON(value), ['format', 'version', 'memories']);
     check(document.format === 'peetty-memories' && document.version === 1);
     const incoming = unique(array(document.memories, PROFILE_LIMITS.memories, memoryFrom)).map((memory) => ({ memory, normalized: normalizedText(memory.text) }));
-    return this.queued([profileId], true, (draft) => {
+    checkRestore(lifetime);
+    return this.enqueue(async () => {
+      this.ready(); checkRestore(lifetime);
+      return this.run([profileId], true, (draft) => {
+        checkRestore(lifetime);
         const profile = touchMemories(draft, profileId).profile;
         const byText = new Map(profile.memories.map((memory) => [normalizedText(memory.text), memory]));
         const ids = new Set([...profile.memories.map((memory) => memory.id), ...incoming.map(({ memory }) => memory.id)]);
@@ -1496,6 +1652,8 @@ export class BrowserProfileStore {
           byText.set(normalized, memory);
         }
         check(profile.memories.length <= PROFILE_LIMITS.memories, LIMIT);
+        checkRestore(lifetime);
+      }, false, lifetime);
     });
   }
   close(): void {
