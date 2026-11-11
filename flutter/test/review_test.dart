@@ -147,6 +147,14 @@ void main() {
     final back = Rig(Figure.fromJson(_tiny(shape: {'type': 'path', 'd': 'M0 50 C100 50 100 50 10 50', 'stroke': 'ink', 'strokeWidth': 2})));
     expect(back.hitTest(const Offset(50, 50)), isTrue);
     expect(back.hitTest(const Offset(90, 50)), isFalse);
+    // A tiny reversal past the start is drawn too, within a butt-capped stroke.
+    final tiny = Rig(Figure.fromJson(_tiny(shape: {'type': 'path', 'd': 'M0 0 C-.09 0 -.09 0 .01 0', 'stroke': 'ink', 'strokeWidth': 4, 'lineCap': 'butt'})));
+    expect(tiny.hitTest(const Offset(-.04, 0)), isTrue);
+    // A long, thin ellipse turned upright: points on its axis sit inside the stroke.
+    final needle = Rig(Figure.fromJson(_tiny(shape: {'type': 'ellipse', 'cx': 0, 'cy': 0, 'rx': 100, 'ry': 1, 'rotate': 90, 'stroke': 'ink', 'strokeWidth': 2})));
+    expect(needle.hitTest(const Offset(0, 0.5)), isTrue);
+    expect(needle.hitTest(const Offset(0, 50)), isTrue);
+    expect(needle.hitTest(const Offset(5, 50)), isFalse);
     final arc = Rig(Figure.fromJson(_tiny(shape: {'type': 'path', 'd': 'M0 0 C0 -2000 2000 -2000 2000 0', 'stroke': 'ink', 'strokeWidth': 1})));
     // The curve's top is at y = -1500 halfway along.
     expect(arc.hitTest(const Offset(1000, -1500.3)), isTrue);
@@ -333,6 +341,41 @@ void main() {
     expect(await _until(tester, () => state.action != FigureState.fall && state.position != null), isTrue);
     // With the 34-unit inset, a perch at row 140 leaves her head inside it, so she uses the floor.
     expect(state.position!.dy, 600);
+  });
+
+  testWidgets('safe-area insets apply to a sideways host as columns', (tester) async {
+    // 600x400 turned 90° about its origin at screen (600, 0): host x runs down the screen,
+    // so the 50-unit top inset covers its first 50 columns.
+    await tester.pumpWidget(MediaQuery(
+      data: const MediaQueryData(size: Size(800, 600), padding: EdgeInsets.only(top: 50)),
+      child: Directionality(
+        textDirection: TextDirection.ltr,
+        child: Stack(children: [
+          Positioned(
+            left: 600,
+            top: 0,
+            width: 600,
+            height: 400,
+            child: Transform.rotate(
+              angle: math.pi / 2,
+              alignment: Alignment.topLeft,
+              child: Peetty(
+                figureData: _miru,
+                random: _seeded(),
+                child: const Stack(children: [
+                  Positioned(left: 0, top: 300, width: 90, height: 40, child: PeettyPerch(child: SizedBox.expand())),
+                ]),
+              ),
+            ),
+          ),
+        ]),
+      ),
+    ));
+    final state = _state(tester);
+    expect(await _until(tester, () => state.action != FigureState.fall && state.position != null), isTrue);
+    // The perch lies within the inset columns, so she uses the floor, clear of them.
+    expect(state.position!.dy, 400);
+    expect(state.position!.dx, greaterThanOrEqualTo(50));
   });
 
   testWidgets('pointer events reach the host over children that do not hit-test', (tester) async {

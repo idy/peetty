@@ -273,11 +273,11 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
   Limits? _limits(RenderBox host) {
     final view = _view!;
     final size = host.size;
-    final (insetTop, insetBottom) = _insets(host);
-    final left = view.anchor.dx;
-    final right = size.width - (view.width - view.anchor.dx);
-    final top = view.anchor.dy + insetTop;
-    final bottom = size.height - insetBottom;
+    final insets = _insets(host);
+    final left = view.anchor.dx + insets.left;
+    final right = size.width - (view.width - view.anchor.dx) - insets.right;
+    final top = view.anchor.dy + insets.top;
+    final bottom = size.height - insets.bottom;
     if (right < left || bottom < top) return null;
     return Limits(left, right, top, bottom);
   }
@@ -285,26 +285,35 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
   /// The safe-area insets that overlap the host, in host coordinates.
   ///
   /// Screen y is affine in host coordinates, `y = a·x + b·y' + c`, so for a scaled,
-  /// rotated, skewed or upside-down host the safe band's edges are slanted lines. The insets are
-  /// the nearest host rows lying wholly inside the band across the host's width.
-  (double, double) _insets(RenderBox host) {
+  /// rotated, skewed or flipped host the safe band's edges are slanted lines. When
+  /// host rows run across the screen (|b| ≥ |a|) the insets are the nearest rows lying
+  /// wholly inside the band; when the host is turned sideways they are columns.
+  EdgeInsets _insets(RenderBox host) {
     final screen = _screen;
-    if (screen == null) return (0, 0);
+    if (screen == null) return EdgeInsets.zero;
     final transform = host.getTransformTo(null);
     double screenY(double x, double y) => MatrixUtils.transformPoint(transform, Offset(x, y)).dy;
     final c = screenY(0, 0);
     final a = screenY(1, 0) - c;
     final b = screenY(0, 1) - c;
-    // Turned sideways: host rows run up and down the screen, not across its edges.
-    if (b.abs() <= 1e-9) return (0, 0);
-    final width = host.size.width;
     final safeTop = _padding.top, safeBottom = screen.height - _padding.bottom;
-    // Rows whose lowest screen point stays below the top band, and highest above the bottom one.
-    final fromTop = (safeTop - c - math.min(0.0, a * width)) / b;
-    final fromBottom = (safeBottom - c - math.max(0.0, a * width)) / b;
-    // An upside-down host (b < 0) meets the bottom band at its first rows instead.
-    final (low, high) = b > 0 ? (fromTop, fromBottom) : (fromBottom, fromTop);
-    return (math.max(0.0, low), math.max(0.0, host.size.height - high));
+    final size = host.size;
+    // The part of one host axis whose points stay inside the band across the other axis.
+    (double, double) span(double slope, double across, double acrossLength, double extent) {
+      final fromTop = (safeTop - c - math.min(0.0, across * acrossLength)) / slope;
+      final fromBottom = (safeBottom - c - math.max(0.0, across * acrossLength)) / slope;
+      // A reversed axis (negative slope) meets the bottom band first.
+      final (low, high) = slope > 0 ? (fromTop, fromBottom) : (fromBottom, fromTop);
+      return (math.max(0.0, low), math.max(0.0, extent - high));
+    }
+
+    if (math.max(a.abs(), b.abs()) <= 1e-12) return EdgeInsets.zero;
+    if (b.abs() >= a.abs()) {
+      final (top, bottom) = span(b, a, size.width, size.height);
+      return EdgeInsets.only(top: top, bottom: bottom);
+    }
+    final (left, right) = span(a, b, size.height, size.width);
+    return EdgeInsets.only(left: left, right: right);
   }
 
   List<Perch> _scan(RenderBox host) {
@@ -620,6 +629,7 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
     return PerchScope(
       registry: _registry,
       child: Listener(
+        // Translucent: the host hears every pointer over it, even where no child hits.
         behavior: HitTestBehavior.translucent,
         onPointerHover: _onPointer,
         onPointerMove: _onPointer,

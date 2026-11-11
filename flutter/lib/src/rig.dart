@@ -281,7 +281,8 @@ class Rig {
       if (length <= 1e-12) return (q - p0).distance <= tolerance;
       final u = chord / length;
       final t = _dot(q - p0, u);
-      return _cross(u, q - p0).abs() <= tolerance && t >= -tolerance && t <= length + tolerance;
+      // Any overshoot past the chord's ends is drawn, so it must be subdivided away.
+      return _cross(u, q - p0).abs() <= tolerance && t >= -1e-9 * length && t <= length * (1 + 1e-9);
     }
     if (depth >= 24 || (near(p1) && near(p2))) {
       return _inBand(p0, p3, p, h, roundStart: !start, roundEnd: !end);
@@ -306,6 +307,10 @@ class Rig {
     }
     // A flat ellipse is a line segment along its long axis.
     if (e1 <= 0) return x <= e0 ? y : Offset(x - e0, y).distance;
+    // Points this close to an axis are on it: the general solution below loses
+    // its precision there (z - 1 rounds to -1), so the exact axis cases take over.
+    if (y / e1 < 1e-9) y = 0;
+    if (x / e0 < 1e-9) x = 0;
     if (y > 0) {
       if (x > 0) {
         final z0 = x / e0, z1 = y / e1;
@@ -329,7 +334,8 @@ class Rig {
             break;
           }
         }
-        return Offset(r0 * x / (root + r0) - x, y / (root + 1) - y).distance;
+        final distance = Offset(r0 * x / (root + r0) - x, y / (root + 1) - y).distance;
+        return distance.isFinite ? distance : double.infinity;
       }
       return (y - e1).abs();
     }
