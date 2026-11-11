@@ -10,8 +10,9 @@ import { ChatRuntime } from '../src/chat/runtime.ts';
 import type { ChatRuntimeOptions } from '../src/chat/runtime.ts';
 import { SecretRegistry } from '../src/chat/secrets.ts';
 import type { StoredConnection, StoredSessionConnection } from '../src/chat/store.ts';
+import { BrowserChatStore, ChatStorageError } from '../src/chat/store.ts';
 import type { ChatEntry } from '../src/chat/types.ts';
-import { installChatIndexedDB } from './helpers/chat-storage.ts';
+import { installChatIndexedDB, MemoryChatStorage } from './helpers/chat-storage.ts';
 import { deferred } from './helpers/pet-dom.ts';
 
 const MODEL: StoredConnection = {
@@ -748,6 +749,74 @@ describe('input acceptance after preflight', () => {
     assert.equal(provider.calls.length, 0);
     assert.equal(runtime.busy, false);
     assert.equal(manager.historyPage(manager.activeProfileId, '', 1).entries[0]!.text, 'Accepted before stopping.');
+  });
+});
+
+describe('owned clear failure recovery', () => {
+  for (const initialized of [false, true]) {
+    it(`restores real history after failed legacy CAS with runtime initialized ${initialized} and permits retry`, async (t) => {
+      const idb = installChatIndexedDB(t);
+      const namespace = `runtime-clear-cas-${initialized}`;
+      const manager = await profileStore(t, namespace); const id = manager.activeProfileId;
+      const copied = entry('copied', 'Existing authoritative history');
+      await manager.storage(id).saveEntries([copied]);
+      const legacy = idb.databases.get(`${namespace}:chat`)!;
+      legacy.set('entries', [copied, entry('uncopied', 'Old independent turn')]);
+      const old = new BrowserChatStore(namespace); t.after(() => old.close());
+      const oldView = (await old.load()).entries;
+      const seam = manager as unknown as { retireLegacy: (...args: unknown[]) => Promise<void> };
+      const retire = seam.retireLegacy.bind(manager); let race = true;
+      t.mock.method(seam, 'retireLegacy', async (...args: unknown[]) => {
+        if (race && args[2] === 'history') { race = false; await old.saveEntries([...oldView, entry('racer', 'Concurrent legacy append')]); }
+        return retire(...args);
+      });
+      let changes = 0;
+      const provider = scripted({ message: assistant('Reply after retry.') });
+      const runtime = createRuntime(t, { model: MODEL, storage: manager.runtimeStorage(id), onChange: () => { changes++; }, _testing: { streamFn: provider.streamFn } });
+      let expected = [copied];
+      if (initialized) {
+        await runtime.initialize();
+        const internal = runtime as unknown as { append(role: ChatEntry['role'], text: string): ChatEntry; pendingHistory: Map<string, ChatEntry> };
+        const pending = internal.append('user', 'Locally retained unarchived input');
+        internal.pendingHistory.set(pending.id, pending);
+        expected = [...expected, pending];
+      }
+      await runtime.clear(); // Handled rejection must not escape to the panel.
+      assert.deepEqual(runtime.entries, expected);
+      assert.equal(runtime.error, 'Could not clear conversation. Close other tabs and try again.');
+      assert.ok(changes > 0);
+      assert.deepEqual(manager.historyPage(id, '', 10).entries, [copied]);
+      if (initialized) {
+        await runtime.send('The retained unarchived input still blocks sending.');
+        assert.match(runtime.error!, /could not be archived/u);
+        assert.equal(provider.calls.length, 0);
+      }
+      await runtime.clear();
+      assert.deepEqual(runtime.entries, []);
+      assert.equal(runtime.error, null);
+      assert.equal(manager.profileInfo(id)!.entryCount, 0);
+      await runtime.send('New turn after successful retry.');
+      assert.equal(runtime.error, null);
+      assert.equal(runtime.reply!.text, 'Reply after retry.');
+      assert.equal(provider.calls.length, 1);
+    });
+  }
+
+  it('does not restore erased history when an overlapping earlier clear succeeded before a later failure', async (t) => {
+    const storage = new MemoryChatStorage({ entries: [entry('saved', 'History that was actually cleared')] });
+    const first = deferred<void>(); const second = deferred<void>(); let calls = 0;
+    t.mock.method(storage, 'clearEntries', async () => {
+      const current = calls++ === 0 ? first : second;
+      await current.promise; storage.state.entries = [];
+    });
+    const runtime = createRuntime(t, { model: MODEL, storage });
+    await runtime.initialize();
+    const a = runtime.clear(); const b = runtime.clear();
+    first.resolve(); await a;
+    second.reject(new ChatStorageError('legacy-cleanup', 'Fixed failure.')); await b;
+    assert.deepEqual(runtime.entries, []);
+    assert.deepEqual(storage.state.entries, []);
+    assert.equal(runtime.error, 'Could not clear conversation. Close other tabs and try again.');
   });
 });
 

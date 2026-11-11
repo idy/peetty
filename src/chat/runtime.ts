@@ -12,6 +12,7 @@ import type { ChatEntry, CompanionAction, ModelChoice, PeettyChatOptions, Peetty
 export type { ChatEntry, CompanionAction, ModelChoice, PeettyChatOptions, PeettyModelOptions } from './types.ts';
 
 const ACTIONS: CompanionAction[] = [...COMPANION_ACTIONS];
+export const CLEAR_HISTORY_FAILED = 'Could not clear conversation. Close other tabs and try again.';
 const MAX_INPUT = 8_000;
 const MAX_OUTPUT = 16_000;
 const MAX_CONTEXT_CHARS = 24_000;
@@ -156,6 +157,8 @@ export class ChatRuntime {
   private active: Run | undefined;
   private initialization: Promise<void> | undefined;
   private clearing: Promise<void> = Promise.resolve();
+  private clearOwner = 0;
+  private clearSnapshot: { entries: ChatEntry[]; pending: Map<string, ChatEntry>; changed: Set<string>; replyId: string | undefined; historyTouched: boolean; revision: number } | undefined;
   private historyTouched = false;
   private revision = 0;
   private destroyed = false;
@@ -287,7 +290,14 @@ export class ChatRuntime {
     const connection = prepareSavedConnection(toStoredConnection(chosen,
       save.rememberKey && chosen.apiKey && !chosen.getApiKey ? chosen.apiKey : undefined), this.savedConnection, save.rememberKey);
     let committed = connection;
-    const saved = await this.persist(async () => { committed = await this.storage.saveConnection(connection, { rememberCredentials: save.rememberKey }) ?? connection; });
+    const credentialsToForget = [
+      ...(this.savedConnection ? [this.savedConnection] : []),
+      ...(!save.rememberKey ? [toStoredConnection(chosen, chosen.apiKey)] : []),
+    ];
+    const saved = await this.persist(async () => { committed = await this.storage.saveConnection(connection, {
+      rememberCredentials: save.rememberKey, credentialsToForget,
+      authenticationIntent: !save.rememberKey && (!!chosen.getApiKey || hasStoredCredentials(chosen)),
+    }) ?? connection; });
     if (!saved) return;
     // Bookkeeping tracks a committed save even if a newer SDK model now owns the session.
     this.savedConnection = committed;
@@ -644,6 +654,8 @@ export class ChatRuntime {
   async clear(): Promise<void> {
     if (this.destroyed) return;
     this.stopRun();
+    const owner = ++this.clearOwner;
+    this.clearSnapshot ??= { entries: boundedEntries(this.history), pending: new Map(this.pendingHistory), changed: new Set(this.locallyChanged), replyId: this.replyId, historyTouched: this.historyTouched, revision: this.revision };
     this.historyTouched = true;
     this.pendingHistory.clear();
     this.replaceHistory([]);
@@ -651,9 +663,41 @@ export class ChatRuntime {
     this.locallyChanged.clear();
     this.replyId = undefined;
     this.currentError = null;
-    // Queue the barrier before callbacks or destruction can start another operation.
-    this.clearing = this.persist(() => this.storage.clearEntries()).then(() => {});
-    const clearing = this.clearing;
+    // Enqueue the barrier synchronously, before rendering or destruction can
+    // schedule later work. Handle failures here so clearing never stays rejected.
+    const saving = this.persist(() => this.storage.clearEntries());
+    const clearing = saving.then((saved) => {
+      if (!saved && this.options.chat?.persist !== false) throw new Error('Clear failed.');
+      if (owner === this.clearOwner) { this.clearSnapshot = undefined; this.pendingHistory.clear(); }
+      else this.clearSnapshot = { entries: [], pending: new Map(), changed: new Set(), replyId: undefined, historyTouched: true, revision: this.revision };
+    }).catch(async () => {
+      if (owner !== this.clearOwner || this.destroyed) return;
+      const snapshot = this.clearSnapshot;
+      if (snapshot) {
+        this.replaceHistory(snapshot.entries);
+        for (const [id, entry] of snapshot.pending) this.pendingHistory.set(id, entry);
+        for (const id of snapshot.changed) this.locallyChanged.add(id);
+        this.replyId = snapshot.replyId;
+        this.historyTouched = snapshot.historyTouched;
+      }
+      this.clearSnapshot = undefined;
+      this.historySave = undefined;
+      if (!snapshot || snapshot.revision === this.revision) this.currentError = CLEAR_HISTORY_FAILED;
+      this.changed();
+      if (snapshot && !snapshot.historyTouched) {
+        // A clear may fail before the first load completed, when the optimistic
+        // UI snapshot was empty. Recover authoritative bounded history as well.
+        const revision = this.revision; const historyRevision = this.historyRevision;
+        try {
+          const stored = await this.loadHistory();
+          if (owner === this.clearOwner && !this.destroyed && revision === this.revision && historyRevision === this.historyRevision) {
+            this.replaceHistory(boundedEntries(stored.entries, (text) => this.redact(text)));
+            this.changed();
+          }
+        } catch { /* The fixed clear error remains actionable; no rejected barrier. */ }
+      }
+    });
+    this.clearing = clearing;
     this.changed();
     await Promise.all([this.initialize(), clearing]);
   }
@@ -662,6 +706,7 @@ export class ChatRuntime {
     if (this.destroyed) return;
     this.stop();
     this.destroyed = true;
+    this.clearSnapshot = undefined;
     this.revision++;
     this.storage.close();
     if (this.ownsSecrets) this.secrets.clear();

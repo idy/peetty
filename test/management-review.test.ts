@@ -191,13 +191,16 @@ describe('explicit previous-format cleanup', () => {
     installChatIndexedDB(t); const ui = await mount(t); const before = ui.store.activeProfile;
     const cleanup = t.mock.method(ui.store, 'clearLegacyData', async () => {});
     ui.tab('data'); assert.equal(cleanup.mock.callCount(), 0);
-    assert.match(ui.root.textContent!, /previous-format chat and API key copies.*current profiles, conversations and connections are kept/);
+    assert.match(ui.root.textContent!, /Preserve pending work and upgrade pages running older Peetty releases/);
+    assert.match(ui.root.textContent!, /reloading a page pinned to an old version will not restore saving/);
+    assert.match(ui.root.textContent!, /previous-format chat and key copies while keeping current profiles, conversations and connections/);
     ui.click('Delete previous-format copies'); assert.equal(cleanup.mock.callCount(), 0);
     assert.equal(ui.query('[data-focus-key="confirm-legacy"]').parentElement!.hidden, false);
     ui.click('Cancel'); assert.equal(cleanup.mock.callCount(), 0);
     assert.equal(ui.query('[data-focus-key="confirm-legacy"]').parentElement!.hidden, true);
     ui.click('Delete previous-format copies'); ui.language('zh');
-    assert.match(ui.root.textContent!, /当前档案、聊天与模型连接都会保留/);
+    assert.match(ui.root.textContent!, /当前档案、聊天和模型连接都会保留/);
+    assert.match(ui.root.textContent!, /刷新仍固定使用旧版的网页不能恢复保存功能/);
     ui.click('永久删除旧聊天与密钥副本'); await flush();
     assert.equal(cleanup.mock.callCount(), 1); assert.deepEqual(ui.store.activeProfile, before);
     assert.match(ui.query('.pc-manage-status').textContent!, /旧格式副本已删除，当前档案已保留/);

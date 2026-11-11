@@ -196,9 +196,9 @@ describe('explicit nonsecret setup headers', () => {
 
   it('exports trusted classifications but strips their consent when a backup is restored', async (t) => {
     const idb = installChatIndexedDB(t); const namespace = 'explicit-route-backup';
-    const headers = { 'X-Route': 'fixture-backup-route', 'X-Author': 'fixture-author', 'X-Key-Version': 'fixture-version', 'X-Subscription-Plan': 'fixture-plan' };
+    const headers = { 'X-Route': 'fixture-backup-route', 'X-Author': 'fixture-author', 'X-Key-Version': 'fixture-version', 'X-Subscription-Plan': 'fixture-plan', 'X-ContextTokens': '2048', 'X-RemainingTokens': '1024' };
     const model = { ...MODEL, apiKey: 'fixture-route-backup-key', headers, nonCredentialHeaders: Object.keys(headers) };
-    const declared = ['x-author', 'x-key-version', 'x-route', 'x-subscription-plan'];
+    const declared = ['x-author', 'x-contexttokens', 'x-key-version', 'x-remainingtokens', 'x-route', 'x-subscription-plan'];
     const { panel, query, root } = await mountPanel(t, model, { chat: { storageKey: namespace } });
     query<HTMLFormElement>('.pc-setup').requestSubmit(); await eventually(() => !!savedConnection(idb, namespace)); panel.open(true);
     let blob: Blob | undefined; t.mock.method(URL, 'createObjectURL', (value: Blob) => { blob = value; return 'blob:explicit-route-backup'; }); t.mock.method(URL, 'revokeObjectURL', () => {});
@@ -575,6 +575,41 @@ describe('chat frame sound activation', () => {
   });
 });
 
+describe('chat panel clear recovery', () => {
+  it('restores the transcript and permits retry after a failed legacy history deletion', async (t) => {
+    installChatIndexedDB(t);
+    const namespace = 'panel-clear-legacy-race';
+    const seed = new BrowserProfileStore(namespace); await seed.initialize(); t.after(() => seed.close());
+    await seed.storage(seed.activeProfileId).saveEntries([{ id: 'before-clear', role: 'user', text: 'Synthetic history must survive failed deletion', createdAt: 1 }]);
+    const original = BrowserProfileStore.prototype.runtimeStorage;
+    let rejectClear = true;
+    t.mock.method(BrowserProfileStore.prototype, 'runtimeStorage', function(this: BrowserProfileStore, profileId: string) {
+      const adapter = original.call(this, profileId);
+      const clear = adapter.clearEntries;
+      adapter.clearEntries = async () => {
+        if (rejectClear) throw new ChatStorageError('legacy-cleanup', 'Legacy history changed. Close other tabs and try again.');
+        await clear();
+      };
+      return adapter;
+    });
+    const { panel, query } = await mountPanel(t, MODEL, { chat: { storageKey: namespace } });
+    panel.open(false);
+    query<HTMLButtonElement>('.pc-clear').click(); query<HTMLButtonElement>('.pc-clear-now').click();
+    await eventually(() => !query('.pc-error').hidden);
+    assert.match(query('.pc-messages').textContent!, /Synthetic history must survive failed deletion/);
+    assert.match(query('.pc-error').textContent!, /Could not clear conversation/);
+    assert.doesNotMatch(query('.pc-error').textContent!, /CORS|API URL/);
+    panel.setLanguage('zh');
+    assert.match(query('.pc-error').textContent!, /当前消息已保留/);
+    assert.doesNotMatch(query('.pc-error').textContent!, /CORS|key 和模型/);
+    rejectClear = false;
+    query<HTMLButtonElement>('.pc-clear').click(); query<HTMLButtonElement>('.pc-clear-now').click();
+    await eventually(() => query('.pc-messages').hidden === true);
+    assert.equal(query('.pc-messages').textContent, '');
+    assert.equal(query('.pc-error').hidden, true);
+  });
+});
+
 describe('chat panel credential ownership', () => {
   it('keeps setup open and explains blocked legacy credential cleanup in both languages', async (t) => {
     const { panel, query } = await mountPanel(t, MODEL);
@@ -586,6 +621,8 @@ describe('chat panel credential ownership', () => {
     assert.equal(query('.pc-setup').hidden, false);
     assert.match(query('.pc-error').textContent!, /Close other Peetty tabs/);
     assert.doesNotMatch(query('.pc-error').textContent!, /API URL and a model ID/);
+    assert.match(query('.pc-setup').textContent!, /preserve pending work and upgrade pages running older Peetty releases/);
+    assert.match(query('.pc-setup').textContent!, /reloading an old pinned version will not restore saving/);
     panel.setLanguage('zh');
     assert.match(query('.pc-error').textContent!, /关闭其他 Peetty 标签页/);
   });

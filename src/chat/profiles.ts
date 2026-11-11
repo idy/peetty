@@ -2,7 +2,7 @@ import type { Figure } from '../figure/types.ts';
 import { validateFigure } from '../figure/validate.ts';
 import { COMPANION_ACTIONS, type ChatEntry } from './types.ts';
 import type { ChatStorage, StoredChat, StoredConnection, StoredSessionConnection } from './store.ts';
-import { boundedEntries, ChatStorageError } from './store.ts';
+import { boundedEntries, ChatStorageError, forgetConnectionCredentials } from './store.ts';
 import { connectionIdentity, hasStoredCredentials, normalizeModelOptions, prepareSavedConnection } from './connections.ts';
 import { applyEntryChanges, entryChanges, sanitizeEntries } from './history.ts';
 import { fenceLegacyDatabase, openStateDatabase, stateTransaction } from './idb.ts';
@@ -403,6 +403,7 @@ export class BrowserProfileStore {
   private closed = false;
   private failed = false;
   private legacyProof: LegacyProof | undefined;
+  private readonly cleanupDebt = new Map<string, readonly StoredConnection[]>();
   private reconcilingLegacy = false;
   private legacyReconciliation: Promise<void> | undefined;
   private legacyEmpty = false;
@@ -598,7 +599,7 @@ export class BrowserProfileStore {
 
   /** Retire only the exact records copied by our successful authoritative write.
    * Read/compare/delete share a legacy transaction, so a concurrent old client wins. */
-  private async retireLegacy(snapshot: LegacySnapshot, proof: LegacyProof, mode: LegacyPrivacy = 'automatic'): Promise<void> {
+  private async retireLegacy(snapshot: LegacySnapshot, proof: LegacyProof, mode: LegacyPrivacy = 'automatic', credentials: readonly StoredConnection[] = []): Promise<void> {
     if (!this.persist || this.failed || this.closed) return;
     const knownEntries = new Set(proof.entries); const knownConnections = new Set(proof.connections);
     const original = snapshot.entries === undefined ? undefined : array(snapshot.entries, PROFILE_LIMITS.entries, entryFrom);
@@ -608,11 +609,17 @@ export class BrowserProfileStore {
     // uncopied entries, and deliberately invalidates the old history snapshot.
     const explicitHistory = mode === 'history' || mode === 'profile';
     const changedEntries = original !== undefined && (remainingEntries!.length === 0 || explicitHistory && remainingEntries!.length < original.length);
-    const removeConnection = snapshot.connection !== undefined && knownConnections.has(jsonFingerprint(connectionFrom(snapshot.connection)));
-    if (!changedEntries && !removeConnection) return;
+    const currentConnection = snapshot.connection === undefined ? undefined : connectionFrom(snapshot.connection);
+    const sanitized = currentConnection && (mode === 'credentials' || mode === 'profile') ? forgetConnectionCredentials(currentConnection, credentials) : currentConnection;
+    const changedCredentials = sanitized !== currentConnection;
+    const copiedConnection = currentConnection !== undefined && knownConnections.has(jsonFingerprint(currentConnection));
+    // A credential-specific request cannot erase a newer unrelated key merely
+    // because some other profile once copied the complete connection record.
+    const removeConnection = copiedConnection && (mode !== 'credentials' || changedCredentials && !hasStoredCredentials(sanitized));
+    if (!changedEntries && !removeConnection && !changedCredentials) return;
     const db = await openStateDatabase(`${this.namespace}:chat`, { isClosed: () => this.closed, onFailure: () => {} }, 'latest');
     if (!db) {
-      if (mode === 'credentials' || mode === 'profile') throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
+      if (mode !== 'automatic') throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
       return;
     }
     try {
@@ -633,9 +640,10 @@ export class BrowserProfileStore {
                 else store.delete('entries');
               }
               if (removeConnection) store.delete('connection');
+              else if (changedCredentials) store.put(sanitized, 'connection');
               // A retired history also invalidates a pending first setup save,
               // even when the old client had not stored its connection yet.
-              if (changedEntries || removeConnection) store.put(freshId(), 'connectionEpoch');
+              if (changedEntries || removeConnection || changedCredentials) store.put(freshId(), 'connectionEpoch');
               // Any history removal invalidates stale legacy clients, including
               // clients whose original database had no epoch record at all.
               if (changedEntries) store.put(freshId(), 'entriesEpoch');
@@ -643,34 +651,43 @@ export class BrowserProfileStore {
           };
         }
       });
-      if ((!ok || !matched) && (mode === 'credentials' || mode === 'profile')) throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
+      if ((!ok || !matched) && mode !== 'automatic') throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
     } finally { db.close(); }
   }
 
   /** Establish proof from actual authoritative correspondence before user deletion,
    * then retry CAS cleanup. Previously copied digests survive clear/key opt-out. */
-  private reconcileLegacy(force = false, mode: LegacyPrivacy = 'automatic'): Promise<void> {
-    if (this.legacyReconciliation) return mode === 'automatic' ? this.legacyReconciliation : this.legacyReconciliation.then(() => this.reconcileLegacy(force, mode));
+  private reconcileLegacy(force = false, mode: LegacyPrivacy = 'automatic', credentials: readonly StoredConnection[] = []): Promise<void> {
+    if (this.legacyReconciliation) return mode === 'automatic' ? this.legacyReconciliation : this.legacyReconciliation.then(() => this.reconcileLegacy(force, mode, credentials));
     if (!force && this.legacyEmpty && this.legacyCheckedRevision === this.legacyRevision) return Promise.resolve();
-    const operation = this.reconcileLegacyNow(mode);
+    const operation = this.reconcileLegacyNow(mode, credentials);
     this.legacyReconciliation = operation;
     return operation.finally(() => { if (this.legacyReconciliation === operation) this.legacyReconciliation = undefined; });
   }
 
-  private async reconcileLegacyNow(mode: LegacyPrivacy): Promise<void> {
+  private async reconcileLegacyNow(mode: LegacyPrivacy, credentials: readonly StoredConnection[]): Promise<void> {
     if (!this.persist || this.closed || this.reconcilingLegacy) return;
     this.reconcilingLegacy = true;
     try {
       if (mode === 'credentials' || mode === 'profile') {
         await this.fenceLegacyAuthentication();
         if (this.failed) throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
-      } else if (this.failed) return;
+      } else if (this.failed) {
+        if (mode !== 'automatic' && this.legacyProof?.entries.length) throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
+        return;
+      }
       const legacy = await this.legacy();
       this.legacyEmpty = !legacy.used;
       this.legacyCheckedRevision = this.legacyRevision;
       if (!legacy.retire) {
-        if (legacy.used && (mode === 'credentials' || mode === 'profile')) throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
+        if (legacy.used && mode !== 'automatic') throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
         return;
+      }
+      if (mode === 'credentials' && hasStoredCredentials(legacy.connection) && !credentials.some(hasStoredCredentials)) {
+        // Callback-only authentication must not be resolved during setup. If an
+        // unknown key already reached disk, require explicit recovery instead of
+        // claiming it was removed without any credential-value correspondence.
+        throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
       }
       const candidates = legacy.entries.map((entry) => ({ entry, digest: jsonFingerprint(entry) }));
       const connectionDigest = legacy.connection ? jsonFingerprint(legacy.connection) : undefined;
@@ -692,8 +709,8 @@ export class BrowserProfileStore {
         }
         return draft.legacyProof;
       });
-      if (this.failed && (mode === 'credentials' || mode === 'profile')) throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
-      if (!this.failed && proof) await this.retireLegacy(legacy.retire, proof, mode);
+      if (this.failed && mode !== 'automatic') throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
+      if (!this.failed && (proof || mode === 'credentials')) await this.retireLegacy(legacy.retire, proof ?? { version: 1, entries: [], connections: [] }, mode, credentials);
     } finally { this.reconcilingLegacy = false; }
   }
 
@@ -822,7 +839,12 @@ export class BrowserProfileStore {
   remove(profileId: string): Promise<void> {
     return this.enqueue(async () => {
       this.ready();
-      await this.reconcileLegacy(true, 'profile');
+      const source = await this.run([profileId], false, (draft) => {
+        const record = getRecord(draft, profileId);
+        check(draft.directory.ids.length > 1, 'Cannot remove the last profile.');
+        return record.profile.connection;
+      });
+      await this.reconcileLegacy(true, 'profile', source ? [source] : []);
       await this.run([profileId], true, (draft) => {
         getRecord(draft, profileId);
         check(draft.directory.ids.length > 1, 'Cannot remove the last profile.');
@@ -873,19 +895,41 @@ export class BrowserProfileStore {
       saveConnection: async (connection, options) => {
         if (closing) return;
         const copy = connectionFrom(connection, false);
+        const supplied = options?.credentialsToForget?.map((source) => connectionFrom(source, false)) ?? [];
         return this.enqueue(async () => {
           this.ready();
-          // Credential removal must fence obsolete v1 writers before reporting
-          // success. Metadata-only/initial saves leave active legacy work alone.
+          const pending = this.cleanupDebt.get(profileId);
+          if (pending && this.failed) {
+            // A deliberate retry must verify persistent state again instead of
+            // treating a failed deletion's credential-free RAM view as success.
+            this.failed = false; this.db?.close(); this.db = undefined; this.opening = undefined;
+          }
           const previous = await this.run([profileId], false, (draft) => getRecord(draft, profileId).profile.connection);
-          const forget = previous && hasStoredCredentials(previous) && (options?.rememberCredentials === false || connectionIdentity(previous) !== connectionIdentity(copy));
-          await this.reconcileLegacy(true, forget ? 'credentials' : 'automatic');
+          if (pending && this.failed) throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
+          const sources = [...pending ?? [], ...supplied, ...(previous ? [previous] : []), ...(options?.rememberCredentials === false ? [copy] : [])];
+          const freshRAM = this.failed && !previous && !pending;
+          const forget = !!pending || !freshRAM && (options?.rememberCredentials === false && (options.authenticationIntent || sources.some(hasStoredCredentials))
+            || previous && hasStoredCredentials(previous) && connectionIdentity(previous) !== connectionIdentity(copy));
+          if (forget && this.persist) this.cleanupDebt.set(profileId, sources);
+          await this.reconcileLegacy(true, forget ? 'credentials' : 'automatic', sources);
+          let baseline = previous;
           const saved = await this.run([profileId], true, (draft) => {
-            const known = this.sessions.get(profileId)?.at(-1)?.connection ?? getRecord(draft, profileId).profile.connection;
+            baseline = getRecord(draft, profileId).profile.connection;
+            const known = this.sessions.get(profileId)?.at(-1)?.connection ?? baseline;
             const saved = prepareSavedConnection(copy, known, options?.rememberCredentials);
             touch(draft, profileId).profile.connection = saved;
             return clone(saved);
           });
+          if (forget && this.persist && this.failed) {
+            const record = this.state.records.get(profileId);
+            if (record) {
+              record.profile = { ...record.profile };
+              if (baseline) record.profile.connection = clone(baseline);
+              else delete record.profile.connection;
+            }
+            throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
+          }
+          this.cleanupDebt.delete(profileId);
           this.sessions.delete(profileId);
           return saved;
         });

@@ -249,6 +249,51 @@ describe('independent legacy credential invalidation', () => {
     assert.equal((legacy.get('connection') as StoredConnection).apiKey, 'new-same-writer-key');
   });
 
+  it('does not let a queued load of a peer opt-out reauthorize an already captured credential', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const legacy = new Map<string, unknown>([['connection', connection], ['connectionEpoch', 'E']]);
+    idb.databases.set('queued-peer-load:chat', legacy);
+    const old = new BrowserChatStore('queued-peer-load'); const peer = new BrowserChatStore('queued-peer-load');
+    t.after(() => { old.close(); peer.close(); });
+    await Promise.all([old.load(), peer.load()]);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; }); t.after(() => release());
+    (old as unknown as { writes: Promise<void> }).writes = gate;
+    const loading = old.load();
+    const saving = old.saveConnection(connection);
+    const rejected = assert.rejects(saving, { code: 'stale-connection' });
+    await peer.saveConnection(connection, { rememberCredentials: false });
+    assert.notEqual(legacy.get('connectionEpoch'), 'E');
+    release(); await loading; await rejected;
+    assert.equal((legacy.get('connection') as StoredConnection).apiKey, undefined);
+    assert.equal(old.persistenceWarning, false);
+    await old.load();
+    await old.saveConnection({ ...connection, apiKey: 'new-explicit-input' });
+    assert.equal((legacy.get('connection') as StoredConnection).apiKey, 'new-explicit-input');
+  });
+
+  it('retains committed credentials and cleanup debt after repeated disk aborts until persistent removal succeeds', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const legacy = new Map<string, unknown>([['connection', connection], ['connectionEpoch', 'E']]);
+    idb.databases.set('cleanup-debt:chat', legacy);
+    const writer = new BrowserChatStore('cleanup-debt'); t.after(() => writer.close());
+    await writer.load();
+    idb.fail('commit');
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await assert.rejects(writer.saveConnection(connection, { rememberCredentials: false }), { code: 'legacy-cleanup' });
+      assert.equal((await writer.load()).connection!.apiKey, connection.apiKey, 'failed cleanup must retain the committed credential state');
+      assert.equal((legacy.get('connection') as StoredConnection).apiKey, connection.apiKey);
+      assert.equal(legacy.get('connectionEpoch'), 'E');
+    }
+    const fresh = new BrowserChatStore('cleanup-debt'); t.after(() => fresh.close());
+    assert.equal((await fresh.load()).connection!.apiKey, connection.apiKey);
+    idb.fail('none');
+    await writer.saveConnection(connection, { rememberCredentials: false });
+    assert.equal((legacy.get('connection') as StoredConnection).apiKey, undefined);
+    assert.equal((await writer.load()).connection!.apiKey, undefined);
+    assert.equal(writer.persistenceWarning, false);
+  });
+
   it('honors a preceding queued load before saving on the same client', async (t) => {
     const idb = installChatIndexedDB(t);
     idb.databases.set('ordered-load:chat', new Map<string, unknown>([['connectionEpoch', 'current']]));
@@ -363,6 +408,64 @@ describe('version fencing of deployed legacy v1 writers', () => {
       assert.equal(idb.versions.get(`${namespace}:chat`), 2, 'normal operations must not repeatedly upgrade');
     });
   }
+
+  it('fences an old tab pending first setup even when the profile only has an unremembered SDK key', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const namespace = 'pending-first-sdk';
+    const manager = new BrowserProfileStore(namespace); t.after(() => manager.close());
+    await manager.initialize();
+    assert.equal(manager.activeProfile.connection, undefined);
+    const old = await oldV1(namespace); t.after(() => old.close());
+    const runtime = new ChatRuntime({ model: { ...connection, id: 'sdk-model' }, storage: manager.storage(manager.activeProfileId) });
+    t.after(() => runtime.destroy()); await runtime.initialize();
+    const pending = old.save(connection);
+    await runtime.configure(runtime.model!, false);
+    assert.equal(await pending, true);
+    assert.equal(old.failed, true);
+    assert.equal(idb.versions.get(`${namespace}:chat`), 2);
+    const legacy = idb.databases.get(`${namespace}:chat`)!;
+    assert.equal((legacy.get('connection') as StoredConnection | undefined)?.apiKey, undefined);
+    assert.equal(await old.save(connection), false);
+    assert.equal(manager.activeProfile.connection!.apiKey, undefined);
+    assert.equal(runtime.model!.apiKey, connection.apiKey, 'the active session remains usable');
+    assert.equal(runtime.rememberKey, false);
+  });
+
+  it('fences pending first setup for callback authentication without resolving the callback', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const namespace = 'callback-first-setup';
+    const manager = new BrowserProfileStore(namespace); t.after(() => manager.close());
+    await manager.initialize();
+    const old = await oldV1(namespace); t.after(() => old.close());
+    let resolved = 0;
+    const getApiKey = () => { resolved++; return connection.apiKey!; };
+    const runtime = new ChatRuntime({ model: { id: connection.id, baseUrl: connection.baseUrl, getApiKey }, storage: manager.storage(manager.activeProfileId) });
+    t.after(() => runtime.destroy());
+    await runtime.initialize();
+    await runtime.configure(runtime.model!, false);
+    assert.equal(resolved, 0);
+    assert.equal(old.failed, true);
+    assert.equal(await old.save(connection), false, 'the old pending first setup cannot begin its credential write after fencing');
+    assert.equal(idb.versions.get(`${namespace}:chat`), 2);
+    assert.equal(idb.databases.get(`${namespace}:chat`)!.has('connection'), false);
+    assert.equal(runtime.model!.getApiKey, getApiKey);
+  });
+
+  it('does not claim callback-only cleanup when an unidentified old key already reached disk', async (t) => {
+    installChatIndexedDB(t);
+    const namespace = 'callback-unknown-key';
+    const manager = new BrowserProfileStore(namespace); t.after(() => manager.close());
+    await manager.initialize();
+    const old = await oldV1(namespace); t.after(() => old.close());
+    await old.save(connection);
+    let resolved = 0;
+    const runtime = new ChatRuntime({ model: { id: connection.id, baseUrl: connection.baseUrl, getApiKey: () => { resolved++; return connection.apiKey!; } }, storage: manager.storage(manager.activeProfileId) });
+    t.after(() => runtime.destroy());
+    await runtime.initialize();
+    await assert.rejects(runtime.configure(runtime.model!, false), { code: 'legacy-cleanup' });
+    assert.equal(resolved, 0);
+    assert.equal(manager.activeProfile.connection, undefined);
+  });
 
   it('rejects a real runtime opt-out blocked by an uncooperative v1 connection without late cleanup', async (t) => {
     const idb = installChatIndexedDB(t);

@@ -1,4 +1,4 @@
-import { abortable, ChatRuntime, fetchModelList, normalizeBaseUrl } from './runtime.ts';
+import { abortable, ChatRuntime, CLEAR_HISTORY_FAILED, fetchModelList, normalizeBaseUrl } from './runtime.ts';
 import { isCredentialHeader, LOCAL_MAGPIE, localMagpieConnection, normalizeModelOptions, toStoredConnection } from './connections.ts';
 import { SecretRegistry } from './secrets.ts';
 import { ChatStorageError } from './store.ts';
@@ -467,7 +467,7 @@ export async function createChatPanel({
       error.hidden = !text;
     }
     function showError(content?: () => string) { shownError = content ?? (figureFailure ? () => t.figureFailed : undefined); updateError(); }
-    function showRuntimeError(message: string) { showError(() => `${message}\n${t.network}`); }
+    function showRuntimeError(message: string) { showError(() => message === CLEAR_HISTORY_FAILED ? t.clearFailed : `${message}\n${t.network}`); }
     function isLocalMagpie(): boolean {
       try { return normalizeBaseUrl(url.value) === LOCAL_MAGPIE.baseUrl; } catch { return false; }
     }

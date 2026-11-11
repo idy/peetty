@@ -94,7 +94,7 @@ describe('explicit nonsecret header classification', () => {
   });
 
   it('accepts explicitly declared numeric token-count metadata without exempting credentials', () => {
-    for (const name of ['X-MaxTokens', 'X-InputTokens', 'X-Output-Tokens', 'X-TotalTokens', 'X-PromptTokens', 'X-Completion-Tokens-Limit']) {
+    for (const name of ['X-MaxTokens', 'X-InputTokens', 'X-Output-Tokens', 'X-TotalTokens', 'X-PromptTokens', 'X-Completion-Tokens-Limit', 'X-ContextTokens', 'X-RemainingTokens', 'X-UsedTokens', 'X-GenerationTokens', 'X-Token-Count', 'X-Custom-Context-Token-Budget']) {
       for (const value of ['0', '42', '4096']) {
         const model = normalizeModelOptions({ ...base, headers: { [name]: value }, nonCredentialHeaders: [name] });
         assert.equal(isCredentialHeader(name), true, 'undeclared values remain sensitive');
@@ -108,7 +108,7 @@ describe('explicit nonsecret header classification', () => {
         assert.throws(() => normalizeModelOptions({ ...base, headers: { [name]: value }, nonCredentialHeaders: [name] }));
       }
     }
-    for (const name of ['X-ClientToken', 'X-AuthToken', 'X-Token', 'X-InputTokensSecret']) {
+    for (const name of ['X-ClientToken', 'X-AuthToken', 'X-Token', 'X-InputTokensSecret', 'X-AccessTokens', 'X-Refresh-Tokens', 'X-ClientTokensCount', 'X-AuthTokensLimit', 'X-SecretTokensBudget']) {
       assert.throws(() => normalizeModelOptions({ ...base, headers: { [name]: '42' }, nonCredentialHeaders: [name] }));
     }
   });
