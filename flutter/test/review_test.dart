@@ -1,10 +1,12 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:peetty/peetty.dart';
+import 'package:peetty/src/rig.dart';
 
 Map<String, Object?> _json(String id) => jsonDecode(File('assets/figures/$id.json').readAsStringSync()) as Map<String, Object?>;
 final _miru = Figure.fromJson(_json('miru'));
@@ -118,6 +120,26 @@ void main() {
     });
   });
 
+  test('large curved strokes are hit on the painted curve, not its chords', () {
+    final rig = Rig(Figure.fromJson(_tiny(shape: {'type': 'ellipse', 'cx': 0, 'cy': 0, 'rx': 1000, 'ry': 1000, 'stroke': 'ink', 'strokeWidth': 1})));
+    Offset at(double radius) => Offset.fromDirection(math.pi / 8, radius);
+    expect(rig.hitTest(at(1000.3)), isTrue);
+    expect(rig.hitTest(at(999.7)), isTrue);
+    expect(rig.hitTest(at(1000.7)), isFalse);
+    final arc = Rig(Figure.fromJson(_tiny(shape: {'type': 'path', 'd': 'M0 0 C0 -2000 2000 -2000 2000 0', 'stroke': 'ink', 'strokeWidth': 1})));
+    // The curve's top is at y = -1500 halfway along.
+    expect(arc.hitTest(const Offset(1000, -1500.3)), isTrue);
+    expect(arc.hitTest(const Offset(1000, -1501)), isFalse);
+  });
+
+  test('extreme coordinates never escape as non-format errors', () {
+    expect(() => Figure.fromJson(_tiny(shape: {'type': 'path', 'd': 'M0 0 L1e999 0', 'stroke': 'ink'})), throwsA(isA<FigureFormatException>()));
+    expect(() => Figure.fromJson(_tiny(shape: {'type': 'path', 'd': 'M0 0 C1e200 0 0 0 0 0', 'stroke': 'ink'})), throwsA(isA<FigureFormatException>()));
+    final huge = Rig(Figure.fromJson(_tiny(shape: {'type': 'path', 'd': 'M0 0 C3e37 0 0 0 0 0', 'stroke': 'ink', 'strokeWidth': 2})));
+    expect(huge.hitTest(const Offset(10, 0)), isTrue);
+    expect(huge.hitTest(const Offset(10, 50)), isFalse);
+  });
+
   test('enforces an aggregate geometry budget but accepts many small clips', () {
     final big = _tiny();
     final d = 'M0 0${' L1 1' * 3800}';
@@ -223,6 +245,45 @@ void main() {
     final state = _state(tester);
     expect(await _until(tester, () => state.action != FigureState.fall && state.position != null), isTrue);
     expect(state.position!.dy, 400);
+  });
+
+  testWidgets('safe-area insets follow a rotated host', (tester) async {
+    // 250x300 at (500, 100) turned 30°: wholly on an 800x600 screen with no insets.
+    await tester.pumpWidget(MediaQuery(
+      data: const MediaQueryData(size: Size(800, 600)),
+      child: Directionality(
+        textDirection: TextDirection.ltr,
+        child: Stack(children: [
+          Positioned(
+            left: 500,
+            top: 100,
+            width: 250,
+            height: 300,
+            child: Transform.rotate(
+              angle: math.pi / 6,
+              alignment: Alignment.topLeft,
+              child: Peetty(
+                figureData: _miru,
+                random: _seeded(),
+                child: const Stack(children: [
+                  Positioned(left: 40, top: 150, width: 170, height: 40, child: PeettyPerch(child: SizedBox.expand())),
+                ]),
+              ),
+            ),
+          ),
+        ]),
+      ),
+    ));
+    final state = _state(tester);
+    expect(await _until(tester, () => state.action != FigureState.fall && state.position != null), isTrue);
+    expect(state.position!.dy, 150);
+  });
+
+  testWidgets('pointer events reach the host over children that do not hit-test', (tester) async {
+    await tester.pumpWidget(host(child: const SizedBox.expand()));
+    await tester.pump();
+    final path = tester.hitTestOnBinding(const Offset(20, 20)).path.map((e) => e.target).toList();
+    expect(path, contains(tester.renderObject(find.descendant(of: find.byType(Peetty), matching: find.byType(Listener)).first)));
   });
 
   testWidgets('the host reports what its children hit, keeping siblings below out', (tester) async {

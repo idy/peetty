@@ -282,14 +282,26 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
     return Limits(left, right, top, bottom);
   }
 
-  /// The safe-area insets that overlap the host, in host coordinates: the safe
-  /// band's edges are mapped into the host, so scaled hosts measure consistently.
+  /// The safe-area insets that overlap the host, in host coordinates.
+  ///
+  /// Screen y is affine in host coordinates, `y = a·x + b·y' + c`, so for a scaled,
+  /// rotated or skewed host the safe band's edges are slanted lines. The insets are
+  /// the nearest host rows lying wholly inside the band across the host's width.
   (double, double) _insets(RenderBox host) {
     final screen = _screen;
     if (screen == null) return (0, 0);
-    final safeTop = host.globalToLocal(Offset(0, _padding.top)).dy;
-    final safeBottom = host.globalToLocal(Offset(0, screen.height - _padding.bottom)).dy;
-    return (math.max(0.0, safeTop), math.max(0.0, host.size.height - safeBottom));
+    final transform = host.getTransformTo(null);
+    double screenY(double x, double y) => MatrixUtils.transformPoint(transform, Offset(x, y)).dy;
+    final c = screenY(0, 0);
+    final a = screenY(1, 0) - c;
+    final b = screenY(0, 1) - c;
+    // Turned past a quarter: host rows no longer run across the screen's top and bottom.
+    if (b <= 1e-9) return (0, 0);
+    final width = host.size.width;
+    final safeTop = _padding.top, safeBottom = screen.height - _padding.bottom;
+    final top = (safeTop - c - math.min(0.0, a * width)) / b;
+    final bottom = (safeBottom - c - math.max(0.0, a * width)) / b;
+    return (math.max(0.0, top), math.max(0.0, host.size.height - bottom));
   }
 
   List<Perch> _scan(RenderBox host) {

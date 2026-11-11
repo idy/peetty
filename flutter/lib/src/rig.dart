@@ -225,49 +225,79 @@ class Rig {
 
   /// Whether [p] lies in the painted stroke: each segment's band, the caps at
   /// open ends and the joins between segments, as the canvas strokes them.
+  /// Curves are subdivided only where they pass near [p], to a flatness well
+  /// under the stroke width, so the work does not grow with the curve's size.
   static bool _onStroke(FigureShape shape, Offset p, double h) {
+    final tolerance = math.max(1e-3, math.min(0.1, h * 0.05));
     for (final contour in shape.outline) {
-      final points = _distinct(contour);
-      final closed = contour.closed && points.length > 2;
-      final n = points.length;
-      if (n < 2) continue;
-      final segments = closed ? n : n - 1;
-      for (var i = 0; i < segments; i++) {
-        final a = points[i], b = points[(i + 1) % n];
-        final d = b - a;
-        final length = d.distance;
-        final u = d / length;
-        final t = _dot(p - a, u);
-        final square = !closed && shape.lineCap == ui.StrokeCap.square;
-        final before = square && i == 0 ? h : 0.0;
-        final after = square && i == segments - 1 ? h : 0.0;
-        if (t >= -before && t <= length + after && _cross(u, p - a).abs() <= h) return true;
+      final segments = contour.segments;
+      if (segments.isEmpty) continue;
+      for (final segment in segments) {
+        final c1 = segment.c1, c2 = segment.c2;
+        final hit = c1 == null || c2 == null
+            ? _inBand(segment.a, segment.b, p, h, roundStart: false, roundEnd: false)
+            : _onCubic(segment.a, c1, c2, segment.b, p, h, tolerance, 0, true, true);
+        if (hit) return true;
       }
-      if (!closed && shape.lineCap == ui.StrokeCap.round) {
-        if ((p - points.first).distance <= h || (p - points.last).distance <= h) return true;
+      if (!contour.closed) {
+        final first = segments.first, last = segments.last;
+        if (_inCap(shape.lineCap, first.a, -first.startDirection, p, h)) return true;
+        if (_inCap(shape.lineCap, last.b, last.endDirection, p, h)) return true;
       }
-      for (var i = closed ? 0 : 1; i < (closed ? n : n - 1); i++) {
-        final previous = points[(i - 1 + n) % n], vertex = points[i], next = points[(i + 1) % n];
-        if (_inJoin(shape.lineJoin, previous, vertex, next, p, h)) return true;
+      final joins = contour.closed ? segments.length : segments.length - 1;
+      for (var i = 0; i < joins; i++) {
+        final into = segments[i], out = segments[(i + 1) % segments.length];
+        if (_inJoin(shape.lineJoin, into.endDirection, into.b, out.startDirection, p, h)) return true;
       }
     }
     return false;
   }
 
-  /// Consecutive repeated points removed, including a closing point equal to the start.
-  static List<Offset> _distinct(Contour contour) {
-    final out = <Offset>[];
-    for (final point in contour.points) {
-      if (out.isEmpty || (point - out.last).distanceSquared > 1e-12) out.add(point);
+  /// The band of half-width [h] along a straight piece. Pieces cut from inside a
+  /// curve end in round joins, as the curve is smooth there; real ends get caps instead.
+  static bool _inBand(Offset a, Offset b, Offset p, double h, {required bool roundStart, required bool roundEnd}) {
+    final d = b - a;
+    final length = d.distance;
+    if (length > 0 && length.isFinite) {
+      final u = d / length;
+      final t = _dot(p - a, u);
+      if (t >= 0 && t <= length && _cross(u, p - a).abs() <= h) return true;
     }
-    if (contour.closed && out.length > 1 && (out.first - out.last).distanceSquared <= 1e-12) out.removeLast();
-    return out;
+    return (roundStart && (p - a).distance <= h) || (roundEnd && (p - b).distance <= h);
   }
 
-  static bool _inJoin(ui.StrokeJoin join, Offset previous, Offset vertex, Offset next, Offset p, double h) {
+  static bool _onCubic(Offset p0, Offset p1, Offset p2, Offset p3, Offset p, double h, double tolerance, int depth, bool start, bool end) {
+    final bounds = Rect.fromPoints(p0, p3).expandToInclude(Rect.fromPoints(p1, p2)).inflate(h);
+    if (!bounds.contains(p)) return false;
+    final chord = p3 - p0;
+    final length = chord.distance;
+    double off(Offset q) => length > 1e-12 ? _cross(chord / length, q - p0).abs() : (q - p0).distance;
+    if (depth >= 24 || (off(p1) <= tolerance && off(p2) <= tolerance)) {
+      return _inBand(p0, p3, p, h, roundStart: !start, roundEnd: !end);
+    }
+    // de Casteljau split at the middle.
+    final a = (p0 + p1) / 2, b = (p1 + p2) / 2, c = (p2 + p3) / 2;
+    final d = (a + b) / 2, e = (b + c) / 2, m = (d + e) / 2;
+    return _onCubic(p0, a, d, m, p, h, tolerance, depth + 1, start, false) || _onCubic(m, e, c, p3, p, h, tolerance, depth + 1, false, end);
+  }
+
+  /// The cap beyond an open end at [end], pointing along [outward].
+  static bool _inCap(ui.StrokeCap cap, Offset end, Offset outward, Offset p, double h) {
+    switch (cap) {
+      case ui.StrokeCap.butt:
+        return false;
+      case ui.StrokeCap.round:
+        return (p - end).distance <= h;
+      case ui.StrokeCap.square:
+        if (outward == Offset.zero) return false;
+        final t = _dot(p - end, outward);
+        return t >= 0 && t <= h && _cross(outward, p - end).abs() <= h;
+    }
+  }
+
+  static bool _inJoin(ui.StrokeJoin join, Offset d1, Offset vertex, Offset d2, Offset p, double h) {
     if (join == ui.StrokeJoin.round) return (p - vertex).distance <= h;
-    final d1 = (vertex - previous) / (vertex - previous).distance;
-    final d2 = (next - vertex) / (next - vertex).distance;
+    if (d1 == Offset.zero || d2 == Offset.zero) return false;
     final turn = _cross(d1, d2);
     if (turn.abs() < 1e-9) return false;
     // The outer side of the corner, where the stroke needs filling in.

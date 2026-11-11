@@ -102,19 +102,42 @@ class RadialFigureGradient extends FigureGradient {
   final Offset? focus;
 }
 
-/// One drawn shape with its paint; the geometry is parsed once.
-/// One subpath flattened to a polyline: lines keep their exact vertices and
-/// curves are split into a bounded number of chords. Used to hit-test strokes.
+/// One drawn piece of a subpath: a line, or a cubic Bézier when [c1] and [c2] are set.
+class Segment {
+  const Segment.line(this.a, this.b) : c1 = null, c2 = null;
+  const Segment.cubic(this.a, Offset this.c1, Offset this.c2, this.b);
+
+  final Offset a, b;
+  final Offset? c1, c2;
+
+  /// Direction leaving [a], from the first control point distinct from it.
+  Offset get startDirection => _direction(a, [c1, c2, b]);
+
+  /// Direction arriving at [b], from the last control point distinct from it.
+  Offset get endDirection => -_direction(b, [c2, c1, a]);
+
+  static Offset _direction(Offset from, List<Offset?> toward) {
+    for (final p in toward) {
+      if (p == null) continue;
+      final d = p - from;
+      if (d.distanceSquared > 1e-18) return d / d.distance;
+    }
+    return Offset.zero;
+  }
+}
+
+/// One subpath as the exact lines and curves it was drawn with, for stroke hit testing.
 class Contour {
-  const Contour(this.points, this.closed);
-  final List<Offset> points;
+  const Contour(this.segments, this.closed);
+  final List<Segment> segments;
   final bool closed;
 }
 
+/// One drawn shape with its paint; the geometry is parsed once.
 class FigureShape {
   FigureShape({
     required this.path,
-    this.outline = const [],
+    required this.outline,
     this.fill,
     this.stroke,
     this.strokeWidth = 1,
@@ -126,7 +149,7 @@ class FigureShape {
 
   final Path path;
 
-  /// The path's subpaths as polylines, for stroke hit testing.
+  /// The path's subpaths, for stroke hit testing; it must describe [path].
   final List<Contour> outline;
   final String? fill;
   final String? stroke;
@@ -359,7 +382,7 @@ FigureShape _shape(Map<String, Object?> s, String at, _Budget budget) {
         throw FigureFormatException('$at.d must be SVG path data of at most $maxPathLength characters');
       }
       budget.charge(d.length, at);
-      final writer = _PathWriter();
+      final writer = _PathWriter(at);
       try {
         writeSvgPathDataToPath(d, writer);
       } on StateError catch (e) {
@@ -375,11 +398,19 @@ FigureShape _shape(Map<String, Object?> s, String at, _Budget budget) {
       final rotate = _optionalNumber(s['rotate']) ?? 0;
       final r = rotate * math.pi / 180;
       final cos = math.cos(r), sin = math.sin(r);
+      // Eight 45° cubic arcs: the curve stays within a few millionths of the radius.
+      Offset onEllipse(double x, double y) => Offset(cx + rx * x * cos - ry * y * sin, cy + rx * x * sin + ry * y * cos);
+      const k = 0.26521648983954104; // 4/3 · tan(45°/4)
       final outline = [
         Contour([
-          for (var i = 0; i < 48; i++)
-            if ((rx * math.cos(i * math.pi / 24), ry * math.sin(i * math.pi / 24)) case (final x, final y))
-              Offset(cx + x * cos - y * sin, cy + x * sin + y * cos),
+          for (var i = 0; i < 8; i++)
+            if ((i * math.pi / 4, (i + 1) * math.pi / 4) case (final t0, final t1))
+              Segment.cubic(
+                onEllipse(math.cos(t0), math.sin(t0)),
+                onEllipse(math.cos(t0) - k * math.sin(t0), math.sin(t0) + k * math.cos(t0)),
+                onEllipse(math.cos(t1) + k * math.sin(t1), math.sin(t1) - k * math.cos(t1)),
+                onEllipse(math.cos(t1), math.sin(t1)),
+              ),
         ], true),
       ];
       if (rotate == 0) return (oval, outline);
@@ -437,21 +468,28 @@ FigureBehavior _behavior(Object? json) {
   );
 }
 
-/// Builds the path and records its subpaths as polylines.
+/// Builds the path and records its subpaths' exact segments.
 class _PathWriter extends PathProxy {
+  _PathWriter(this.at);
+  final String at;
   final path = Path();
   final _contours = <Contour>[];
-  List<Offset>? _points;
+  List<Segment>? _segments;
   Offset _start = Offset.zero;
   Offset _pen = Offset.zero;
 
+  Offset _point(double x, double y) {
+    if (!x.isFinite || !y.isFinite) throw FigureFormatException('$at.d has a coordinate that is not a finite number');
+    return Offset(x, y);
+  }
+
   void _end({bool closed = false}) {
-    if (_points case final points? when points.isNotEmpty) _contours.add(Contour(points, closed));
-    _points = null;
+    if (_segments case final segments? when segments.isNotEmpty) _contours.add(Contour(segments, closed));
+    _segments = null;
   }
 
   /// Drawing after a close (or before any move) continues from the subpath's start, as in SVG.
-  List<Offset> get _current => _points ??= [_pen];
+  List<Segment> get _current => _segments ??= [];
 
   List<Contour> finish() {
     _end();
@@ -460,36 +498,33 @@ class _PathWriter extends PathProxy {
 
   @override
   void moveTo(double x, double y) {
+    final p = _point(x, y);
     path.moveTo(x, y);
     _end();
-    _start = _pen = Offset(x, y);
-    _points = [_pen];
+    _start = _pen = p;
   }
 
   @override
   void lineTo(double x, double y) {
+    final p = _point(x, y);
     path.lineTo(x, y);
-    _current.add(_pen = Offset(x, y));
+    if (p != _pen) _current.add(Segment.line(_pen, p));
+    _pen = p;
   }
 
   @override
   void cubicTo(double x1, double y1, double x2, double y2, double x3, double y3) {
+    final c1 = _point(x1, y1), c2 = _point(x2, y2), p = _point(x3, y3);
     path.cubicTo(x1, y1, x2, y2, x3, y3);
-    final points = _current;
-    final p0 = _pen, p1 = Offset(x1, y1), p2 = Offset(x2, y2), p3 = Offset(x3, y3);
-    // A bounded number of chords per curve, from its control polygon's length.
-    final hull = (p1 - p0).distance + (p2 - p1).distance + (p3 - p2).distance;
-    final n = (hull / 4).ceil().clamp(2, 16);
-    for (var i = 1; i <= n; i++) {
-      final t = i / n, u = 1 - t;
-      points.add(p0 * (u * u * u) + p1 * (3 * u * u * t) + p2 * (3 * u * t * t) + p3 * (t * t * t));
-    }
-    _pen = p3;
+    if (c1 != _pen || c2 != _pen || p != _pen) _current.add(Segment.cubic(_pen, c1, c2, p));
+    _pen = p;
   }
 
   @override
   void close() {
     path.close();
+    // Closing draws a line back to the start.
+    if (_pen != _start && _segments != null) _current.add(Segment.line(_pen, _start));
     _end(closed: true);
     _pen = _start;
   }
