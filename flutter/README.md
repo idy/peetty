@@ -1,19 +1,13 @@
 # Peetty for Flutter
 
-A Flutter port of the [Peetty](../README.md) companion. She drops in, stands on the top edges of widgets you mark, walks along them, jumps between them, follows them as they scroll, falls when hers goes away, and can be picked up and thrown.
+A Flutter port of the [Peetty](https://github.com/idy/peetty) companion. She drops in, stands on the top edges of widgets you mark, walks along them, jumps between them, follows them as they scroll, falls when hers goes away, and can be picked up and thrown.
 
 > **Status: prototype.** Movement and animation only. Chat, sounds, the hover menu and speech bubbles from the web SDK are not ported yet.
 
 ## Use it
 
-Add the package from this repository:
-
-```yaml
-dependencies:
-  peetty:
-    git:
-      url: https://github.com/idy/peetty.git
-      path: flutter
+```bash
+flutter pub add peetty
 ```
 
 Wrap your app (or a single screen) and mark surfaces she may stand on:
@@ -47,7 +41,7 @@ Tap her to wave. Drag to pick her up and let go to throw her. With reduced motio
 
 ## Figures
 
-The package bundles every catalog figure (`miru`, `koharu`, `xiaoxiao`, `riley`, `amara`, `elsie`, `shiori`) from the same JSON format the web SDK uses. `assets/figures/` is a copy of the repository's `figures/` directory: run `npm run figures` at the repository root after changing a figure, and `npm run check` fails when the copy is stale. Rig figures are supported; sprite figures are not yet.
+The package bundles every catalog figure (`miru`, `koharu`, `xiaoxiao`, `riley`, `amara`, `elsie`, `shiori`) from the same JSON format the web SDK uses. `assets/figures/` is a copy of the repository's `figures/` directory: run `npm run figures` at the repository root after changing a figure, and `npm run check` fails when the copy is stale. Rig figures are supported; sprite figures are not yet. The bundled figures are licensed CC-BY-4.0 by their authors, as recorded in each figure's `license` field; the code is MIT.
 
 ## Development
 

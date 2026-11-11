@@ -1,9 +1,14 @@
 name: peetty
 description: A little companion for Flutter apps. She perches on your widgets, walks, jumps between them and can be picked up and thrown.
 version: 0.1.0
-homepage: https://github.com/idy/peetty
+homepage: https://peetty.idy.dev
 repository: https://github.com/idy/peetty/tree/main/flutter
-publish_to: none
+issue_tracker: https://github.com/idy/peetty/issues
+topics:
+  - animation
+  - character
+  - companion
+  - widget
 
 environment:
   sdk: ^3.8.0
