@@ -298,8 +298,9 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
       final left = x0 + anchor.dx, top = y0 + anchor.dy;
       return Limits(left, math.max(left, x1 - (figureWidth - anchor.dx)), top, math.max(top, y1));
     }
-    final spare = size.width - figureWidth;
-    if (spare < 0) return null;
+    // Rounding in host units: bounds that cross by less than this still meet.
+    final rounding = 1e-9 * math.max(1.0, size.width);
+    if (size.width - figureWidth < -rounding) return null;
     if (screen == null) return size.height < anchor.dy ? null : box(0, size.width, 0, size.height);
     // A host point (x, y) lands on screen at (X/W, Y/W), each of X, Y and W linear
     // in x and y, so perspective is covered too. Where W > 0 a screen bound such as
@@ -349,10 +350,9 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
     // Where columns of this width may start under the level half-planes, as an
     // interval within the host; null when nowhere.
     (double, double)? starts(double width) {
-      var lo = 0.0, hi = size.width - width;
+      var lo = 0.0, hi = math.max(0.0, size.width - width);
       for (final (hx, _, hc) in level) {
-        // The start bounds are exact, so every start between them is valid; only a
-        // constant bound, which no start can change, gets a rounding allowance.
+        // A constant bound, which no start can change, gets a rounding allowance.
         final slack = 1e-12 * hc.abs();
         if (hx == 0) {
           if (-hc > slack) return null;
@@ -362,7 +362,13 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
           hi = math.min(hi, (hc + hx * width) / -hx);
         }
       }
-      return lo <= hi ? (lo, hi) : null;
+      if (lo <= hi) return (lo, hi);
+      // Bounds that cross only by rounding meet at one start; the on-screen check
+      // then decides, with its pixel tolerance, whether the box really fits. The
+      // ends are never widened, so they stay valid starts themselves.
+      if (lo - hi > rounding) return null;
+      final start = ((lo + hi) / 2).clamp(0.0, math.max(0.0, size.width - width)).toDouble();
+      return (start, start);
     }
 
     // The solve works in host units, where rounding adds up; the box it picks must still land inside

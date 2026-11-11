@@ -585,6 +585,16 @@ void main() {
     expect(_state(tester).position, isNotNull);
   });
 
+  testWidgets('a figure exactly as wide as the safe area survives rounding', (tester) async {
+    // X = 3·x + 498.8: a 100.4-wide host and figure reach screen x = 800 exactly.
+    final transform = Matrix4.identity()
+      ..setEntry(0, 0, 3)
+      ..setEntry(0, 3, 498.8);
+    await tester.pumpWidget(transformed(transform, const Size(100.4, 600), 100.4));
+    await _until(tester, () => false, frames: 30);
+    expect(_state(tester).position, isNotNull);
+  });
+
   testWidgets('a host too short for her below a large inset leaves her nowhere to stand', (tester) async {
     await tester.pumpWidget(MediaQuery(
       data: const MediaQueryData(size: Size(800, 600), padding: EdgeInsets.only(top: 80)),
