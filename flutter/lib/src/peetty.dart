@@ -320,33 +320,54 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
       (wx, wy, wc - 1e-6),
     ];
 
+    // Half-planes that rows do not move constrain the columns alone; they are hard
+    // limits on where columns may start, handled apart from the rest.
+    bool flat((double, double, double) h) => h.$2.abs() <= 1e-12 * math.max(1.0, h.$1.abs() + h.$2.abs() + h.$3.abs());
+    final sloped = [for (final h in planes) if (!flat(h)) h];
+    final level = [for (final h in planes) if (flat(h)) h];
+
     // For columns [x0, x0 + width]: the rows [y0, y1] keeping the whole box inside
-    // the safe area, and their height (negative when none fit). Every bound is
-    // linear in x0, so the height is concave in x0 and in width.
+    // the sloped half-planes, and their height (negative when none fit). Every
+    // bound is linear in x0, so the height is concave in x0.
     (double, double, double) rows(double x0, double width) {
       final x1 = x0 + width;
       var y0 = 0.0, y1 = size.height;
-      var penalty = double.infinity;
-      for (final (hx, hy, hc) in planes) {
+      for (final (hx, hy, hc) in sloped) {
         // The weakest corner column: hy·y ≥ need for every row of the box.
         final need = -hc - math.min(hx * x0, hx * x1);
-        final scale = math.max(1.0, hx.abs() + hy.abs() + hc.abs());
-        if (hy.abs() <= 1e-12 * scale) {
-          // Rows do not move this bound: the columns alone must satisfy it. A steep
-          // concave penalty keeps the search exact at the boundary.
-          penalty = math.min(penalty, size.height - 1e6 * need / scale);
-        } else if (hy > 0) {
+        if (hy > 0) {
           y0 = math.max(y0, need / hy);
         } else {
           y1 = math.min(y1, need / hy);
         }
       }
-      return (y0, y1, math.min(y1 - y0, penalty));
+      return (y0, y1, y1 - y0);
     }
 
-    // The column start giving the most rows, by ternary search on the concave height.
-    double bestStart(double width) {
+    // Where columns of this width may start under the level half-planes, as an
+    // interval within the host; null when nowhere.
+    (double, double)? starts(double width) {
       var lo = 0.0, hi = size.width - width;
+      for (final (hx, _, hc) in level) {
+        final slack = 1e-9 * math.max(1.0, hx.abs() + hc.abs());
+        if (hx.abs() <= 1e-12) {
+          if (-hc > slack) return null;
+        } else if (hx > 0) {
+          lo = math.max(lo, (-hc - slack) / hx);
+        } else {
+          hi = math.min(hi, (hc + hx * width + slack) / -hx);
+        }
+      }
+      return lo <= hi ? (lo, hi) : null;
+    }
+
+    // The column start giving the most rows, by ternary search on the concave
+    // height within the allowed starts; null when no start is allowed.
+    double? bestStart(double width) {
+      final range = starts(width);
+      if (range == null) return null;
+      var (lo, hi) = range;
+      final (first, last) = range;
       for (var i = 0; i < 100 && hi - lo > 1e-9; i++) {
         final m1 = lo + (hi - lo) / 3, m2 = hi - (hi - lo) / 3;
         if (rows(m1, width).$3 < rows(m2, width).$3) {
@@ -357,10 +378,14 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
       }
       final mid = (lo + hi) / 2;
       // Plateaus can leave either end best.
-      return [0.0, mid, size.width - width].reduce((a, b) => rows(a, width).$3 >= rows(b, width).$3 ? a : b);
+      return [first, mid, last].reduce((a, b) => rows(a, width).$3 >= rows(b, width).$3 ? a : b);
     }
 
-    bool fits(double width) => rows(bestStart(width), width).$3 >= anchor.dy;
+    bool fits(double width) {
+      final x0 = bestStart(width);
+      return x0 != null && rows(x0, width).$3 >= anchor.dy;
+    }
+
     // Narrower columns only loosen the constraints, so if anything fits her own
     // width does, and the widths that fit form a range: find its widest end.
     if (!fits(figureWidth)) return null;
@@ -382,6 +407,7 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
     for (final fraction in const [1.0, 0.8, 0.6, 0.45, 0.3, 0.2, 0.12, 0.06, 0.0]) {
       final width = figureWidth + (wide - figureWidth) * fraction;
       final x0 = bestStart(width);
+      if (x0 == null) continue;
       final (y0, y1, height) = rows(x0, width);
       if (height < anchor.dy) continue;
       final area = width * height;

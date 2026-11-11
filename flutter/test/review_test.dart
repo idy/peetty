@@ -472,6 +472,32 @@ void main() {
     }
   });
 
+  testWidgets('a very tall host that cannot fit her width on screen parks her', (tester) async {
+    // At x = 610 on an 800-wide screen, a 200-wide figure always reaches x = 810.
+    await tester.pumpWidget(MediaQuery(
+      data: const MediaQueryData(size: Size(800, 600)),
+      child: Directionality(
+        textDirection: TextDirection.ltr,
+        child: Stack(children: [
+          Positioned(
+            left: 610,
+            top: 0,
+            width: 400,
+            height: 100000,
+            child: Peetty(
+              figureData: _miru,
+              scale: 200 / (_miru.height * _miru.viewBox.width / _miru.viewBox.height),
+              random: _seeded(),
+              child: const SizedBox.expand(),
+            ),
+          ),
+        ]),
+      ),
+    ));
+    await _until(tester, () => false, frames: 60);
+    expect(_state(tester).position, isNull);
+  });
+
   testWidgets('a host too short for her below a large inset leaves her nowhere to stand', (tester) async {
     await tester.pumpWidget(MediaQuery(
       data: const MediaQueryData(size: Size(800, 600), padding: EdgeInsets.only(top: 80)),
