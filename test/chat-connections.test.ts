@@ -83,8 +83,18 @@ describe('explicit nonsecret header classification', () => {
     assert.throws(() => normalizeModelOptions({ ...base, nonCredentialHeaders: ['X-Route'] }));
   });
 
+  it('accepts explicit metadata tokens that only resemble authentication names', () => {
+    for (const name of ['X-Author', 'X-Key-Version', 'X-Tokenization', 'X-Secretariat', 'X-Route']) {
+      const model = normalizeModelOptions({ ...base, headers: { [name]: 'fixture-metadata' }, nonCredentialHeaders: [name] });
+      assert.deepEqual(model.nonCredentialHeaders, [name.toLowerCase()]);
+      assert.equal(isCredentialHeader(name), true, 'undeclared metadata remains sensitive');
+      assert.equal(isCredentialHeader(name, model.nonCredentialHeaders), false);
+      assert.equal(prepareSavedConnection(model, undefined, false).headers![name.toLowerCase()], 'fixture-metadata');
+    }
+  });
+
   it('never permits authentication names to be exempted', () => {
-    for (const name of ['Authorization', 'Proxy-Authorization', 'Api-Key', 'X-Api-Key', 'X-Auth', 'X-Access-Key', 'X-Token', 'X-Secret', 'Cookie', 'Set-Cookie', 'Ocp-Apim-Subscription-Key', 'X-Key', 'Gateway-Credential', 'X-Password']) {
+    for (const name of ['Authorization', 'Proxy-Authorization', 'Api-Key', 'X-Api-Key', 'X-Auth', 'X-Access-Key', 'X-Token', 'X-Secret', 'Cookie', 'Set-Cookie', 'Ocp-Apim-Subscription-Key', 'X-Key', 'Gateway-Credential', 'X-Password', 'X-Authentication', 'X-Subscription', 'X-AccessToken']) {
       assert.throws(() => normalizeModelOptions({ ...base, headers: { [name]: 'fixture-sensitive' }, nonCredentialHeaders: [name] }));
       assert.equal(isCredentialHeader(name, [name]), true);
     }

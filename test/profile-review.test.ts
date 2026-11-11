@@ -7,7 +7,7 @@ import { describe, it } from 'node:test';
 import type { TestContext } from 'node:test';
 import type { Figure } from '../src/figure/types.ts';
 import { BrowserProfileStore, PROFILE_LIMITS } from '../src/chat/profiles.ts';
-import type { BackupSession, MemoryEntry, ProfileRecord } from '../src/chat/profiles.ts';
+import type { BackupDownloadFile, BackupSession, MemoryEntry, ProfileRecord } from '../src/chat/profiles.ts';
 import { BrowserChatStore, boundedEntries } from '../src/chat/store.ts';
 import { IDB_OPEN_TIMEOUT_MS, IDB_TRANSACTION_TIMEOUT_MS, openStateDatabase, stateTransaction } from '../src/chat/idb.ts';
 import type { StoredConnection } from '../src/chat/store.ts';
@@ -32,6 +32,14 @@ async function store(t: TestContext, namespace = 'regressions', persist = true):
   return result;
 }
 const fullBackup = (): string => document(Array.from({ length: PROFILE_LIMITS.profiles }, (_, i) => profile(`import-${i}`)));
+// Tests collect deliberately small fixtures; production consumes the lazy iterator.
+async function downloadFiles(manager: BrowserProfileStore, options?: Parameters<BrowserProfileStore['backupDownload']>[0]): Promise<BackupDownloadFile[]> {
+  const output = await manager.backupDownload(options);
+  assert.notEqual(typeof output, 'string');
+  const files: BackupDownloadFile[] = [];
+  for await (const file of output as AsyncIterable<BackupDownloadFile>) files.push(file);
+  return files;
+}
 
 
 describe('archive mutation regressions', () => {
@@ -852,7 +860,7 @@ describe('complete multipart backup downloads', () => {
     await source.storage(id).saveConnection(connection);
     const sessions = [{ profileId: id, connection: { ...connection, apiKey: 'session-key', headers: { 'x-auth': 'session-header' } }, rememberKey: false },
       { profileId: id, connection: { ...connection, apiKey: 'second-session' }, rememberKey: true }];
-    const files = await source.backupDownload({ sessions, _testing: { fileBytes: 2_048 } });
+    const files = await downloadFiles(source, { sessions, _testing: { fileBytes: 2_048 } });
     assert.ok(Array.isArray(files) && files.length > 2);
     assert.equal(new Set(files.map((file) => file.name)).size, files.length);
     assert.ok(files.every((file) => new TextEncoder().encode(file.text).length <= 2_048));
@@ -861,7 +869,7 @@ describe('complete multipart backup downloads', () => {
     const before = target.profiles;
     const writes = idb.writes.length;
     const mutate = (index: number, patch: Record<string, unknown>): string[] => texts.map((text, i) => i === index ? JSON.stringify({ ...JSON.parse(text), ...patch }) : text);
-    const other = await source.backupDownload({ sessions, _testing: { fileBytes: 2_048 } });
+    const other = await downloadFiles(source, { sessions, _testing: { fileBytes: 2_048 } });
     assert.ok(Array.isArray(other));
     for (const invalid of [
       [], texts.slice(1), [texts[0]!], [...texts, texts[0]!], [texts[0]!, texts[0]!, ...texts.slice(2)],
@@ -896,7 +904,7 @@ describe('complete multipart backup downloads', () => {
     // envelopes for a document that the full schema must still reject.
     const internal = source as unknown as { state: { records: Map<string, { profile: ProfileRecord }> } };
     internal.state.records.get(source.activeProfileId)!.profile.name = '';
-    const files = await source.backupDownload({ _testing: { fileBytes: 1_024 } });
+    const files = await downloadFiles(source, { _testing: { fileBytes: 1_024 } });
     assert.ok(Array.isArray(files));
     const target = await store(t, 'multipart-invalid-target');
     const before = target.profiles;
@@ -913,7 +921,7 @@ describe('complete multipart backup downloads', () => {
     const entries = Array.from({ length: 110 }, (_, i) => entry(`large-${i}`, body));
     await source.storage(id).saveEntries(entries);
     await assert.rejects(source.backup(), /storage limit/u);
-    const files = await source.backupDownload();
+    const files = await downloadFiles(source);
     assert.ok(Array.isArray(files) && files.length > 1);
     assert.ok(files.every((file) => new TextEncoder().encode(file.text).length <= PROFILE_LIMITS.fileBytes));
     assert.equal(source.profileInfo(id)!.entryCount, entries.length);
@@ -1056,12 +1064,149 @@ describe('bounded JSON compatibility and retryable migration', () => {
       return Reflect.apply(join, this, [separator]);
     } });
     t.after(() => Object.defineProperty(Array.prototype, 'join', descriptor));
-    const files = await manager.backupDownload({ _testing: { fileBytes: 16_384 } });
+    const files = await downloadFiles(manager, { _testing: { fileBytes: 16_384 } });
     assert.ok(Array.isArray(files) && files.length > 100);
     const destination = await store(t, 'bounded-many-target', false);
     await destination.restoreFiles(files.map((file) => file.text));
     assert.equal(destination.profileInfo(destination.activeProfileId)!.entryCount, 5_000);
     assert.equal(destination.historyPage(destination.activeProfileId, '', 1).entries[0]!.text, body);
+  });
+});
+
+describe('lazy downloads, explicit recovery, and bounded escaped strings', () => {
+  it('only serializes multipart envelopes on demand and stops generation after early return', async (t) => {
+    const manager = await store(t, 'lazy-download', false);
+    await manager.storage(manager.activeProfileId).saveEntries(Array.from({ length: 100 }, (_, i) => entry(`lazy-${i}`, 'x'.repeat(1_000))));
+    const stringify = JSON.stringify; let envelopes = 0;
+    t.mock.method(JSON, 'stringify', ((value: unknown, ...args: unknown[]) => {
+      if (value && typeof value === 'object' && 'format' in value && value.format === 'peetty-backup-part') envelopes++;
+      return Reflect.apply(stringify, JSON, [value, ...args]);
+    }) as typeof JSON.stringify);
+    const output = await manager.backupDownload({ _testing: { fileBytes: 2_048 } });
+    assert.notEqual(typeof output, 'string');
+    assert.equal(Array.isArray(output), false);
+    assert.equal(envelopes, 0, 'first pass must not serialize or retain multipart envelopes');
+    const iterator = (output as AsyncIterable<BackupDownloadFile>)[Symbol.asyncIterator]();
+    const first = await iterator.next();
+    assert.equal(first.done, false);
+    assert.equal(envelopes, 1);
+    await iterator.return?.();
+    assert.equal((await iterator.next()).done, true);
+    assert.equal(envelopes, 1, 'canceled generator must not resume generation');
+    const canceled = await manager.backupDownload({ _testing: { fileBytes: 2_048 } });
+    const notStarted = (canceled as AsyncIterable<BackupDownloadFile>)[Symbol.asyncIterator]();
+    await notStarted.return?.();
+    assert.equal((await notStarted.next()).done, true);
+    assert.equal(envelopes, 1, 'canceling before first next releases the unstarted snapshot');
+  });
+
+  it('keeps both multipart passes on a stable snapshot while later writes change source history and memories', async (t) => {
+    const manager = await store(t, 'lazy-snapshot', false);
+    const id = manager.activeProfileId;
+    const original = 'Old evidence '.repeat(1_000);
+    await manager.storage(id).saveEntries([entry('source', original)]);
+    await manager.saveMemory(id, { text: 'Old fact', sourceEntryId: 'source', sourceText: original });
+    const output = await manager.backupDownload({ _testing: { fileBytes: 2_048 } });
+    assert.notEqual(typeof output, 'string');
+    await manager.editEntry(id, 'source', 'New history');
+    await manager.saveMemory(id, { id: manager.memoryPage(id, '', 1).entries[0]!.id, text: 'New fact' });
+    const files: string[] = [];
+    for await (const file of output as AsyncIterable<BackupDownloadFile>) files.push(file.text);
+    const target = await store(t, 'lazy-snapshot-target', false);
+    await target.restoreFiles(files);
+    assert.equal(target.historyPage(target.activeProfileId, '', 1).entries[0]!.text, original);
+    assert.equal(target.memoryPage(target.activeProfileId, '', 1).entries[0]!.text, 'Old fact');
+  });
+
+  it('coalesces escape-heavy tokens in bounded decoded buffers and rejects decoded overflow early', () => {
+    const count = 1_000_000;
+    const raw = `"${'\\u0061'.repeat(count)}"`;
+    const chunks = Array.from({ length: Math.ceil(raw.length / 65_536) }, (_, i) => raw.slice(i * 65_536, (i + 1) * 65_536));
+    let maximumBuffers = 0; let observations = 0;
+    const output = parseJSONChunks(chunks, count, { onStringBuffers(buffers, pending, decoded) {
+      maximumBuffers = Math.max(maximumBuffers, buffers); observations++;
+      assert.ok(buffers <= Math.floor(decoded / 16_384));
+      assert.ok(pending < 16_384);
+    } });
+    assert.equal((output as string).length, count);
+    assert.equal(maximumBuffers, Math.floor(count / 16_384));
+    assert.ok(observations <= count, 'no retained empty fragment per escape');
+    let largest = 0;
+    assert.throws(() => parseJSONChunks([`"${'\\n'.repeat(10_000)}"`], 8_000, { onStringBuffers(_buffers, _pending, decoded) { largest = decoded; } }), /Invalid/u);
+    assert.equal(largest, 8_000, 'decoded schema ceiling applies before assembling a longer string');
+  });
+
+  it('rejects escaped multipart strings exceeding their schema bound before any profile writes', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const source = await store(t, 'overlong-token-source', false);
+    const internals = source as unknown as { state: { records: Map<string, { profile: ProfileRecord }> } };
+    internals.state.records.get(source.activeProfileId)!.profile.entries = [entry('oversized', '\n'.repeat(PROFILE_LIMITS.entryText + 1))];
+    const files = await downloadFiles(source, { _testing: { fileBytes: 64 * 1_024 } });
+    const target = await store(t, 'overlong-token-target');
+    const before = target.profiles; const writes = idb.writes.length;
+    await assert.rejects(target.restoreFiles(files.map((file) => file.text)), /Invalid/u);
+    assert.deepEqual(target.profiles, before);
+    assert.equal(idb.writes.length, writes);
+  });
+
+  it('explicitly removes unprovable old data and proof while preserving current profiles and unrelated records', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const manager = await store(t, 'explicit-legacy');
+    await manager.storage(manager.activeProfileId).saveEntries([entry('current')]);
+    await manager.storage(manager.activeProfileId).saveConnection(connection);
+    const before = manager.profiles;
+    const legacy = new Map<string, unknown>([['entries', [entry('forgotten', 'Already cleared old message')]], ['connection', { ...connection, apiKey: 'Forgotten old key' }], ['entriesEpoch', 'old'], ['unrelated', 'preserve']]);
+    idb.databases.set('explicit-legacy:chat', legacy);
+    const profiles = idb.databases.get('explicit-legacy:profiles')!;
+    profiles.set('legacyMigration', { version: 1, entries: [jsonFingerprint(entry('irrelevant'))], connections: [] });
+    await manager.clearLegacyData();
+    assert.deepEqual([...legacy], [['unrelated', 'preserve']]);
+    assert.equal(profiles.has('legacyMigration'), false);
+    assert.deepEqual(manager.profiles, before);
+    assert.deepEqual((await store(t, 'explicit-legacy')).profiles, before);
+  });
+
+  for (const failure of ['open', 'write', 'commit'] as const) {
+    it(`reports explicit recovery ${failure} failures and allows a later retry`, async (t) => {
+      const idb = installChatIndexedDB(t);
+      const namespace = `explicit-failure-${failure}`;
+      const manager = await store(t, namespace);
+      const before = manager.profiles;
+      const legacy = new Map<string, unknown>([['entries', [entry('unknown')]], ['connection', connection]]);
+      idb.databases.set(`${namespace}:chat`, legacy);
+      idb.fail(failure);
+      await assert.rejects(manager.clearLegacyData(), { message: 'Could not remove legacy data. Try again.' });
+      assert.deepEqual(legacy.get('entries'), [entry('unknown')]);
+      assert.deepEqual(manager.profiles, before);
+      assert.equal(manager.persistenceWarning, false);
+      idb.fail('none');
+      await manager.clearLegacyData();
+      assert.equal(legacy.size, 0);
+      assert.deepEqual(manager.profiles, before);
+    });
+  }
+
+  it('does not reconcile or read/hash legacy records on ordinary history/settings/memory writes', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const legacy = new Map<string, unknown>([['entries', [entry('old')]], ['connection', connection]]);
+    idb.databases.set('reconcile-cost:chat', legacy);
+    const manager = await store(t, 'reconcile-cost');
+    legacy.set('entries', [entry('unknown', 'Retain this unprovable old archive')]);
+    const before = idb.opened.filter((name) => name === 'reconcile-cost:chat').length;
+    const id = manager.activeProfileId; const storage = manager.runtimeStorage(id);
+    await storage.load();
+    for (let i = 0; i < 25; i++) {
+      await storage.saveEntries([entry('stream', `Partial reply ${i}`)], ['stream']);
+      await manager.update(id, { personality: `Updated ${i}` });
+    }
+    await manager.saveMemory(id, { text: 'No legacy scan' });
+    assert.equal(idb.opened.filter((name) => name === 'reconcile-cost:chat').length, before);
+    await storage.clearEntries();
+    assert.ok(idb.opened.filter((name) => name === 'reconcile-cost:chat').length > before);
+    assert.deepEqual(legacy.get('entries'), [entry('unknown', 'Retain this unprovable old archive')]);
+    await storage.saveEntries([entry('unknown', 'Retain this unprovable old archive')]);
+    await storage.clearEntries();
+    assert.equal(legacy.size, 0, 'new correspondence must invalidate a previous negative/pending check');
   });
 });
 

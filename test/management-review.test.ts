@@ -20,7 +20,7 @@ async function mount(t: TestContext, options: {
   onSelect?: () => Promise<void>;
   onReload?: () => Promise<void>;
   onBusy?: (busy: boolean) => void;
-  backup?: () => Promise<string | BackupDownloadFile[]>;
+  backup?: (signal?: AbortSignal) => Promise<string | AsyncIterable<BackupDownloadFile>>;
 } = {}) {
   const window = new Window({ url: 'https://host.example/' });
   const document = window.document as unknown as Document;
@@ -63,26 +63,66 @@ function forbidSnapshots(t: TestContext, store: BrowserProfileStore) {
 }
 
 describe('multipart backup UI', () => {
-  it('downloads every named part, localizes retention instructions and keeps URL cleanup independent', async (t) => {
+  it('pulls streaming parts lazily with at most two retained URLs and localized progress', async (t) => {
     installChatIndexedDB(t);
-    const parts = [{ name: 'fixture-part-1.json', text: 'fixture first part' }, { name: 'fixture-part-2.json', text: 'fixture second part' }];
-    const ui = await mount(t, { backup: async () => parts }); ui.tab('data');
-    const blobs: Blob[] = []; const revoked: string[] = []; const names: string[] = [];
-    t.mock.method(URL, 'createObjectURL', (blob: Blob) => { blobs.push(blob); return `blob:fixture-part-${blobs.length}`; });
-    t.mock.method(URL, 'revokeObjectURL', (url: string) => { revoked.push(url); });
-    ui.root.addEventListener('click', event => {
-      const link = (event.target as Element).closest<HTMLAnchorElement>('a[download]');
-      if (link) { event.preventDefault(); names.push(link.download); }
-    });
+    let produced = 0; let closed = false;
+    async function* parts() {
+      try { for (let i = 1; i <= 5; i++) { produced++; yield { name: `part-${i}.json`, text: `fixture part ${i}` }; } }
+      finally { closed = true; }
+    }
+    const ui = await mount(t, { backup: async () => parts() }); ui.tab('data');
+    let created = 0; const retained = new Set<string>(); const names: string[] = [];
+    t.mock.method(URL, 'createObjectURL', () => { const url = `blob:fixture-part-${++created}`; retained.add(url); assert.ok(retained.size <= 2); return url; });
+    t.mock.method(URL, 'revokeObjectURL', (url: string) => { retained.delete(url); });
+    ui.root.addEventListener('click', event => { const link = (event.target as Element).closest<HTMLAnchorElement>('a[download]'); if (link) { event.preventDefault(); names.push(link.download); } });
     t.mock.timers.enable({ apis: ['setTimeout'] });
     ui.click('Download full backup'); await flush();
-    assert.deepEqual(names, parts.map(file => file.name));
-    assert.deepEqual(await Promise.all(blobs.map(blob => blob.text())), parts.map(file => file.text));
-    assert.match(ui.query('.pc-manage-status').textContent!, /Allow multiple downloads.*keep every part.*select all parts at once/);
-    ui.language('zh'); assert.match(ui.query('.pc-manage-status').textContent!, /允许浏览器下载多个文件.*保留全部分卷.*一次选中所有分卷/);
-    ui.management.destroy(); ui.window.close();
-    t.mock.timers.tick(59_999); assert.deepEqual(revoked, []);
-    t.mock.timers.tick(1); assert.deepEqual(revoked, ['blob:fixture-part-1', 'blob:fixture-part-2']);
+    assert.equal(produced, 2, 'the producer is not advanced while URL slots are full'); assert.equal(created, 2);
+    assert.equal(ui.query<HTMLButtonElement>('[data-cancel-download]').disabled, false);
+    assert.match(ui.query('.pc-manage-status').textContent!, /Allow multiple downloads.*keep every part.*two parts per minute/);
+    ui.language('zh'); assert.match(ui.query('.pc-manage-status').textContent!, /允许浏览器下载多个文件.*保留全部分卷.*每分钟最多下载两个分卷/);
+    t.mock.timers.tick(59_999); await flush(); assert.equal(produced, 2); assert.equal(retained.size, 2);
+    t.mock.timers.tick(1); await flush(); assert.equal(produced, 4); assert.equal(retained.size, 2);
+    t.mock.timers.tick(60_000); await flush(); assert.equal(produced, 5); assert.equal(closed, true);
+    assert.deepEqual(names, [1, 2, 3, 4, 5].map(i => `part-${i}.json`));
+    assert.match(ui.query('.pc-manage-status').textContent!, /全部备份分卷已准备下载/);
+    ui.management.destroy(); ui.window.close(); t.mock.timers.tick(59_999); assert.equal(retained.size, 1);
+    t.mock.timers.tick(1); assert.equal(retained.size, 0);
+  });
+
+  for (const ending of ['cancel', 'destroy'] as const) {
+    it(`closes a waiting producer on ${ending} without shortening existing URL lifetimes`, async (t) => {
+      installChatIndexedDB(t); let produced = 0; let closed = 0;
+      async function* parts() { try { for (;;) { produced++; yield { name: `part-${produced}.json`, text: 'fixture bounded part' }; } } finally { closed++; } }
+      const ui = await mount(t, { backup: async () => parts() }); ui.tab('data');
+      let created = 0; const revoked: string[] = [];
+      t.mock.method(URL, 'createObjectURL', () => `blob:cancel-part-${++created}`); t.mock.method(URL, 'revokeObjectURL', (url: string) => { revoked.push(url); });
+      ui.root.addEventListener('click', event => { if ((event.target as Element).closest('a[download]')) event.preventDefault(); });
+      t.mock.timers.enable({ apis: ['setTimeout'] });
+      ui.click('Download full backup'); await flush(); assert.equal(produced, 2);
+      if (ending === 'cancel') ui.click('Cancel remaining downloads'); else ui.management.destroy();
+      await flush(); assert.equal(closed, 1, 'return releases the suspended producer immediately'); assert.equal(produced, 2);
+      if (ending === 'cancel') {
+        assert.match(ui.query('.pc-manage-status').textContent!, /canceled.*incomplete/); assert.equal(ui.query<HTMLButtonElement>('.pc-backup').disabled, false);
+        ui.click('Download full backup'); await flush(); assert.equal(produced, 2, 'a retry also respects still-live URLs');
+        ui.click('Cancel remaining downloads'); await flush();
+      }
+      t.mock.timers.tick(59_999); await flush(); assert.deepEqual(revoked, []); assert.equal(produced, 2);
+      t.mock.timers.tick(1); await flush(); assert.deepEqual(revoked, ['blob:cancel-part-1', 'blob:cancel-part-2']); assert.equal(created, 2);
+    });
+  }
+
+  it('requests producer closure promptly when cancellation interrupts a pending next()', async (t) => {
+    installChatIndexedDB(t); const next = deferred<IteratorResult<BackupDownloadFile>>(); let returned = 0;
+    const producer: AsyncIterable<BackupDownloadFile> = { [Symbol.asyncIterator]: () => ({ next: () => next.promise, return: async () => { returned++; return { done: true, value: undefined }; } }) };
+    const ui = await mount(t, { backup: async () => producer }); ui.tab('data');
+    const create = t.mock.method(URL, 'createObjectURL', () => 'blob:late-producer');
+    ui.click('Download full backup'); await flush();
+    ui.click('Cancel remaining downloads'); await flush();
+    assert.equal(returned, 1); assert.match(ui.query('.pc-manage-status').textContent!, /canceled/);
+    assert.equal(ui.query<HTMLButtonElement>('.pc-backup').disabled, false);
+    next.resolve({ done: false, value: { name: 'late.json', text: 'late fixture part' } }); await flush();
+    assert.equal(create.mock.callCount(), 0, 'late parts cannot become downloads after cancellation');
   });
 
   it('reads all selected restore parts together and retains single-file memory import', async (t) => {
@@ -109,6 +149,36 @@ describe('multipart backup UI', () => {
     input.dispatchEvent(new ui.window.Event('change') as unknown as Event); await flush();
     assert.equal(reads, 0); assert.equal(restore.mock.callCount(), 0);
     assert.equal(ui.query('.pc-manage-status').hasAttribute('data-error'), true);
+  });
+});
+
+describe('explicit previous-format cleanup', () => {
+  it('requires confirmation, supports cancellation and leaves the current profile intact', async (t) => {
+    installChatIndexedDB(t); const ui = await mount(t); const before = ui.store.activeProfile;
+    const cleanup = t.mock.method(ui.store, 'clearLegacyData', async () => {});
+    ui.tab('data'); assert.equal(cleanup.mock.callCount(), 0);
+    assert.match(ui.root.textContent!, /previous-format chat and API key copies.*current profiles, conversations and connections are kept/);
+    ui.click('Delete previous-format copies'); assert.equal(cleanup.mock.callCount(), 0);
+    assert.equal(ui.query('[data-focus-key="confirm-legacy"]').parentElement!.hidden, false);
+    ui.click('Cancel'); assert.equal(cleanup.mock.callCount(), 0);
+    assert.equal(ui.query('[data-focus-key="confirm-legacy"]').parentElement!.hidden, true);
+    ui.click('Delete previous-format copies'); ui.language('zh');
+    assert.match(ui.root.textContent!, /当前档案、聊天与模型连接都会保留/);
+    ui.click('永久删除旧聊天与密钥副本'); await flush();
+    assert.equal(cleanup.mock.callCount(), 1); assert.deepEqual(ui.store.activeProfile, before);
+    assert.match(ui.query('.pc-manage-status').textContent!, /旧格式副本已删除，当前档案已保留/);
+    assert.equal(ui.query('[data-focus-key="confirm-legacy"]').parentElement!.hidden, true);
+  });
+
+  it('reports failed cleanup without hiding the confirmation or changing current data', async (t) => {
+    installChatIndexedDB(t); const ui = await mount(t); const before = ui.store.activeProfile;
+    const cleanup = t.mock.method(ui.store, 'clearLegacyData', async () => { throw new Error('Fixture legacy database is blocked'); });
+    ui.tab('data'); ui.click('Delete previous-format copies'); ui.click('Permanently delete old chat and key copies'); await flush();
+    assert.equal(cleanup.mock.callCount(), 1); assert.deepEqual(ui.store.activeProfile, before);
+    assert.equal(ui.query('.pc-manage-status').hasAttribute('data-error'), true);
+    assert.equal(ui.query('[data-focus-key="confirm-legacy"]').parentElement!.hidden, false);
+    assert.equal(ui.query<HTMLButtonElement>('[data-focus-key="confirm-legacy"]').disabled, false);
+    ui.click('Cancel'); assert.equal(cleanup.mock.callCount(), 1);
   });
 });
 
@@ -464,7 +534,7 @@ describe('management custom figures and authoritative exports', () => {
       assert.equal(store.activeProfileId, secondId); assert.deepEqual(adopted, [secondId]);
       assert.equal(ui.query<HTMLSelectElement>('.pc-profile-select').value, secondId);
       assert.deepEqual(busy, [true], 'runtime reconciliation stays inside the original busy lock');
-      assert.ok([...ui.root.querySelectorAll<HTMLInputElement>('button,input,textarea,select')].every((node) => node.disabled));
+      assert.ok([...ui.root.querySelectorAll<HTMLInputElement>('button:not([data-cancel-download]),input,textarea,select')].every((node) => node.disabled));
       if (failure === 'selection') gate.reject(new Error('Runtime initialization failed')); else gate.resolve();
       await flush();
       assert.deepEqual(busy, [true, false]); assert.deepEqual(adopted, [secondId], 'runtime is reconciled exactly once');

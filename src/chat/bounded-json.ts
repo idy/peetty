@@ -38,7 +38,11 @@ export function* jsonChunks(value: unknown, chunkChars: number): Generator<strin
 
 /** Incremental reader for existing fragmented multipart JSON. Only individual JSON
  * strings are assembled; arrays/objects are constructed directly from the pieces. */
-export function parseJSONChunks(chunks: readonly string[], maxTokenChars: number): unknown {
+export function parseJSONChunks(
+  chunks: readonly string[],
+  maxTokenChars: number | ((path: readonly string[], key: boolean) => number),
+  testing?: { onStringBuffers?: (buffers: number, pending: number, decoded: number) => void },
+): unknown {
   let part = 0; let offset = 0;
   const invalid = (): never => { throw new Error('Invalid or unsupported profile data.'); };
   const peek = (): string => {
@@ -47,10 +51,21 @@ export function parseJSONChunks(chunks: readonly string[], maxTokenChars: number
   };
   const take = (): string => { const result = peek(); if (result) offset++; return result; };
   const space = () => { while (/[\x20\t\n\r]/.test(peek()) && peek()) offset++; };
-  const string = (): string => {
+  const string = (path: readonly string[], key = false): string => {
     if (take() !== '"') invalid();
-    const pieces: string[] = []; let size = 0;
-    const append = (value: string) => { size += value.length; if (size > maxTokenChars) invalid(); pieces.push(value); };
+    const limit = typeof maxTokenChars === 'number' ? maxTokenChars : maxTokenChars(path, key);
+    const pieces: string[] = []; let size = 0; let pending = '';
+    const append = (value: string) => {
+      if (!value) return;
+      size += value.length; if (size > limit) invalid();
+      for (let offset = 0; offset < value.length;) {
+        const count = Math.min(16_384 - pending.length, value.length - offset);
+        pending += value.slice(offset, offset + count); offset += count;
+        if (pending.length === 16_384) { pieces.push(pending); pending = ''; }
+      }
+      testing?.onStringBuffers?.(pieces.length, pending.length, size);
+    };
+    const escapes: Record<string, string> = { '"': '"', '\\': '\\', '/': '/', b: '\b', f: '\f', n: '\n', r: '\r', t: '\t' };
     while (peek()) {
       const source = chunks[part]!;
       const special = /["\\\u0000-\u001f]/g; special.lastIndex = offset;
@@ -58,22 +73,24 @@ export function parseJSONChunks(chunks: readonly string[], maxTokenChars: number
       if (!match) { append(source.slice(offset)); offset = source.length; continue; }
       append(source.slice(offset, match.index)); offset = match.index;
       const char = take();
-      if (char === '"') {
-        try { return JSON.parse(`"${pieces.join('')}"`) as string; } catch { return invalid(); }
-      }
+      if (char === '"') { if (pending) pieces.push(pending); return pieces.join(''); }
       if (char !== '\\') invalid();
       const escape = take();
-      if (!escape || !'"\\/bfnrtu'.includes(escape)) invalid();
-      let escaped = `\\${escape}`;
-      if (escape === 'u') for (let i = 0; i < 4; i++) { const hex = take(); if (!hex || !/[0-9a-f]/i.test(hex)) invalid(); escaped += hex; }
-      append(escaped);
+      if (escape === 'u') {
+        let code = '';
+        for (let i = 0; i < 4; i++) { const hex = take(); if (!hex || !/[0-9a-f]/i.test(hex)) invalid(); code += hex; }
+        append(String.fromCharCode(Number.parseInt(code, 16)));
+      } else {
+        if (!Object.hasOwn(escapes, escape)) invalid();
+        append(escapes[escape]!);
+      }
     }
     return invalid();
   };
-  const value = (depth: number): unknown => {
+  const value = (depth: number, path: readonly string[] = []): unknown => {
     if (depth > 128) invalid();
     space(); const char = peek();
-    if (char === '"') return string();
+    if (char === '"') return string(path);
     if (char === '{' || char === '[') {
       take(); space();
       const array = char === '['; const close = array ? ']' : '}';
@@ -81,8 +98,8 @@ export function parseJSONChunks(chunks: readonly string[], maxTokenChars: number
       if (peek() === close) { take(); return result; }
       while (true) {
         space(); let field = '';
-        if (!array) { field = string(); space(); if (take() !== ':') invalid(); }
-        const child = value(depth + 1);
+        if (!array) { field = string(path, true); space(); if (take() !== ':') invalid(); }
+        const child = value(depth + 1, [...path, array ? '*' : field]);
         if (array) (result as unknown[]).push(child);
         else Object.defineProperty(result, field, { configurable: true, enumerable: true, writable: true, value: child });
         space(); const separator = take();

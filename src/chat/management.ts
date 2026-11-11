@@ -7,11 +7,22 @@ import { PROFILE_LIMITS } from './limits.ts';
 
 const HISTORY_PREVIEW_CHARS = 4_000;
 
-function scheduleDownloadRevocation(url: string) {
-  // Keep downloads available for large files and save dialogs, even after iframe teardown.
-  // The module realm's timer retains only the URL, independently of management's lifetime.
-  const timer = setTimeout(() => URL.revokeObjectURL(url), 60_000);
-  (timer as { unref?: () => void }).unref?.();
+function scheduleDownloadRevocation(url: string): Promise<void> {
+  // This module-realm timer retains the URL and completion signal, never the Blob,
+  // serialized part or management view. Teardown must not shorten download availability.
+  return new Promise(resolve => {
+    const timer = setTimeout(() => { URL.revokeObjectURL(url); resolve(); }, 60_000);
+    (timer as { unref?: () => void }).unref?.();
+  });
+}
+
+function untilCanceled<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const cancel = () => { signal.removeEventListener('abort', cancel); reject(new DOMException('Download canceled.', 'AbortError')); };
+    if (signal.aborted) { cancel(); return; }
+    signal.addEventListener('abort', cancel, { once: true });
+    operation.then(value => { signal.removeEventListener('abort', cancel); resolve(value); }, error => { signal.removeEventListener('abort', cancel); reject(error); });
+  });
 }
 
 const COPY = {
@@ -31,7 +42,11 @@ const COPY = {
     edit: 'Edit', remove: 'Delete', confirm: 'Confirm deletion', cancel: 'Cancel', source: 'Source message', sourceMissing: 'Source message is no longer in history.',
     manual: 'Added or edited by you', automatic: 'Remembered from chat', you: 'You', companion: 'Companion', action: 'Action', more: 'Show more',
     backupTitle: 'Backup and restore', backupHint: 'Download all profiles, characters, memories, conversations, providers and model settings. API keys are included in plain text; keep this file private.',
-    backup: 'Download full backup', multipartDownloaded: 'Backup parts are ready. Allow multiple downloads in your browser and keep every part together. To restore, select all parts at once.',
+    backup: 'Download full backup', multipartDownloaded: 'All backup parts are ready. Keep every part together. To restore, select all parts at once.',
+    multipartWorking: 'Downloading backup parts. Allow multiple downloads and keep every part. Larger backups download up to two parts per minute. To restore, select all parts at once.',
+    cancelDownload: 'Cancel remaining downloads', downloadCanceled: 'Backup download canceled. Previously downloaded parts are incomplete; start a new full backup to restore it.',
+    legacyTitle: 'Previous-format data', legacyHint: 'Delete leftover previous-format chat and API key copies on this device. Your current profiles, conversations and connections are kept.',
+    clearLegacy: 'Delete previous-format copies', confirmLegacy: 'Permanently delete old chat and key copies', legacyCleared: 'Previous-format copies deleted. Current profiles are kept.',
     restore: 'Restore backup', restoreHint: 'Restore creates independent profiles and keeps your existing data. Select the backup file, or all files of a multipart backup together. Connections are used only after you start chatting.',
     memoryTitle: 'Import and export memory', memoryHint: 'Only the selected profile’s memories. Source messages, conversation history and API keys are omitted.',
     exportMemory: 'Download memory JSON', exportMarkdown: 'Download memory Markdown', importMemory: 'Import memory JSON',
@@ -54,7 +69,11 @@ const COPY = {
     edit: '编辑', remove: '删除', confirm: '确认删除', cancel: '取消', source: '来源消息', sourceMissing: '来源消息已不在聊天历史中。',
     manual: '由你添加或修改', automatic: '从聊天中记住', you: '你', companion: '伙伴', action: '动作', more: '显示更多',
     backupTitle: '备份与恢复', backupHint: '下载全部档案、角色、记忆、聊天、Provider 和模型设置。文件包含明文 API Key，请妥善保管。',
-    backup: '下载完整备份', multipartDownloaded: '备份分卷已准备下载。请允许浏览器下载多个文件，并保留全部分卷。恢复时请一次选中所有分卷。',
+    backup: '下载完整备份', multipartDownloaded: '全部备份分卷已准备下载。请保留全部分卷，恢复时一次选中所有分卷。',
+    multipartWorking: '正在下载备份分卷。请允许浏览器下载多个文件并保留全部分卷。较大备份每分钟最多下载两个分卷。恢复时请一次选中所有分卷。',
+    cancelDownload: '取消剩余下载', downloadCanceled: '备份下载已取消。此前下载的分卷不完整，请重新下载完整备份后再恢复。',
+    legacyTitle: '旧格式数据', legacyHint: '删除此设备上旧格式聊天和 API Key 的残留副本。当前档案、聊天与模型连接都会保留。',
+    clearLegacy: '删除旧格式副本', confirmLegacy: '永久删除旧聊天与密钥副本', legacyCleared: '旧格式副本已删除，当前档案已保留。',
     restore: '恢复备份', restoreHint: '恢复为独立的新档案，保留现有数据。请选择备份文件，分卷备份需一次选中全部文件。只有你开始聊天后才会使用恢复的连接。',
     memoryTitle: '导入与导出记忆', memoryHint: '只包含当前档案的记忆，不包含来源消息、聊天历史或 API Key。',
     exportMemory: '下载记忆 JSON', exportMarkdown: '下载记忆 Markdown', importMemory: '导入记忆 JSON',
@@ -75,7 +94,7 @@ interface Options {
   onReload: () => Promise<void>;
   onTab: (connection: boolean) => void;
   onBusy?: (busy: boolean) => void;
-  backup: () => Promise<string | BackupDownloadFile[]>;
+  backup: (signal?: AbortSignal) => Promise<string | AsyncIterable<BackupDownloadFile>>;
 }
 interface TextDraft {
   value: string;
@@ -193,6 +212,9 @@ export function createManagement(options: Options) {
   let visible = false;
   let busy = false;
   let destroyed = false;
+  let activeDownload: AbortController | undefined;
+  // Completion promises retain neither serialized parts nor Blobs, across canceled runs too.
+  const downloadSlots: Promise<void>[] = [];
 
   function view(id: string): ViewState {
     let state = views.get(id);
@@ -309,6 +331,7 @@ export function createManagement(options: Options) {
   function lockControls() {
     if (!busy) return;
     for (const control of root.querySelectorAll<Disableable>('button,input,select,textarea')) {
+      if (control.hasAttribute('data-cancel-download')) continue;
       if (!locked.has(control)) locked.set(control, control.disabled);
       control.disabled = true;
     }
@@ -643,12 +666,39 @@ export function createManagement(options: Options) {
     });
     page.append(records.search, records.list); records.draw();
   }
-  function download(text: string, name: string, type = 'application/json') {
-    if (destroyed) return;
+  function download(text: string, name: string, type = 'application/json'): Promise<void> {
+    if (destroyed) return Promise.resolve();
     const blob = new Blob([text], { type }); const url = URL.createObjectURL(blob);
-    scheduleDownloadRevocation(url);
+    const released = scheduleDownloadRevocation(url);
     const link = el('a'); link.href = url; link.download = name; root.append(link);
     try { link.click(); } finally { link.remove(); }
+    return released;
+  }
+  async function downloadParts(parts: AsyncIterable<BackupDownloadFile>, signal: AbortSignal) {
+    const iterator = parts[Symbol.asyncIterator]();
+    let returned = false;
+    const close = () => {
+      if (returned) return;
+      returned = true;
+      try { void Promise.resolve(iterator.return?.()).catch(() => {}); } catch { /* Cancellation still releases the UI. */ }
+    };
+    signal.addEventListener('abort', close, { once: true });
+    try {
+      while (!signal.aborted) {
+        // Wait before requesting a part. Even the producer's serialized payload stays bounded.
+        if (downloadSlots.length >= 2) {
+          await untilCanceled(downloadSlots[0]!, signal);
+          downloadSlots.shift();
+        }
+        const next = await untilCanceled(iterator.next(), signal);
+        if (signal.aborted) return;
+        if (next.done) { returned = true; return; }
+        downloadSlots.push(download(next.value.text, next.value.name));
+      }
+    } finally {
+      signal.removeEventListener('abort', close);
+      close();
+    }
   }
   function fileButton(profileId: string, key: CopyKey, action: (texts: string[]) => Promise<void>, multiple = false) {
     const input = el('input'); input.type = 'file'; input.accept = '.json,application/json'; input.hidden = true; input.multiple = multiple;
@@ -667,21 +717,62 @@ export function createManagement(options: Options) {
     const profileId = info.id;
     page.append(copy('h3', 'backupTitle'), copy('p', 'backupHint', 'pc-note'));
     const backup = button('backup', 'pc-primary'); backup.classList.add('pc-backup'); backup.dataset.focusKey = 'backup';
+    const cancelDownload = button('cancelDownload'); cancelDownload.hidden = true; cancelDownload.dataset.cancelDownload = '';
+    cancelDownload.addEventListener('click', () => activeDownload?.abort());
     backup.addEventListener('click', () => {
       let multipart = false;
+      let canceled = false;
       void run(profileId, backup, async () => {
-        const result = await options.backup();
-        if (typeof result === 'string') download(result, `peetty-backup-${new Date().toISOString().slice(0, 10)}.json`);
-        else { multipart = true; for (const file of result) download(file.text, file.name); }
-      }, () => multipart ? 'multipartDownloaded' : 'downloaded');
+        const controller = new AbortController(); activeDownload = controller; cancelDownload.hidden = false;
+        try {
+          const pending = options.backup(controller.signal);
+          // Cancellation can precede snapshot creation. Close an eventual unused producer too.
+          void pending.then(result => {
+            if (controller.signal.aborted && typeof result !== 'string') {
+              try { void Promise.resolve(result[Symbol.asyncIterator]().return?.()).catch(() => {}); } catch { /* Producer was never consumed. */ }
+            }
+          }, () => {});
+          const result = await untilCanceled(pending, controller.signal);
+          if (typeof result === 'string') download(result, `peetty-backup-${new Date().toISOString().slice(0, 10)}.json`);
+          else { multipart = true; say('multipartWorking'); await downloadParts(result, controller.signal); }
+        } catch (error) {
+          if (!controller.signal.aborted) throw error;
+          canceled = true;
+        } finally {
+          canceled ||= controller.signal.aborted;
+          if (activeDownload === controller) activeDownload = undefined;
+          cancelDownload.hidden = true;
+        }
+      }, () => canceled ? 'downloadCanceled' : multipart ? 'multipartDownloaded' : 'downloaded');
     });
-    page.append(backup, copy('p', 'restoreHint', 'pc-note'), fileButton(profileId, 'restore', (texts) => transition(() => store.restoreFiles(texts)), true));
+    page.append(backup, cancelDownload, copy('p', 'restoreHint', 'pc-note'), fileButton(profileId, 'restore', (texts) => transition(() => store.restoreFiles(texts)), true));
     page.append(copy('h4', 'memoryTitle'), copy('p', 'memoryHint', 'pc-note'));
     const actions = el('div', 'pc-row-actions'); const json = button('exportMemory'); const markdown = button('exportMarkdown');
     json.dataset.focusKey = 'exportMemory'; markdown.dataset.focusKey = 'exportMarkdown';
     json.addEventListener('click', () => { void run(profileId, json, async () => { download(await store.exportMemories(profileId), 'peetty-memories.json'); }, 'downloaded'); });
     markdown.addEventListener('click', () => { void run(profileId, markdown, async () => { download(await store.exportMemoryMarkdown(profileId), 'peetty-memories.md', 'text/markdown'); }, 'downloaded'); });
     actions.append(json, markdown); page.append(actions, fileButton(profileId, 'importMemory', ([text]) => store.importMemories(profileId, text!)));
+    page.append(copy('h4', 'legacyTitle'), copy('p', 'legacyHint', 'pc-note'));
+    const clearLegacy = button('clearLegacy', 'pc-link pc-danger'); clearLegacy.dataset.focusKey = 'clear-legacy';
+    const legacyConfirmation = el('div', 'pc-row-actions'); legacyConfirmation.hidden = true;
+    const confirmLegacy = button('confirmLegacy', 'pc-small pc-danger'); confirmLegacy.dataset.focusKey = 'confirm-legacy';
+    const cancelLegacy = button('cancel', 'pc-link'); cancelLegacy.dataset.focusKey = 'cancel-legacy';
+    clearLegacy.addEventListener('click', () => {
+      if (busy || !owns(profileId, clearLegacy)) return;
+      clearLegacy.hidden = true; legacyConfirmation.hidden = false; confirmLegacy.focus();
+    });
+    cancelLegacy.addEventListener('click', () => {
+      if (busy || !owns(profileId, cancelLegacy)) return;
+      legacyConfirmation.hidden = true; clearLegacy.hidden = false; clearLegacy.focus();
+    });
+    confirmLegacy.addEventListener('click', () => {
+      if (legacyConfirmation.hidden) return;
+      void run(profileId, confirmLegacy, async () => {
+        await store.clearLegacyData();
+        legacyConfirmation.hidden = true; clearLegacy.hidden = false; clearLegacy.focus();
+      }, 'legacyCleared');
+    });
+    legacyConfirmation.append(confirmLegacy, cancelLegacy); page.append(clearLegacy, legacyConfirmation);
   }
   function renderPage() {
     page.replaceChildren(); page.dataset.connection = String(tab === 'connection');
@@ -726,7 +817,7 @@ export function createManagement(options: Options) {
     translate,
     focus() { (page.querySelector<HTMLElement>('input,textarea,select,button') ?? selector).focus(); },
     destroy() {
-      destroyed = true; releaseBusy(); views.clear();
+      destroyed = true; activeDownload?.abort(); activeDownload = undefined; releaseBusy(); views.clear();
     },
   };
 }

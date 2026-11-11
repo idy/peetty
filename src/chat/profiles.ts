@@ -207,10 +207,50 @@ function stringify(value: unknown): string {
   checkFile(result, LIMIT);
   return result;
 }
+/** Single-use lazy transport; release the snapshot even if canceled before first next(). */
+function multipartDownloads(snapshot: Backup, chunkSize: number, fileBytes: number, count: number, digest: string): AsyncIterable<BackupDownloadFile> {
+  const holder: { snapshot?: Backup } = { snapshot };
+  const backupId = freshId();
+  const files = (async function* () {
+    try {
+      if (!holder.snapshot) return;
+      let index = 0;
+      for (const text of jsonChunks(holder.snapshot, chunkSize)) {
+        const part: BackupPart = { format: 'peetty-backup-part', version: 1, backupId, index, count, digest, text };
+        const serialized = stringify(part);
+        check(new TextEncoder().encode(serialized).length <= fileBytes, LIMIT);
+        yield { name: `peetty-backup-${backupId}.part-${String(++index).padStart(String(count).length, '0')}-of-${count}.json`, text: serialized };
+      }
+      check(index === count, LIMIT);
+    } finally { delete holder.snapshot; }
+  })();
+  const iterator: AsyncIterableIterator<BackupDownloadFile> = {
+    [Symbol.asyncIterator]() { return this; },
+    next: () => files.next(),
+    return: async () => { delete holder.snapshot; return files.return(); },
+    throw: async (error: unknown) => { delete holder.snapshot; return files.throw(error); },
+  };
+  return iterator;
+}
+
 function sessionFrom(value: unknown): BackupSession {
   const session = object(value, ['profileId', 'connection', 'rememberKey']);
   return { profileId: id(session.profileId), connection: connectionFrom(session.connection), rememberKey: boolean(session.rememberKey) };
 }
+function backupTokenLimit(path: readonly string[], key: boolean): number {
+  // Imported connection strings historically allow the per-file bound. All
+  // conversation/figure fields have substantially narrower decoded schema bounds.
+  if (path.includes('connection')) return PROFILE_LIMITS.fileBytes;
+  if (path.includes('figure')) return 2_000_000;
+  if (key) return 200;
+  const field = path.at(-1);
+  if (field === 'text') return path.includes('memories') ? PROFILE_LIMITS.memoryText : PROFILE_LIMITS.entryText;
+  if (field === 'sourceText') return PROFILE_LIMITS.entryText;
+  if (field === 'personality') return PROFILE_LIMITS.personality;
+  if (field === 'name') return PROFILE_LIMITS.name;
+  return 200;
+}
+
 function backupFrom(value: unknown): Backup {
   const backup = object(value, ['format', 'version', 'createdAt', 'activeProfileId', 'profiles', 'sessions']);
   check(backup.format === 'peetty-backup' && (backup.version === 1 || backup.version === 2));
@@ -323,6 +363,10 @@ export class BrowserProfileStore {
   private failed = false;
   private legacyProof: LegacyProof | undefined;
   private reconcilingLegacy = false;
+  private legacyReconciliation: Promise<void> | undefined;
+  private legacyEmpty = false;
+  private legacyRevision = 0;
+  private legacyCheckedRevision = -1;
 
   constructor(namespace = 'peetty', persist = true) { this.namespace = namespace; this.persist = persist; }
   get persistenceWarning(): boolean { return this.failed; }
@@ -379,7 +423,6 @@ export class BrowserProfileStore {
 
   /** Read/modify/write within ONE transaction; only dirty records are written, never a cached directory. */
   private async run<T>(selection: readonly string[] | 'all', write: boolean, action: (draft: Draft) => T): Promise<T> {
-    if (write && this.initialized && !this.reconcilingLegacy) await this.reconcileLegacy();
     const db = await this.open();
     let proof = this.legacyProof;
     let draft: Draft | undefined;
@@ -401,8 +444,10 @@ export class BrowserProfileStore {
               abort();
             }
           };
-          const proofRequest = store.get('legacyMigration');
-          proofRequest.onsuccess = () => { try { proof = legacyProofFrom(proofRequest.result); } catch { proof = undefined; } };
+          if (!this.initialized || this.reconcilingLegacy) {
+            const proofRequest = store.get('legacyMigration');
+            proofRequest.onsuccess = () => { try { proof = legacyProofFrom(proofRequest.result); } catch { proof = undefined; } };
+          }
           const directoryRequest = store.get('directory');
           directoryRequest.onsuccess = () => guard(() => {
             const directory = directoryFrom(directoryRequest.result);
@@ -440,13 +485,18 @@ export class BrowserProfileStore {
     if (!completedAction) apply(this.state);
     this.state = { directory: draft!.directory, records: draft!.records };
     this.legacyProof = draft!.legacyProof;
+    if (draft!.dirty.size) this.legacyRevision++;
     for (const profileId of this.sessions.keys()) if (!this.state.records.has(profileId)) this.sessions.delete(profileId);
     return result;
   }
 
   private ready(): void { check(this.initialized, 'Initialize profile storage first.'); }
-  private queued<T>(selection: readonly string[], write: boolean, action: (draft: Draft) => T): Promise<T> {
-    return this.enqueue(async () => { this.ready(); return this.run(selection, write, action); });
+  private queued<T>(selection: readonly string[], write: boolean, action: (draft: Draft) => T, privacyMutation = false): Promise<T> {
+    return this.enqueue(async () => {
+      this.ready();
+      if (privacyMutation) await this.reconcileLegacy();
+      return this.run(selection, write, action);
+    });
   }
 
   /** Read raw legacy records without applying the runtime's history truncation policy. */
@@ -537,11 +587,21 @@ export class BrowserProfileStore {
 
   /** Establish proof from actual authoritative correspondence before user deletion,
    * then retry CAS cleanup. Previously copied digests survive clear/key opt-out. */
-  private async reconcileLegacy(): Promise<void> {
+  private reconcileLegacy(force = false): Promise<void> {
+    if (this.legacyReconciliation) return this.legacyReconciliation;
+    if (!force && this.legacyEmpty && this.legacyCheckedRevision === this.legacyRevision) return Promise.resolve();
+    const operation = this.reconcileLegacyNow();
+    this.legacyReconciliation = operation;
+    return operation.finally(() => { if (this.legacyReconciliation === operation) this.legacyReconciliation = undefined; });
+  }
+
+  private async reconcileLegacyNow(): Promise<void> {
     if (!this.persist || this.failed || this.closed || this.reconcilingLegacy) return;
     this.reconcilingLegacy = true;
     try {
       const legacy = await this.legacy();
+      this.legacyEmpty = !legacy.used;
+      this.legacyCheckedRevision = this.legacyRevision;
       if (!legacy.retire) return;
       const candidates = legacy.entries.map((entry) => ({ entry, digest: jsonFingerprint(entry) }));
       const connectionDigest = legacy.connection ? jsonFingerprint(legacy.connection) : undefined;
@@ -565,6 +625,30 @@ export class BrowserProfileStore {
       });
       if (!this.failed && proof) await this.retireLegacy(legacy.retire, proof);
     } finally { this.reconcilingLegacy = false; }
+  }
+
+  /** Destructive recovery for unprovable legacy duplicates. Hosts must obtain an
+   * explicit user confirmation; automatic reconciliation never calls this method. */
+  clearLegacyData(): Promise<void> {
+    return this.enqueue(async () => {
+      this.ready();
+      if (!this.persist) return;
+      const clear = async (database: string, keys: readonly string[]) => {
+        const db = await openStateDatabase(database, { isClosed: () => this.closed, onFailure: () => {} });
+        check(db, 'Could not remove legacy data. Try again.');
+        try {
+          const ok = await stateTransaction(db, true, (store) => { for (const key of keys) store.delete(key); });
+          check(ok, 'Could not remove legacy data. Try again.');
+        } finally { db.close(); }
+      };
+      // Keep provenance until the old records were successfully removed. Partial
+      // cross-database failure is reported and a repeated explicit call is safe.
+      await clear(`${this.namespace}:chat`, ['entries', 'connection', 'entriesEpoch']);
+      await clear(`${this.namespace}:profiles`, ['legacyMigration']);
+      this.legacyProof = undefined;
+      this.legacyEmpty = true;
+      this.legacyCheckedRevision = this.legacyRevision;
+    });
   }
 
   async initialize(defaults: Defaults = {}): Promise<void> {
@@ -651,6 +735,7 @@ export class BrowserProfileStore {
   remove(profileId: string): Promise<void> {
     return this.enqueue(async () => {
       this.ready();
+      await this.reconcileLegacy();
       await this.run([profileId], true, (draft) => {
         getRecord(draft, profileId);
         check(draft.directory.ids.length > 1, 'Cannot remove the last profile.');
@@ -703,6 +788,8 @@ export class BrowserProfileStore {
         const copy = connectionFrom(connection, false);
         return this.enqueue(async () => {
           this.ready();
+          // Replacing a connection can forget old credentials just like opt-out.
+          await this.reconcileLegacy();
           const saved = await this.run([profileId], true, (draft) => {
             const known = this.sessions.get(profileId)?.at(-1)?.connection ?? getRecord(draft, profileId).profile.connection;
             const saved = prepareSavedConnection(copy, known, options?.rememberCredentials);
@@ -742,6 +829,7 @@ export class BrowserProfileStore {
         if (closing) return;
         await this.enqueue(async () => {
           this.ready();
+          await this.reconcileLegacy();
           await this.run([profileId], true, (draft) => {
             const record = touchMemories(draft, profileId);
             detachSources(record.profile, record.profile.entries);
@@ -811,7 +899,7 @@ export class BrowserProfileStore {
       for (const memory of record.profile.memories) if (memory.sourceEntryId === entryId) memory.sourceText ??= entry.text;
       // Replace the array and entry so adapter baselines and lazy source indexes remain immutable.
       record.profile.entries = record.profile.entries.map((value, i) => i === index ? { ...value, text: copy } : value);
-    });
+    }, true);
   }
   removeEntry(profileId: string, entryId: string): Promise<void> {
     return this.queued([profileId], true, (draft) => {
@@ -820,7 +908,7 @@ export class BrowserProfileStore {
       check(entry, MISSING);
       detachSources(record.profile, [entry]);
       record.profile.entries = record.profile.entries.filter((value) => value.id !== entryId);
-    });
+    }, true);
   }
 
   /** Bounded legacy API. UI downloads use backupDownload to preserve larger archives. */
@@ -835,25 +923,26 @@ export class BrowserProfileStore {
     return chunks.join('');
   }
 
-  async backupDownload(options?: BackupDownloadOptions): Promise<string | BackupDownloadFile[]> {
+  async backupDownload(options?: BackupDownloadOptions): Promise<string | AsyncIterable<BackupDownloadFile>> {
     const fileBytes = options?._testing?.fileBytes ?? PROFILE_LIMITS.fileBytes;
     check(Number.isSafeInteger(fileBytes) && fileBytes >= 1_024 && fileBytes <= PROFILE_LIMITS.fileBytes);
     const backup = await this.backupSnapshot(options);
     // Only individual metadata/string tokens and bounded transport chunks are
     // serialized. A profile archive can exceed the engine's maximum string length.
     const chunkSize = Math.floor((fileBytes - 512) / 6);
-    const chunks = Array.from(jsonChunks(backup, chunkSize));
-    let bytes = 0;
-    for (const chunk of chunks) bytes += new TextEncoder().encode(chunk).length;
-    if (bytes <= fileBytes) return chunks.join(''); // Proven bounded single-file path only.
-    const count = chunks.length;
-    const backupId = freshId(); const digest = backupDigest(chunks);
-    return chunks.map((text, index) => {
-      const part: BackupPart = { format: 'peetty-backup-part', version: 1, backupId, index, count, digest, text };
-      const serialized = stringify(part);
-      check(new TextEncoder().encode(serialized).length <= fileBytes, LIMIT);
-      return { name: `peetty-backup-${backupId}.part-${String(index + 1).padStart(String(count).length, '0')}-of-${count}.json`, text: serialized };
-    });
+    let bytes = 0; let count = 0;
+    let small: string[] = [];
+    function* measure() {
+      for (const chunk of jsonChunks(backup, chunkSize)) {
+        count++; bytes += new TextEncoder().encode(chunk).length;
+        if (bytes <= fileBytes) small.push(chunk);
+        else if (small.length) small = [];
+        yield chunk;
+      }
+    }
+    const digest = backupDigest(measure());
+    if (bytes <= fileBytes) return small.join(''); // Proven bounded single-file path only.
+    return multipartDownloads(backup, chunkSize, fileBytes, count, digest);
   }
 
   private async backupSnapshot(options?: Partial<BackupOptions>): Promise<Backup> {
@@ -911,10 +1000,13 @@ export class BrowserProfileStore {
       check(new Set(parts.map((part) => part.index)).size === parts.length);
       const chunks = parts.sort((a, b) => a.index - b.index).map((part) => part.text);
       check(backupDigest(chunks) === first.digest);
-      value = parseJSONChunks(chunks, PROFILE_LIMITS.fileBytes * 6);
+      value = parseJSONChunks(chunks, backupTokenLimit);
     } else check(values.length === 1);
     // Validate EVERY reconstructed profile and session before enqueueing a mutation.
     const backup = backupFrom(value);
+    // Backup files carry credential values, never trusted SDK header classification.
+    for (const profile of backup.profiles) if (profile.connection) delete profile.connection.nonCredentialHeaders;
+    for (const session of backup.sessions ?? []) delete session.connection.nonCredentialHeaders;
     return this.enqueue(async () => {
       this.ready();
       const sessions = await this.run('all', true, (draft) => {

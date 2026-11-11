@@ -405,9 +405,12 @@ export async function createChatPanel({
       profileFigurePending = false;
       render();
     }
-    async function backup(): Promise<string | BackupDownloadFile[]> {
+    async function backup(signal?: AbortSignal): Promise<string | AsyncIterable<BackupDownloadFile>> {
       canceledTurn = true; runtime.stop(); cacheSession();
       const controller = new AbortController(); activeBackups.add(controller);
+      const cancel = () => controller.abort();
+      signal?.addEventListener('abort', cancel, { once: true });
+      if (signal?.aborted) cancel();
       const timer = setTimeout(() => controller.abort(), 20_000);
       const liveIds = new Set(profiles.listProfiles().map((profile) => profile.id));
       try {
@@ -420,7 +423,7 @@ export async function createChatPanel({
           return { profileId, connection, rememberKey: session.rememberKey && !model.getApiKey };
         }));
         return await profiles.backupDownload({ sessions });
-      } finally { clearTimeout(timer); controller.abort(); activeBackups.delete(controller); }
+      } finally { clearTimeout(timer); controller.abort(); signal?.removeEventListener('abort', cancel); activeBackups.delete(controller); }
     }
     const management = createManagement({
       document, store: profiles, language: () => language,

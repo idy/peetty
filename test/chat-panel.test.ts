@@ -141,6 +141,33 @@ describe('composer acceptance ownership', () => {
 });
 
 describe('explicit nonsecret setup headers', () => {
+  for (const source of ['saved', 'session'] as const) {
+    it(`does not trust an imported ${source} Gateway-Pass classification when authentication is opted out`, async (t) => {
+      const idb = installChatIndexedDB(t); const namespace = `untrusted-classification-${source}`;
+      const seed = new BrowserProfileStore(namespace); await seed.initialize(); t.after(() => seed.close());
+      const archive = JSON.parse(await seed.backup()); archive.version = 2;
+      const connection = { ...MODEL, headers: { 'Gateway-Pass': 'fixture-imported-private-pass' }, nonCredentialHeaders: ['Gateway-Pass'] };
+      if (source === 'saved') archive.profiles[0].connection = connection;
+      else archive.sessions = [{ profileId: archive.activeProfileId, connection, rememberKey: false }];
+      const { query, window } = await mountPanel(t, undefined, { chat: { storageKey: namespace } });
+      const before = query<HTMLSelectElement>('.pc-profile-select').value;
+      query<HTMLButtonElement>('[data-tab="data"]').click();
+      const restore = query<HTMLInputElement>('input[type="file"][multiple]');
+      Object.defineProperty(restore, 'files', { configurable: true, value: [new window.File([JSON.stringify(archive)], 'fixture-untrusted-backup.json')] });
+      restore.dispatchEvent(new window.Event('change') as unknown as Event);
+      await eventually(() => query<HTMLSelectElement>('.pc-profile-select').value !== before && !query<HTMLSelectElement>('.pc-profile-select').disabled);
+      query<HTMLButtonElement>('[data-tab="connection"]').click();
+      assert.equal(query<HTMLInputElement>('[name="model"]').value, MODEL.id, 'restored connection is active before opting out');
+      const remember = query<HTMLInputElement>('[name="remember"]'); remember.checked = false;
+      query<HTMLFormElement>('.pc-setup').requestSubmit(); await eventually(() => query('.peetty-chat').dataset.mode === 'chat');
+      const saved = savedConnection(idb, namespace)!;
+      assert.equal(saved.nonCredentialHeaders, undefined); assert.equal(saved.headers?.['gateway-pass'], undefined); assert.equal(saved.apiKey, undefined);
+      const inspect = new BrowserProfileStore(namespace); await inspect.initialize(); t.after(() => inspect.close());
+      const persisted = JSON.parse(await inspect.backup()).profiles.find((profile: ProfileRecord) => profile.id === inspect.activeProfileId);
+      assert.equal(persisted.connection.headers?.['gateway-pass'], undefined, 'a backup cannot launder file declarations into persistent consent');
+    });
+  }
+
   it('persists a newly classified route without API key consent and retains it through reload and key replacement', async (t) => {
     const idb = installChatIndexedDB(t); const namespace = 'explicit-route-setup';
     const { panel, query } = await mountPanel(t, { ...MODEL, apiKey: 'fixture-route-api-key',
@@ -167,7 +194,7 @@ describe('explicit nonsecret setup headers', () => {
     assert.deepEqual(savedConnection(idb, namespace)!.nonCredentialHeaders, ['x-route']);
   });
 
-  it('preserves saved and session classifications in a full backup and restored runtime', async (t) => {
+  it('exports trusted classifications but strips their consent when a backup is restored', async (t) => {
     const idb = installChatIndexedDB(t); const namespace = 'explicit-route-backup';
     const model = { ...MODEL, apiKey: 'fixture-route-backup-key', headers: { 'X-Route': 'fixture-backup-route' }, nonCredentialHeaders: ['X-Route'] };
     const { panel, query, root } = await mountPanel(t, model, { chat: { storageKey: namespace } });
@@ -180,10 +207,10 @@ describe('explicit nonsecret setup headers', () => {
     assert.equal(archive.profiles[0].connection.apiKey, undefined);
     assert.deepEqual(archive.sessions[0].connection.nonCredentialHeaders, ['x-route']);
     const target = new BrowserProfileStore('explicit-route-backup-target'); await target.initialize(); t.after(() => target.close()); await target.restore(text);
-    assert.deepEqual(target.storedConnection(target.activeProfileId)!.nonCredentialHeaders, ['x-route']);
+    assert.equal(target.storedConnection(target.activeProfileId)!.nonCredentialHeaders, undefined, 'file declarations cannot grant persistence consent');
     assert.deepEqual(target.storedConnection(target.activeProfileId)!.headers, { 'x-route': 'fixture-backup-route' });
     const runtime = new ChatRuntime({ storage: target.runtimeStorage(target.activeProfileId) }); t.after(() => runtime.destroy()); await runtime.initialize();
-    assert.deepEqual(runtime.model!.nonCredentialHeaders, ['x-route']); assert.equal(runtime.model!.apiKey, model.apiKey);
+    assert.equal(runtime.model!.nonCredentialHeaders, undefined); assert.equal(runtime.model!.apiKey, model.apiKey);
   });
 });
 
@@ -320,7 +347,8 @@ describe('profile management and migration UI', () => {
     query<HTMLTextAreaElement>('[aria-label="Edit"]').value = 'I now prefer black tea.';
     query<HTMLTextAreaElement>('[aria-label="Edit"]').form!.requestSubmit(); await flush();
     assert.match(query('.pc-record-list').textContent!, /black tea/);
-    click(root, 'Delete'); click(root, 'Confirm deletion'); await flush();
+    click(root, 'Delete'); click(root, 'Confirm deletion');
+    await eventually(() => !query<HTMLSelectElement>('.pc-profile-select').disabled);
     assert.equal(root.querySelector('[data-entry-id]'), null);
     query<HTMLButtonElement>('[data-tab="memory"]').click();
     assert.match(query('.pc-record-list').textContent!, /Likes green tea/);
@@ -1187,8 +1215,13 @@ describe('reviewed profile ownership and recovery', () => {
       const link = (event.target as Element).closest<HTMLAnchorElement>('a[download]');
       if (link) { event.preventDefault(); names.push(link.download); }
     });
+    t.mock.timers.enable({ apis: ['setTimeout'] });
     query<HTMLButtonElement>('[data-tab="data"]').click(); query<HTMLButtonElement>('.pc-backup').click();
-    await eventually(() => query('.pc-manage-status').textContent!.includes('Backup parts are ready'));
+    await eventually(() => blobs.length === 2);
+    for (let i = 0; i < 100 && !query('.pc-manage-status').textContent!.includes('All backup parts are ready'); i++) {
+      t.mock.timers.tick(60_000); await flush();
+    }
+    assert.match(query('.pc-manage-status').textContent!, /All backup parts are ready/);
     assert.ok(blobs.length > 1); assert.equal(lookups, 1); assert.equal(names.length, blobs.length);
     const texts = await Promise.all(blobs.map(blob => blob.text()));
     const restored = JSON.parse(texts.map(text => JSON.parse(text).text as string).join(''));
