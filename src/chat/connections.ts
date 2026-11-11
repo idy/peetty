@@ -63,7 +63,7 @@ const NONCREDENTIAL_HEADERS = new Set([
 const AUTHENTICATION_HEADER = /(?:^|[-_])(?:auth(?:entication|orization)?(?:[-_]?(?:key|token|secret|password|credential))?|[a-z0-9]*(?:tokens?|secrets?|passwords?|credentials?|cookies?)(?:[-_]?(?:key|token|secret))?|(?:api|access|subscription)[-_]?(?:key|token))(?:$|[-_])|^(?:x[-_])?key$/i;
 // Token budgets are metadata only when explicitly declared with a finite integer value.
 const TOKEN_COUNT_HEADER = /^(?:x[-_])?(?:(?:max|min|input|output|total|prompt|completion|cached|context|remaining|used|budget)[-_]?tokens?|[a-z0-9][a-z0-9_-]*tokens|(?:[a-z0-9][a-z0-9_-]*)?tokens?[-_]?(?:count|limit|budget))$/i;
-const AUTHENTICATION_TOKEN_COUNT = /(?:auth(?:entication|orization)?|access|refresh|client|session|bearer|private|secret|password|credential|oauth|gateway|service|jwt|identity|security)tokens?(?:count|limit|budget)?$/i;
+const AUTHENTICATION_TOKEN_COUNT = /(?:auth(?:entication|orization)?|api|subscription|access|refresh|client|session|bearer|private|secret|password|credential|oauth|gateway|service|jwt|identity|security|sas|pat|id|sso)tokens?(?:count|limit|budget)?$/i;
 function isAuthenticationHeaderName(name: string): boolean {
   return AUTHENTICATION_HEADER.test(name) || AUTHENTICATION_TOKEN_COUNT.test(name.replace(/[-_]/g, ''));
 }

@@ -1,21 +1,21 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { BrowserChatStore, ChatStorageError } from '../src/chat/store.ts';
+import { ChatStorageError } from '../src/chat/store.ts';
 import type { StoredConnection } from '../src/chat/store.ts';
 import { BrowserProfileStore } from '../src/chat/profiles.ts';
 import { ChatRuntime } from '../src/chat/runtime.ts';
 import { jsonFingerprint } from '../src/chat/bounded-json.ts';
 import { fenceLegacyDatabase, IDB_OPEN_TIMEOUT_MS, openStateDatabase, stateTransaction } from '../src/chat/idb.ts';
 import type { ChatEntry } from '../src/chat/types.ts';
-import { installChatIndexedDB } from './helpers/chat-storage.ts';
+import { installChatIndexedDB, profileStorage } from './helpers/chat-storage.ts';
 
 const entry = (id: string, text = id, createdAt = 1): ChatEntry => ({ id, role: 'user', text, createdAt });
 
 describe('concurrent browser history storage', () => {
   it('transactionally merges appends, partial updates, and repeated stale snapshots without reordering', async (t) => {
     installChatIndexedDB(t);
-    const first = new BrowserChatStore('shared');
-    const second = new BrowserChatStore('shared');
+    const first = await profileStorage(t, 'shared');
+    const second = await profileStorage(t, 'shared');
     t.after(() => { first.close(); second.close(); });
     await Promise.all([first.load(), second.load()]);
     const a = [entry('a-user', 'first', 100), { ...entry('a-reply', 'partial', 101), role: 'assistant' as const }];
@@ -25,7 +25,7 @@ describe('concurrent browser history storage', () => {
     const updated = [a[0]!, { ...a[1]!, text: 'finished' }];
     await first.saveEntries(updated);
     await second.saveEntries(b);
-    const reader = new BrowserChatStore('shared');
+    const reader = await profileStorage(t, 'shared');
     t.after(() => reader.close());
     assert.deepEqual((await reader.load()).entries, [...updated, ...b]);
     // Omitting an entry, including an empty save, is not an implicit clear.
@@ -36,8 +36,8 @@ describe('concurrent browser history storage', () => {
 
   it('does not overwrite a peer edit to an unchanged entry in a loaded snapshot', async (t) => {
     installChatIndexedDB(t);
-    const first = new BrowserChatStore('edits');
-    const second = new BrowserChatStore('edits');
+    const first = await profileStorage(t, 'edits');
+    const second = await profileStorage(t, 'edits');
     t.after(() => { first.close(); second.close(); });
     const original = entry('original');
     await first.saveEntries([original]);
@@ -50,8 +50,8 @@ describe('concurrent browser history storage', () => {
 
   it('keeps a persistent clear barrier against late additions, edits, re-saves, and queued close writes', async (t) => {
     const idb = installChatIndexedDB(t);
-    const first = new BrowserChatStore('clear');
-    const stale = new BrowserChatStore('clear');
+    const first = await profileStorage(t, 'clear');
+    const stale = await profileStorage(t, 'clear');
     const old = [entry('old-user'), { ...entry('old-reply', 'partial'), role: 'assistant' as const }];
     await first.saveEntries(old);
     await stale.load();
@@ -62,17 +62,18 @@ describe('concurrent browser history storage', () => {
     const writing = stale.saveEntries([old[0]!, { ...old[1]!, text: 'late update' }]);
     stale.close();
     await writing;
-    const restored = new BrowserChatStore('clear');
+    const restored = await profileStorage(t, 'clear');
     t.after(() => restored.close());
     assert.deepEqual((await restored.load()).entries, []);
-    assert.equal(typeof idb.databases.get('clear:chat')?.get('entriesEpoch'), 'string');
-    assert.deepEqual(idb.databases.get('clear:chat')?.get('entries'), []);
+    const profile = [...idb.databases.get('clear:profiles')!.values()].find((value) => value && typeof value === 'object' && 'profile' in value) as { epoch: string; profile: { entries: ChatEntry[] } };
+    assert.equal(typeof profile.epoch, 'string');
+    assert.deepEqual(profile.profile.entries, []);
   });
 
   it('accepts the first new turn after clear, then never reintroduces old snapshot IDs', async (t) => {
     installChatIndexedDB(t);
-    const first = new BrowserChatStore('new-epoch');
-    const second = new BrowserChatStore('new-epoch');
+    const first = await profileStorage(t, 'new-epoch');
+    const second = await profileStorage(t, 'new-epoch');
     t.after(() => { first.close(); second.close(); });
     const old = entry('old');
     await first.saveEntries([old]);
@@ -93,9 +94,9 @@ describe('concurrent browser history storage', () => {
 
   it('serializes overlapping clears and appends without allowing a cleared epoch to return', async (t) => {
     installChatIndexedDB(t);
-    const first = new BrowserChatStore('overlapping-clear');
-    const second = new BrowserChatStore('overlapping-clear');
-    const reader = new BrowserChatStore('overlapping-clear');
+    const first = await profileStorage(t, 'overlapping-clear');
+    const second = await profileStorage(t, 'overlapping-clear');
+    const reader = await profileStorage(t, 'overlapping-clear');
     t.after(() => { first.close(); second.close(); reader.close(); });
     await first.saveEntries([entry('old')]);
     await second.load();
@@ -108,10 +109,10 @@ describe('concurrent browser history storage', () => {
     assert.deepEqual((await reader.load()).entries, [entry('new-a'), entry('new-b')]);
   });
 
-  it('bounds merged records and does not reinsert an evicted entry on a later partial update', async (t) => {
+  it('bounds the runtime view while preserving full archived entries', async (t) => {
     installChatIndexedDB(t);
-    const first = new BrowserChatStore('bounded');
-    const second = new BrowserChatStore('bounded');
+    const first = await profileStorage(t, 'bounded');
+    const second = await profileStorage(t, 'bounded');
     t.after(() => { first.close(); second.close(); });
     await Promise.all([first.load(), second.load()]);
     const a = Array.from({ length: 150 }, (_, i) => entry(`a-${i}`));
@@ -127,225 +128,6 @@ describe('concurrent browser history storage', () => {
     assert.equal(bounded.length, 120);
     assert.equal(bounded.reduce((sum, value) => sum + value.text.length, 0), 240_000);
     assert.deepEqual(bounded.map((value) => value.id), large.slice(30).map((value) => value.id));
-  });
-});
-
-describe('independent legacy credential invalidation', () => {
-  const connection: StoredConnection = { id: 'fixture-model', baseUrl: 'https://fixture.example/v1', apiKey: 'erased-fixture-key' };
-  for (const originalEpoch of [undefined, 'existing-credential-epoch']) {
-    for (const invalidation of ['explicit', 'automatic', 'profile-opt-out'] as const) {
-      it(`rejects a delayed old setup save after ${invalidation} with original epoch ${originalEpoch ?? 'absent'}`, async (t) => {
-        const idb = installChatIndexedDB(t);
-        const namespace = `credential-barrier-${invalidation}-${originalEpoch ?? 'none'}`;
-        let manager: BrowserProfileStore;
-        if (invalidation === 'profile-opt-out') {
-          manager = new BrowserProfileStore(namespace); await manager.initialize();
-          await manager.storage(manager.activeProfileId).saveConnection(connection);
-        } else manager = new BrowserProfileStore(namespace, invalidation !== 'explicit');
-        t.after(() => manager.close());
-        const legacy = new Map<string, unknown>([['entries', [entry('active-user')]], ['connection', connection]]);
-        if (originalEpoch) { legacy.set('entriesEpoch', originalEpoch); legacy.set('connectionEpoch', originalEpoch); }
-        idb.databases.set(`${namespace}:chat`, legacy);
-        const old = new BrowserChatStore(namespace); t.after(() => old.close());
-        const loaded = await old.load();
-        let release!: () => void;
-        const gate = new Promise<void>((resolve) => { release = resolve; });
-        t.after(() => release());
-        (old as unknown as { writes: Promise<void> }).writes = gate;
-        const saving = old.saveConnection(loaded.connection!);
-        if (invalidation === 'explicit') { await manager.initialize(); await manager.clearLegacyData(); }
-        else if (invalidation === 'automatic') await manager.initialize();
-        else await manager.storage(manager.activeProfileId).saveConnection(connection, { rememberCredentials: false });
-        const barrier = legacy.get('connectionEpoch');
-        assert.equal(typeof barrier, 'string'); assert.notEqual(barrier, originalEpoch);
-        release();
-        await assert.rejects(saving, (error: unknown) => error instanceof ChatStorageError && error.code === 'stale-connection');
-        assert.equal(legacy.has('connection'), false);
-        assert.equal(old.persistenceWarning, false);
-        await assert.rejects(old.saveConnection(connection), /Reload before saving/u);
-        assert.equal(legacy.has('connection'), false, 'a rejection cannot silently adopt the new epoch');
-        if (invalidation === 'profile-opt-out') {
-          assert.equal(legacy.get('entriesEpoch'), originalEpoch, 'credential invalidation must not cancel active history');
-          await old.saveEntries([...loaded.entries, { ...entry('finished-reply'), role: 'assistant' }]);
-          assert.equal((legacy.get('entries') as ChatEntry[]).at(-1)!.id, 'finished-reply');
-        }
-        // A deliberate reload refreshes the barrier; a later explicit setup save
-        // is new intent rather than completion of the erased pending operation.
-        await old.load();
-        const replacement = { ...connection, apiKey: 'fresh-authorized-key' };
-        await old.saveConnection(replacement);
-        assert.deepEqual(legacy.get('connection'), replacement);
-        assert.equal(legacy.get('connectionEpoch'), barrier);
-      });
-    }
-  }
-
-  for (const source of ['history-only', 'connection-only'] as const) {
-    for (const invalidation of ['explicit', 'automatic'] as const) {
-      it(`blocks pending setup after ${invalidation} retirement of ${source} with absent original barriers`, async (t) => {
-        const idb = installChatIndexedDB(t);
-        const namespace = `single-record-${source}-${invalidation}`;
-        const legacy = new Map<string, unknown>(source === 'history-only' ? [['entries', [entry('old')]]] : [['connection', connection]]);
-        idb.databases.set(`${namespace}:chat`, legacy);
-        const pending = new BrowserChatStore(namespace); t.after(() => pending.close());
-        await pending.load();
-        let release!: () => void;
-        const gate = new Promise<void>((resolve) => { release = resolve; });
-        t.after(() => release());
-        (pending as unknown as { writes: Promise<void> }).writes = gate;
-        const saving = pending.saveConnection(connection);
-        const manager = new BrowserProfileStore(namespace, invalidation !== 'explicit'); t.after(() => manager.close());
-        await manager.initialize();
-        if (invalidation === 'explicit') await manager.clearLegacyData();
-        assert.equal(typeof legacy.get('connectionEpoch'), 'string');
-        if (source === 'connection-only' && invalidation === 'automatic') assert.equal(legacy.get('entriesEpoch'), undefined);
-        release();
-        await assert.rejects(saving, /Reload before saving/u);
-        assert.equal(legacy.has('connection'), false);
-        assert.equal(legacy.has('entries'), false);
-      });
-    }
-  }
-
-  it('allows a deliberate first setup save without load on a fresh database without an invalidation marker', async (t) => {
-    const idb = installChatIndexedDB(t);
-    const writer = new BrowserChatStore('fresh-setup'); t.after(() => writer.close());
-    await writer.saveConnection(connection);
-    assert.deepEqual(idb.databases.get('fresh-setup:chat')!.get('connection'), connection);
-    assert.equal(writer.persistenceWarning, false);
-  });
-
-  it('requires uninitialized writers to load an existing credential barrier before saving', async (t) => {
-    const idb = installChatIndexedDB(t);
-    const legacy = new Map<string, unknown>([['connectionEpoch', 'invalidated']]);
-    idb.databases.set('uninitialized-credentials:chat', legacy);
-    const writer = new BrowserChatStore('uninitialized-credentials'); t.after(() => writer.close());
-    await assert.rejects(writer.saveConnection(connection), /Reload before saving/u);
-    assert.equal(legacy.has('connection'), false);
-    await writer.load();
-    await writer.saveConnection(connection);
-    assert.deepEqual(legacy.get('connection'), connection);
-  });
-
-  it('allows ordinary same-epoch rotations and makes direct opt-out invalidate peers independently of history', async (t) => {
-    const idb = installChatIndexedDB(t);
-    const legacy = new Map<string, unknown>([['entries', [entry('active')]], ['entriesEpoch', 'history'], ['connectionEpoch', 'credentials']]);
-    idb.databases.set('credential-rotations:chat', legacy);
-    const first = new BrowserChatStore('credential-rotations'); const peer = new BrowserChatStore('credential-rotations');
-    t.after(() => { first.close(); peer.close(); });
-    await Promise.all([first.load(), peer.load()]);
-    await first.saveConnection(connection);
-    const rotated = { ...connection, apiKey: 'rotated-fixture-key' };
-    await peer.saveConnection(rotated);
-    assert.deepEqual(legacy.get('connection'), rotated);
-    assert.equal(legacy.get('connectionEpoch'), 'credentials');
-    await first.saveConnection(rotated, { rememberCredentials: false });
-    assert.equal((legacy.get('connection') as StoredConnection).apiKey, undefined);
-    assert.notEqual(legacy.get('connectionEpoch'), 'credentials');
-    await assert.rejects(peer.saveConnection(rotated), /Reload before saving/u);
-    assert.equal((legacy.get('connection') as StoredConnection).apiKey, undefined);
-    assert.equal(legacy.get('entriesEpoch'), 'history');
-    await first.saveConnection({ ...connection, apiKey: 'new-same-writer-key' });
-    assert.equal((legacy.get('connection') as StoredConnection).apiKey, 'new-same-writer-key');
-  });
-
-  it('does not let a queued load of a peer opt-out reauthorize an already captured credential', async (t) => {
-    const idb = installChatIndexedDB(t);
-    const legacy = new Map<string, unknown>([['connection', connection], ['connectionEpoch', 'E']]);
-    idb.databases.set('queued-peer-load:chat', legacy);
-    const old = new BrowserChatStore('queued-peer-load'); const peer = new BrowserChatStore('queued-peer-load');
-    t.after(() => { old.close(); peer.close(); });
-    await Promise.all([old.load(), peer.load()]);
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; }); t.after(() => release());
-    (old as unknown as { writes: Promise<void> }).writes = gate;
-    const loading = old.load();
-    const saving = old.saveConnection(connection);
-    const rejected = assert.rejects(saving, { code: 'stale-connection' });
-    await peer.saveConnection(connection, { rememberCredentials: false });
-    assert.notEqual(legacy.get('connectionEpoch'), 'E');
-    release(); await loading; await rejected;
-    assert.equal((legacy.get('connection') as StoredConnection).apiKey, undefined);
-    assert.equal(old.persistenceWarning, false);
-    await old.load();
-    await old.saveConnection({ ...connection, apiKey: 'new-explicit-input' });
-    assert.equal((legacy.get('connection') as StoredConnection).apiKey, 'new-explicit-input');
-  });
-
-  it('retains committed credentials and cleanup debt after repeated disk aborts until persistent removal succeeds', async (t) => {
-    const idb = installChatIndexedDB(t);
-    const legacy = new Map<string, unknown>([['connection', connection], ['connectionEpoch', 'E']]);
-    idb.databases.set('cleanup-debt:chat', legacy);
-    const writer = new BrowserChatStore('cleanup-debt'); t.after(() => writer.close());
-    await writer.load();
-    idb.fail('commit');
-    for (let attempt = 0; attempt < 2; attempt++) {
-      await assert.rejects(writer.saveConnection(connection, { rememberCredentials: false }), { code: 'legacy-cleanup' });
-      assert.equal((await writer.load()).connection!.apiKey, connection.apiKey, 'failed cleanup must retain the committed credential state');
-      assert.equal((legacy.get('connection') as StoredConnection).apiKey, connection.apiKey);
-      assert.equal(legacy.get('connectionEpoch'), 'E');
-    }
-    const fresh = new BrowserChatStore('cleanup-debt'); t.after(() => fresh.close());
-    assert.equal((await fresh.load()).connection!.apiKey, connection.apiKey);
-    idb.fail('none');
-    await writer.saveConnection(connection, { rememberCredentials: false });
-    assert.equal((legacy.get('connection') as StoredConnection).apiKey, undefined);
-    assert.equal((await writer.load()).connection!.apiKey, undefined);
-    assert.equal(writer.persistenceWarning, false);
-  });
-
-  it('honors a preceding queued load before saving on the same client', async (t) => {
-    const idb = installChatIndexedDB(t);
-    idb.databases.set('ordered-load:chat', new Map<string, unknown>([['connectionEpoch', 'current']]));
-    const store = new BrowserChatStore('ordered-load'); t.after(() => store.close());
-    const loading = store.load();
-    const saving = store.saveConnection(connection);
-    await Promise.all([loading, saving]);
-    assert.deepEqual(idb.databases.get('ordered-load:chat')!.get('connection'), connection);
-  });
-
-  it('honors a queued opt-out before a later deliberate save on the same client', async (t) => {
-    const idb = installChatIndexedDB(t);
-    const store = new BrowserChatStore('ordered-opt-out'); t.after(() => store.close());
-    await store.saveConnection(connection);
-    const forgetting = store.saveConnection(connection, { rememberCredentials: false });
-    const replacement = { ...connection, apiKey: 'new-authorized-queued-key' };
-    const saving = store.saveConnection(replacement);
-    await Promise.all([forgetting, saving]);
-    assert.deepEqual(idb.databases.get('ordered-opt-out:chat')!.get('connection'), replacement);
-    assert.equal(idb.versions.get('ordered-opt-out:chat'), 2);
-  });
-
-  it('keeps initial nonremembering setup available during an IndexedDB outage without fencing', async (t) => {
-    const idb = installChatIndexedDB(t);
-    idb.fail('open');
-    const legacy = new BrowserChatStore('initial-ram-legacy'); t.after(() => legacy.close());
-    await legacy.saveConnection(connection, { rememberCredentials: false });
-    assert.equal((await legacy.load()).connection!.apiKey, undefined);
-    assert.equal(legacy.persistenceWarning, true);
-    const profiles = new BrowserProfileStore('initial-ram-profiles'); t.after(() => profiles.close());
-    await profiles.initialize();
-    await profiles.storage(profiles.activeProfileId).saveConnection(connection, { rememberCredentials: false });
-    assert.equal(profiles.activeProfile.connection!.id, connection.id);
-    assert.equal(profiles.activeProfile.connection!.apiKey, undefined);
-    assert.equal(profiles.persistenceWarning, true);
-    assert.equal(idb.versions.size, 0, 'fresh RAM setup must not attempt a destructive upgrade');
-  });
-
-  it('keeps nonpersistent and failed-IDB setup saves in memory', async (t) => {
-    const idb = installChatIndexedDB(t);
-    const memory = new BrowserChatStore('memory-credentials', false); t.after(() => memory.close());
-    await memory.saveConnection(connection);
-    assert.deepEqual((await memory.load()).connection, connection);
-    assert.equal(memory.persistenceWarning, false);
-    assert.equal(idb.databases.has('memory-credentials:chat'), false);
-    const persisted = new BrowserChatStore('fallback-credentials'); t.after(() => persisted.close());
-    await persisted.load();
-    idb.fail('write');
-    await persisted.saveConnection(connection);
-    assert.deepEqual((await persisted.load()).connection, connection);
-    assert.equal(persisted.persistenceWarning, true);
-    assert.equal(idb.databases.get('fallback-credentials:chat')!.has('connection'), false);
   });
 });
 
@@ -368,7 +150,7 @@ describe('version fencing of deployed legacy v1 writers', () => {
     };
   }
 
-  for (const cleanup of ['opt-out', 'explicit', 'legacy-opt-out'] as const) {
+  for (const cleanup of ['opt-out', 'explicit'] as const) {
     it(`fences an actual old-v1-style writer before ${cleanup} succeeds and preserves unknown data`, async (t) => {
       const idb = installChatIndexedDB(t);
       const namespace = `old-v1-${cleanup}`;
@@ -383,11 +165,6 @@ describe('version fencing of deployed legacy v1 writers', () => {
       const pending = old.save(connection); // Its already-enqueued v1 transaction must drain first.
       if (cleanup === 'opt-out') await manager.storage(manager.activeProfileId).saveConnection(connection, { rememberCredentials: false });
       else if (cleanup === 'explicit') await manager.clearLegacyData();
-      else {
-        const updated = new BrowserChatStore(namespace); t.after(() => updated.close());
-        await updated.load();
-        await updated.saveConnection(connection, { rememberCredentials: false });
-      }
       assert.equal(await pending, true);
       assert.equal(old.failed, true, 'old compiled adapter must be fenced through its existing versionchange handler');
       assert.equal(idb.versions.get(`${namespace}:chat`), 2);
@@ -402,7 +179,7 @@ describe('version fencing of deployed legacy v1 writers', () => {
       const obsolete = await openStateDatabase(`${namespace}:chat`, { isClosed: () => false, onFailure: () => {}, onOpenError: (error) => { errorName = error?.name ?? ''; } });
       assert.equal(obsolete, undefined);
       assert.equal(errorName, 'VersionError', 'future fixed-v1 opens cannot restart the erased credential writer');
-      const current = new BrowserChatStore(namespace); t.after(() => current.close());
+      const current = await profileStorage(t, namespace); t.after(() => current.close());
       await current.load();
       await current.saveConnection({ ...connection, apiKey: 'new-updated-client-key' });
       assert.equal(idb.versions.get(`${namespace}:chat`), 2, 'normal operations must not repeatedly upgrade');

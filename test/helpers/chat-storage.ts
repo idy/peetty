@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import type { TestContext } from 'node:test';
 import type { ChatEntry } from '../../src/chat/types.ts';
-import type { ChatStorage, StoredChat, StoredConnection } from '../../src/chat/store.ts';
+import { boundedEntries, type ChatStorage, type StoredChat, type StoredConnection } from '../../src/chat/store.ts';
+import { BrowserProfileStore } from '../../src/chat/profiles.ts';
+import { applyEntryChanges, entryChanges } from '../../src/chat/history.ts';
+import { openStateDatabase, stateTransaction } from '../../src/chat/idb.ts';
 
 export class MemoryChatStorage implements ChatStorage {
   persistenceWarning = false;
@@ -22,6 +25,77 @@ export class MemoryChatStorage implements ChatStorage {
   }
   async clearEntries(): Promise<void> { this.state.entries = []; this.histories.push([]); }
   close(): void { this.closed = true; }
+}
+
+/** Production runtime tests use the actual single profile persistence engine. */
+export async function profileStorage(t: TestContext, namespace = 'test-profile', persist = true): Promise<ChatStorage> {
+  const manager = new BrowserProfileStore(namespace, persist);
+  t.after(() => manager.close());
+  await manager.initialize();
+  return manager.runtimeStorage(manager.activeProfileId);
+}
+
+/** Historical v1 fixture only: raw credentials are put unconditionally; version
+ * changes close the connection. It intentionally has none of the removed modern
+ * legacy credential state machine, recovery, opt-out or epoch authorization. */
+export class LegacyV1ChatFixture {
+  private readonly opening: Promise<IDBDatabase | undefined>;
+  private queue: Promise<void> = Promise.resolve();
+  private state: StoredChat = { entries: [] };
+  private snapshot: ChatEntry[] = [];
+  private epoch: string | undefined;
+  private failed = false;
+  private closed = false;
+  get persistenceWarning(): boolean { return this.failed; }
+  constructor(namespace: string) {
+    this.opening = openStateDatabase(`${namespace}:chat`, { isClosed: () => this.closed, onFailure: () => { this.failed = true; } });
+  }
+  private enqueue<T>(action: (db: IDBDatabase | undefined) => Promise<T>): Promise<T> {
+    const operation = this.queue.then(async () => action(this.failed ? undefined : await this.opening));
+    this.queue = operation.then(() => {}, () => {});
+    return operation;
+  }
+  load(): Promise<StoredChat> {
+    return this.enqueue(async (db) => {
+      if (!db) return structuredClone(this.state);
+      let epoch = ''; const state: StoredChat = { entries: [] };
+      const ok = await stateTransaction(db, false, (store) => {
+        const entries = store.get('entries'); entries.onsuccess = () => { state.entries = boundedEntries(entries.result); };
+        const connection = store.get('connection'); connection.onsuccess = () => { if (connection.result) state.connection = structuredClone(connection.result) as StoredConnection; };
+        const barrier = store.get('entriesEpoch'); barrier.onsuccess = () => { if (typeof barrier.result === 'string') epoch = barrier.result; };
+      });
+      if (ok) { this.state = state; this.epoch = epoch; this.snapshot = structuredClone(state.entries); }
+      else this.failed = true;
+      return structuredClone(this.state);
+    });
+  }
+  saveConnection(connection: StoredConnection): Promise<void> {
+    return this.enqueue(async (db) => {
+      this.state.connection = structuredClone(connection);
+      if (db && !await stateTransaction(db, true, (store) => { store.put(connection, 'connection'); })) this.failed = true;
+    });
+  }
+  saveEntries(entries: readonly ChatEntry[], changedIds?: readonly string[], sanitizeText?: (text: string) => string): Promise<void> {
+    const copy = boundedEntries(entries, sanitizeText);
+    return this.enqueue(async (db) => {
+      const changes = entryChanges(this.snapshot, copy, changedIds);
+      if (!db) { this.state.entries = copy; return; }
+      const ok = await stateTransaction(db, true, (store) => {
+        const barrier = store.get('entriesEpoch'); barrier.onsuccess = () => {
+          const epoch = typeof barrier.result === 'string' ? barrier.result : '';
+          const current = store.get('entries'); current.onsuccess = () => {
+            if (this.epoch !== undefined && this.epoch !== epoch) return;
+            this.epoch = epoch;
+            this.state.entries = boundedEntries(applyEntryChanges(boundedEntries(current.result), changes), sanitizeText);
+            store.put(this.state.entries, 'entries');
+          };
+        };
+      });
+      if (!ok) this.failed = true;
+      this.snapshot = copy;
+    });
+  }
+  close(): void { void this.queue.then(async () => { this.closed = true; (await this.opening)?.close(); }); }
 }
 
 /** Version-aware IDB seam: transactions serialize, closed connections reject new

@@ -1,6 +1,6 @@
 import type { Agent, AgentEvent, AgentTool, StreamFn } from '@earendil-works/pi-agent-core';
 import type { Message, Model, Usage } from '@earendil-works/pi-ai';
-import { boundedEntries, BrowserChatStore, ChatStorageError } from './store.ts';
+import { boundedEntries, ChatStorageError } from './store.ts';
 import { hasStoredCredentials, isCredentialHeader, normalizeBaseUrl, normalizeModelOptions as modelOptions, prepareSavedConnection, sameConnection, toStoredConnection } from './connections.ts';
 import { SecretRegistry } from './secrets.ts';
 import { equalEntry } from './history.ts';
@@ -164,10 +164,12 @@ export class ChatRuntime {
   private destroyed = false;
 
   constructor(options: ChatRuntimeOptions = {}) {
+    const storage = options.storage ?? options._testing?.storage;
+    if (!storage) throw new Error('ChatRuntime requires injected profile storage.');
     this.options = options;
     this.secrets = options.secrets ?? new SecretRegistry();
     this.ownsSecrets = options.secrets === undefined;
-    this.storage = options.storage ?? options._testing?.storage ?? new BrowserChatStore(options.chat?.storageKey ?? 'peetty', options.chat?.persist ?? true);
+    this.storage = storage;
     const session = options.session ?? (options.model ? { model: options.model, rememberKey: false } : undefined);
     if (session) {
       this.ownsSessionOverride = true;
@@ -297,6 +299,7 @@ export class ChatRuntime {
     const saved = await this.persist(async () => { committed = await this.storage.saveConnection(connection, {
       rememberCredentials: save.rememberKey, credentialsToForget,
       authenticationIntent: !save.rememberKey && (!!chosen.getApiKey || hasStoredCredentials(chosen)),
+      unresolvedAuthentication: !save.rememberKey && !!chosen.getApiKey,
     }) ?? connection; });
     if (!saved) return;
     // Bookkeeping tracks a committed save even if a newer SDK model now owns the session.

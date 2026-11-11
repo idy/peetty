@@ -3,7 +3,7 @@ import { describe, it, type TestContext } from 'node:test';
 import { Window } from 'happy-dom';
 import { createChatPanel, type ChatPanel } from '../src/chat/panel.ts';
 import type { PeettyChatOptions, PeettyModelOptions } from '../src/chat/types.ts';
-import { BrowserChatStore, ChatStorageError, type StoredConnection } from '../src/chat/store.ts';
+import { ChatStorageError, type StoredConnection } from '../src/chat/store.ts';
 import { ChatRuntime } from '../src/chat/runtime.ts';
 import { BrowserProfileStore, type ProfileRecord } from '../src/chat/profiles.ts';
 import type { Portrait } from '../src/figure/portrait.ts';
@@ -14,7 +14,7 @@ function savedConnection(storage: ReturnType<typeof installChatIndexedDB> | unde
   const directory = records?.get('directory') as { activeProfileId: string } | undefined;
   return (records?.get(`profile:${directory?.activeProfileId}`) as { profile: ProfileRecord } | undefined)?.profile.connection;
 }
-import { installChatIndexedDB } from './helpers/chat-storage.ts';
+import { installChatIndexedDB, LegacyV1ChatFixture } from './helpers/chat-storage.ts';
 import { deferred } from './helpers/pet-dom.ts';
 import { stubGlobals } from './helpers/stubs.ts';
 
@@ -654,7 +654,7 @@ describe('chat panel credential ownership', () => {
     it(`preserves the saved endpoint and key when the SDK injects a model ${loaded ? 'after' : 'before'} loading chat`, async (t) => {
       const storage = installChatIndexedDB(t);
       const saved = { id: 'saved-model', baseUrl: 'https://saved.example/v1', apiKey: 'fixture-saved-key' };
-      const seed = new BrowserChatStore('saved-connection');
+      const seed = new LegacyV1ChatFixture('saved-connection');
       await seed.saveConnection(saved);
       seed.close();
       const saves = t.mock.method(ChatRuntime.prototype, 'configure');
@@ -1101,7 +1101,13 @@ describe('chat panel live language changes', () => {
       const remember = query<HTMLInputElement>('[name="remember"]');
       remember.checked = false;
       query<HTMLFormElement>('.pc-setup').requestSubmit();
-      await eventually(() => query('.pc-setup').hidden === true);
+      if (available) await eventually(() => query('.pc-setup').hidden === true);
+      else {
+        await eventually(() => !query('.pc-error').hidden);
+        assert.equal(query('.pc-setup').hidden, false, 'unknown disk state must not report forgotten credentials');
+        assert.match(query('.pc-error').textContent!, /restore browser storage access/);
+        query<HTMLButtonElement>('.pc-settings').click(); // The injected session remains usable without claiming a saved change.
+      }
       assert.equal(query('.pc-setup').hidden, true);
       assert.equal(saves.mock.callCount(), 1);
       assert.equal(query('.pc-storage').hidden, available);

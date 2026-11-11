@@ -10,9 +10,9 @@ import { ChatRuntime } from '../src/chat/runtime.ts';
 import type { ChatRuntimeOptions } from '../src/chat/runtime.ts';
 import { SecretRegistry } from '../src/chat/secrets.ts';
 import type { StoredConnection, StoredSessionConnection } from '../src/chat/store.ts';
-import { BrowserChatStore, ChatStorageError } from '../src/chat/store.ts';
+import { ChatStorageError } from '../src/chat/store.ts';
 import type { ChatEntry } from '../src/chat/types.ts';
-import { installChatIndexedDB, MemoryChatStorage } from './helpers/chat-storage.ts';
+import { installChatIndexedDB, LegacyV1ChatFixture, MemoryChatStorage } from './helpers/chat-storage.ts';
 import { deferred } from './helpers/pet-dom.ts';
 
 const MODEL: StoredConnection = {
@@ -762,7 +762,7 @@ describe('owned clear failure recovery', () => {
       await manager.storage(id).saveEntries([copied]);
       const legacy = idb.databases.get(`${namespace}:chat`)!;
       legacy.set('entries', [copied, entry('uncopied', 'Old independent turn')]);
-      const old = new BrowserChatStore(namespace); t.after(() => old.close());
+      const old = new LegacyV1ChatFixture(namespace); t.after(() => old.close());
       const oldView = (await old.load()).entries;
       const seam = manager as unknown as { retireLegacy: (...args: unknown[]) => Promise<void> };
       const retire = seam.retireLegacy.bind(manager); let race = true;

@@ -1,7 +1,5 @@
 import { COMPANION_ACTIONS, type ChatEntry, type PeettyReasoningEffort } from './types.ts';
-import { hasStoredCredentials, isCredentialHeader, normalizeModelOptions, prepareSavedConnection } from './connections.ts';
-import { applyEntryChanges, entryChanges } from './history.ts';
-import { fenceLegacyDatabase, openStateDatabase, stateTransaction } from './idb.ts';
+import { isCredentialHeader } from './connections.ts';
 
 /** Setup saves only opted-in keys. Explicit complete backups may also restore provider headers. */
 export interface StoredConnection {
@@ -21,6 +19,7 @@ export interface ConnectionSaveOptions {
   rememberCredentials: boolean;
   credentialsToForget?: readonly StoredConnection[];
   authenticationIntent?: boolean;
+  unresolvedAuthentication?: boolean;
 }
 
 /** Remove only the intended secret values, independent of model/routing changes.
@@ -62,8 +61,8 @@ export interface StoredChat {
 
 /** Domain failures must not be mistaken for unavailable browser persistence. */
 export class ChatStorageError extends Error {
-  readonly code: 'missing-profile' | 'capacity' | 'stale-connection' | 'legacy-cleanup';
-  constructor(code: 'missing-profile' | 'capacity' | 'stale-connection' | 'legacy-cleanup', message: string) { super(message); this.code = code; this.name = 'ChatStorageError'; }
+  readonly code: 'missing-profile' | 'capacity' | 'stale-connection' | 'legacy-cleanup' | 'profile-delete';
+  constructor(code: 'missing-profile' | 'capacity' | 'stale-connection' | 'legacy-cleanup' | 'profile-delete', message: string) { super(message); this.code = code; this.name = 'ChatStorageError'; }
 }
 
 export interface HistoryProjection {
@@ -108,243 +107,4 @@ export function boundedEntries(value: unknown, sanitizeText: (text: string) => s
     remaining -= text.length;
   }
   return entries.reverse();
-}
-
-function connectionFrom(value: unknown): StoredConnection | undefined {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return;
-  const connection = value as StoredConnection;
-  try {
-    return normalizeModelOptions({
-      id: connection.id, baseUrl: connection.baseUrl,
-      ...(connection.provider !== undefined ? { provider: connection.provider } : {}),
-      ...(connection.apiKey !== undefined ? { apiKey: connection.apiKey } : {}),
-      ...(connection.headers !== undefined ? { headers: connection.headers } : {}),
-      ...(connection.nonCredentialHeaders !== undefined ? { nonCredentialHeaders: connection.nonCredentialHeaders } : {}),
-      ...(connection.tools !== undefined ? { tools: connection.tools } : {}),
-      ...(connection.effort !== undefined ? { effort: connection.effort } : {}),
-    });
-  } catch { return; }
-}
-
-/** IndexedDB failures switch this instance to memory; no localStorage key fallback. */
-export class BrowserChatStore implements ChatStorage {
-  private state: StoredChat = { entries: [] };
-  private snapshot: ChatEntry[] = [];
-  private epoch: string | undefined;
-  /** Independent from history: forgetting a key must not cancel an active reply. */
-  private connectionEpoch: string | undefined;
-  private connectionWriteGeneration = 0;
-  private authoredConnectionEpoch: string | undefined;
-  private observedCredentials = false;
-  private cleanupDebt: readonly StoredConnection[] | undefined;
-  private db: IDBDatabase | undefined;
-  private opening: Promise<IDBDatabase | undefined> | undefined;
-  private writes: Promise<void> = Promise.resolve();
-  private failed = false;
-  private closing = false;
-  private closed = false;
-
-  constructor(privateNamespace = 'peetty', persist = true) {
-    this.namespace = privateNamespace;
-    this.persist = persist;
-  }
-
-  private readonly namespace: string;
-  private readonly persist: boolean;
-
-  get persistenceWarning(): boolean { return this.failed; }
-
-  private fail(): void {
-    this.failed = true;
-    this.db?.close();
-    this.db = undefined;
-  }
-
-  private open(): Promise<IDBDatabase | undefined> {
-    if (!this.persist || this.failed || this.closed) return Promise.resolve(undefined);
-    if (this.db) return Promise.resolve(this.db);
-    if (this.opening) return this.opening;
-    this.opening = openStateDatabase(`${this.namespace}:chat`, {
-      isClosed: () => this.closed,
-      onFailure: () => this.fail(),
-      onReady: (db) => { this.db = db; },
-      onVersionChange: () => { this.db = undefined; this.opening = undefined; },
-    }, 'latest');
-    return this.opening;
-  }
-
-  private async transact(write: boolean, action: (store: IDBObjectStore) => void): Promise<boolean> {
-    const db = await this.open();
-    if (!db || this.closed) return false;
-    const ok = await stateTransaction(db, write, action);
-    if (!ok && !this.closed) this.fail();
-    return ok;
-  }
-
-  load(projection?: HistoryProjection): Promise<StoredChat> {
-    if (this.closing) return Promise.resolve(structuredClone(this.state));
-    return this.enqueue(async () => {
-      const restored: StoredChat = { entries: [] };
-      let rawEntries: unknown;
-      let epoch = '';
-      let connectionEpoch = '';
-      const ok = await this.transact(false, (store) => {
-        const connection = store.get('connection');
-        connection.onsuccess = () => {
-          const value = connectionFrom(connection.result);
-          if (value) restored.connection = value;
-        };
-        const entries = store.get('entries');
-        entries.onsuccess = () => { rawEntries = entries.result; };
-        const barrier = store.get('entriesEpoch');
-        barrier.onsuccess = () => { if (typeof barrier.result === 'string') epoch = barrier.result; };
-        const credentialBarrier = store.get('connectionEpoch');
-        credentialBarrier.onsuccess = () => { if (typeof credentialBarrier.result === 'string') connectionEpoch = credentialBarrier.result; };
-      });
-      projection?.registerConnections?.(ok ? restored : this.state);
-      if (ok) {
-        restored.entries = boundedEntries(rawEntries, projection?.sanitizeText);
-        this.state = restored; this.epoch = epoch; this.connectionEpoch = connectionEpoch;
-        this.observedCredentials ||= hasStoredCredentials(restored.connection);
-      } else this.state.entries = boundedEntries(this.state.entries, projection?.sanitizeText);
-      this.snapshot = structuredClone(this.state.entries);
-      return structuredClone(this.state);
-    });
-  }
-
-  private enqueue<T>(action: () => Promise<T>): Promise<T> {
-    const operation = this.writes.then(action);
-    this.writes = operation.then(() => {}, () => {});
-    return operation;
-  }
-
-  saveConnection(connection: StoredConnection, options?: ConnectionSaveOptions): Promise<StoredConnection | void> {
-    const copy = connectionFrom(connection);
-    if (!copy || this.closing) return Promise.resolve();
-    const requestEpoch = this.connectionEpoch;
-    const requestGeneration = this.connectionWriteGeneration;
-    const initialLoad = requestEpoch === undefined && !this.observedCredentials;
-    const suppliedSources = (options?.credentialsToForget ?? []).map(connectionFrom).filter((value): value is StoredConnection => !!value);
-    return this.enqueue(async () => {
-      // Only our own committed writes can authorize a later queued save to use a
-      // new epoch. A queued load observing a peer's opt-out cannot reauthorize K.
-      const expectedEpoch = this.connectionWriteGeneration > requestGeneration ? this.authoredConnectionEpoch ?? ''
-        : requestEpoch ?? (initialLoad ? this.connectionEpoch ?? '' : '');
-      const sources = [...this.cleanupDebt ?? [], ...suppliedSources,
-        ...(options?.rememberCredentials === false ? [copy, ...(this.state.connection ? [this.state.connection] : [])] : [])];
-      if (this.persist && options?.rememberCredentials === false && this.connectionEpoch === undefined && !this.failed) {
-        await this.transact(false, (store) => {
-          const request = store.get('connection');
-          request.onsuccess = () => { const current = connectionFrom(request.result); if (current) sources.push(current); };
-        });
-      }
-      const freshRAM = this.failed && !this.observedCredentials && !this.state.connection && !this.cleanupDebt;
-      const forget = this.persist && !freshRAM && (!!this.cleanupDebt || options?.rememberCredentials === false && (options.authenticationIntent || sources.some(hasStoredCredentials)));
-      let fenced: IDBDatabase | undefined;
-      if (forget) {
-        this.cleanupDebt = sources;
-        fenced = await fenceLegacyDatabase(`${this.namespace}:chat`, () => this.closed);
-        if (!fenced) throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
-      }
-      const retained = (known?: StoredConnection) => prepareSavedConnection(copy, known, options?.rememberCredentials);
-      let saved: StoredConnection | undefined = retained(this.state.connection);
-      let stale = false; let committedEpoch = expectedEpoch;
-      const write = (store: IDBObjectStore) => {
-        const barrier = store.get('connectionEpoch');
-        barrier.onsuccess = () => {
-          const currentEpoch = typeof barrier.result === 'string' ? barrier.result : '';
-          const request = store.get('connection');
-          request.onsuccess = () => {
-            const current = connectionFrom(request.result);
-            if (expectedEpoch !== currentEpoch) { stale = true; saved = current; return; }
-            saved = retained(current);
-            store.put(saved, 'connection');
-            if (options?.rememberCredentials === false) {
-              committedEpoch = Array.from(crypto.getRandomValues(new Uint32Array(4)), (part) => part.toString(36)).join('-');
-              store.put(committedEpoch, 'connectionEpoch');
-            }
-          };
-        };
-      };
-      let ok: boolean;
-      try { ok = fenced ? await stateTransaction(fenced, true, write) : await this.transact(true, write); }
-      finally { fenced?.close(); }
-      if (!ok && forget) {
-        // Retain committed credentials and cleanup debt. A retry must never turn
-        // a failed disk deletion into a successful credential-free RAM snapshot.
-        this.fail();
-        throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
-      }
-      if (saved) this.state.connection = saved;
-      else delete this.state.connection;
-      this.observedCredentials ||= hasStoredCredentials(saved);
-      if (ok && stale) throw new ChatStorageError('stale-connection', 'Connection settings changed. Reload before saving again.');
-      if (ok) {
-        this.connectionEpoch = committedEpoch;
-        this.authoredConnectionEpoch = committedEpoch;
-        this.connectionWriteGeneration++;
-        if (forget) { this.cleanupDebt = undefined; this.failed = false; this.opening = undefined; this.db?.close(); this.db = undefined; }
-      }
-      return saved ? structuredClone(saved) : undefined;
-    });
-  }
-
-  saveEntries(entries: readonly ChatEntry[], changedIds?: readonly string[], sanitizeText?: (text: string) => string): Promise<void> {
-    if (this.closing) return Promise.resolve();
-    const copy = boundedEntries(entries, sanitizeText);
-    const selected = changedIds === undefined ? undefined : [...changedIds];
-    return this.enqueue(async () => {
-      const changes = entryChanges(this.snapshot, copy, selected);
-      this.snapshot = copy;
-      let merged = boundedEntries(applyEntryChanges(this.state.entries, changes), sanitizeText);
-      let epoch = this.epoch;
-      const ok = await this.transact(true, (store) => {
-        const barrier = store.get('entriesEpoch');
-        barrier.onsuccess = () => {
-          const currentEpoch = typeof barrier.result === 'string' ? barrier.result : '';
-          const entries = store.get('entries');
-          entries.onsuccess = () => {
-            const current = boundedEntries(entries.result, sanitizeText);
-            if (epoch === undefined || epoch === currentEpoch) {
-              epoch = currentEpoch;
-              merged = boundedEntries(applyEntryChanges(current, changes));
-              store.put(merged, 'entries');
-            } else {
-              // Keep the old epoch until load(): late replies and repeated stale saves
-              // cannot adopt the clear barrier and write their old snapshot back.
-              merged = current;
-            }
-          };
-        };
-      });
-      if (ok) this.epoch = epoch;
-      this.state.entries = merged;
-    });
-  }
-
-  clearEntries(): Promise<void> {
-    if (this.closing) return Promise.resolve();
-    return this.enqueue(async () => {
-      // A separate record keeps the barrier even when the bounded history is empty.
-      const epoch = Array.from(crypto.getRandomValues(new Uint32Array(4)), (part) => part.toString(36)).join('-');
-      this.epoch = epoch;
-      this.snapshot = [];
-      this.state.entries = [];
-      await this.transact(true, (store) => {
-        store.put([], 'entries');
-        store.put(epoch, 'entriesEpoch');
-      });
-    });
-  }
-
-  close(): void {
-    if (this.closing) return;
-    this.closing = true;
-    // stop()/destroy() may just have queued a final partial-history save.
-    void this.writes.then(() => {
-      this.closed = true;
-      this.db?.close();
-      this.db = undefined;
-    });
-  }
 }

@@ -108,7 +108,7 @@ describe('explicit nonsecret header classification', () => {
         assert.throws(() => normalizeModelOptions({ ...base, headers: { [name]: value }, nonCredentialHeaders: [name] }));
       }
     }
-    for (const name of ['X-ClientToken', 'X-AuthToken', 'X-Token', 'X-InputTokensSecret', 'X-AccessTokens', 'X-Refresh-Tokens', 'X-ClientTokensCount', 'X-AuthTokensLimit', 'X-SecretTokensBudget']) {
+    for (const name of ['X-ClientToken', 'X-AuthToken', 'X-Token', 'X-InputTokensSecret', 'X-AccessTokens', 'X-Refresh-Tokens', 'X-ClientTokensCount', 'X-AuthTokensLimit', 'X-SecretTokensBudget', 'X-API-Tokens', 'X-ApiTokens', 'API-Tokens', 'X-Subscription-Tokens', 'X-SasTokens', 'X-PAT-Tokens', 'X-ID-Tokens', 'X-SSO-Tokens']) {
       assert.throws(() => normalizeModelOptions({ ...base, headers: { [name]: '42' }, nonCredentialHeaders: [name] }));
     }
   });

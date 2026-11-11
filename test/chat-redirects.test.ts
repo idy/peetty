@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createServer, type RequestListener } from 'node:http';
 import { describe, it, type TestContext } from 'node:test';
 import { ChatRuntime, fetchModelList } from '../src/chat/runtime.ts';
+import { MemoryChatStorage } from './helpers/chat-storage.ts';
 
 async function endpoint(t: TestContext, handler: RequestListener): Promise<string> {
   const server = createServer(handler);
@@ -61,7 +62,7 @@ describe('endpoint redirect boundaries', () => {
     });
     const runtime = new ChatRuntime({
       model: { id: 'model', baseUrl: source, apiKey: 'bearer-secret', headers: { 'x-api-key': 'chat-secret' } },
-      chat: { persist: false },
+      chat: { persist: false }, storage: new MemoryChatStorage(),
     });
     t.after(() => runtime.destroy());
     await runtime.send('A private conversation for the configured endpoint.');

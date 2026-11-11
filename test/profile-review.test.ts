@@ -8,12 +8,12 @@ import type { TestContext } from 'node:test';
 import type { Figure } from '../src/figure/types.ts';
 import { BrowserProfileStore, PROFILE_LIMITS } from '../src/chat/profiles.ts';
 import type { BackupDownloadFile, BackupSession, MemoryEntry, ProfileRecord } from '../src/chat/profiles.ts';
-import { BrowserChatStore, boundedEntries } from '../src/chat/store.ts';
+import { boundedEntries } from '../src/chat/store.ts';
 import { ChatRuntime } from '../src/chat/runtime.ts';
 import { IDB_OPEN_TIMEOUT_MS, IDB_TRANSACTION_TIMEOUT_MS, openStateDatabase, stateTransaction } from '../src/chat/idb.ts';
 import type { StoredConnection } from '../src/chat/store.ts';
 import type { ChatEntry } from '../src/chat/types.ts';
-import { installChatIndexedDB } from './helpers/chat-storage.ts';
+import { installChatIndexedDB, LegacyV1ChatFixture } from './helpers/chat-storage.ts';
 
 const entry = (id: string, text = id, createdAt = 1): ChatEntry => ({ id, role: 'user', text, createdAt });
 const fact = (id: string, text = id): MemoryEntry => ({ id, text, createdAt: 1, updatedAt: 2, manual: true });
@@ -108,17 +108,7 @@ describe('archive mutation regressions', () => {
     assert.deepEqual((await writer.load()).entries, [entry('fresh')]);
   });
 
-  it('shares masked merges with the legacy store while retaining direct merge and history bounds', async (t) => {
-    installChatIndexedDB(t);
-    const legacy = new BrowserChatStore('legacy-mask'); t.after(() => legacy.close());
-    await legacy.saveEntries([entry('kept')]); await legacy.load();
-    await legacy.saveEntries([entry('kept', 'unmarked edit'), entry('new')], ['new']);
-    assert.deepEqual((await legacy.load()).entries, [entry('kept'), entry('new')]);
-    await legacy.saveEntries([entry('kept', 'direct edit')]);
-    assert.deepEqual((await legacy.load()).entries, [entry('kept', 'direct edit'), entry('new')]);
-    await legacy.saveEntries(Array.from({ length: 250 }, (_, i) => entry(`bounded-${i}`)));
-    assert.equal((await legacy.load()).entries.length, 200);
-  });
+
 });
 
 describe('saved and ephemeral connection regressions', () => {
@@ -144,7 +134,7 @@ describe('saved and ephemeral connection regressions', () => {
     assert.deepEqual((await adapter.load()).connection!.headers, { 'openai-project': '2' });
   });
 
-  it('honors explicit credential removal for both stores and never persists fresh SDK headers', async (t) => {
+  it('honors explicit profile credential removal and never persists fresh SDK headers', async (t) => {
     const idb = installChatIndexedDB(t);
     const manager = await store(t);
     const id = manager.activeProfileId;
@@ -154,11 +144,7 @@ describe('saved and ephemeral connection regressions', () => {
     const restoredId = manager.activeProfileId;
     await manager.storage(restoredId).saveConnection({ ...connection, headers: { authorization: 'Bearer restored', 'openai-project': '1' } }, { rememberCredentials: false });
     assert.deepEqual(manager.storedConnection(restoredId), { id: connection.id, baseUrl: connection.baseUrl, headers: { 'openai-project': '1' } });
-    idb.databases.set('legacy-credentials:chat', new Map([['connection', { ...connection, baseUrl: 'https://example.test/v1/models', headers: { authorization: 'Bearer restored', 'openai-project': '1' } }]]));
-    const legacy = new BrowserChatStore('legacy-credentials'); t.after(() => legacy.close());
-    await legacy.load();
-    await legacy.saveConnection({ ...connection, headers: { authorization: 'Bearer restored', 'openai-project': '1' } }, { rememberCredentials: false });
-    assert.deepEqual((await legacy.load()).connection, { id: connection.id, baseUrl: connection.baseUrl, headers: { 'openai-project': '1' } });
+
   });
 
   it('preserves saved connections and every distinct RAM session through successive complete backups', async (t) => {
@@ -1258,7 +1244,7 @@ describe('fresh legacy privacy barriers and abortable download preflight', () =>
         const legacy = new Map<string, unknown>([['entries', [entry('old')]], ['connection', connection]]);
         if (initialEpoch) legacy.set('entriesEpoch', initialEpoch);
         idb.databases.set(`${namespace}:chat`, legacy);
-        const stale = new BrowserChatStore(namespace); t.after(() => stale.close());
+        const stale = new LegacyV1ChatFixture(namespace); t.after(() => stale.close());
         const snapshot = (await stale.load()).entries;
         const manager = await store(t, namespace);
         if (removal === 'explicit') await manager.clearLegacyData();
@@ -1350,7 +1336,7 @@ describe('legacy active-work and empty-sentinel lifecycle', () => {
       const legacy = new Map<string, unknown>([['entries', original], ['connection', connection]]);
       if (epoch) legacy.set('entriesEpoch', epoch);
       idb.databases.set(`${namespace}:chat`, legacy);
-      const active = new BrowserChatStore(namespace); t.after(() => active.close());
+      const active = new LegacyV1ChatFixture(namespace); t.after(() => active.close());
       const snapshot = (await active.load()).entries;
       const reopened = await store(t, namespace);
       assert.deepEqual(legacy.get('entries'), original, 'partial automatic retirement must keep the full source history');
@@ -1368,33 +1354,6 @@ describe('legacy active-work and empty-sentinel lifecycle', () => {
       assert.notEqual(legacy.get('entriesEpoch'), epoch);
     });
   }
-
-  it('invalidates a pending first setup save when only durable history provenance authorizes cleanup', async (t) => {
-    const idb = installChatIndexedDB(t);
-    const namespace = 'history-proof-only';
-    const manager = await store(t, namespace);
-    const copied = entry('copied');
-    // Model a restart after the destination was cleared and cleanup interrupted:
-    // only the committed hash proof remains, never the raw source or credentials.
-    idb.databases.get(`${namespace}:profiles`)!.set('legacyMigration', { version: 1, entries: [jsonFingerprint(copied)], connections: [] });
-    const legacy = new Map<string, unknown>([['entries', [copied]]]);
-    idb.databases.set(`${namespace}:chat`, legacy);
-    const stale = new BrowserChatStore(namespace); t.after(() => stale.close());
-    await stale.load();
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    t.after(() => release());
-    (stale as unknown as { writes: Promise<void> }).writes = gate;
-    const saving = stale.saveConnection(connection);
-    const reopened = await store(t, namespace);
-    assert.deepEqual(reopened.activeProfile.entries, []);
-    assertLegacyRetired(legacy);
-    assert.equal(typeof legacy.get('connectionEpoch'), 'string');
-    release();
-    await assert.rejects(saving, /Reload before saving/u);
-    assert.equal(legacy.has('connection'), false);
-    assert.equal(manager.activeProfile.connection, undefined);
-  });
 
   it('treats barrier-only legacy state after a memory-only cleanup as pristine for a maximum restore', async (t) => {
     const idb = installChatIndexedDB(t);
@@ -1427,7 +1386,7 @@ describe('explicit privacy cleanup of partially migrated history', () => {
       await first.storage(id).saveEntries([copied]);
       const legacy = idb.databases.get(`${namespace}:chat`)!;
       legacy.set('entries', [copied, uncopied]); legacy.set('entriesEpoch', 'active-history');
-      const old = new BrowserChatStore(namespace); t.after(() => old.close());
+      const old = new LegacyV1ChatFixture(namespace); t.after(() => old.close());
       const snapshot = (await old.load()).entries;
       const manager = await store(t, namespace);
       assert.deepEqual(legacy.get('entries'), [copied, uncopied]);
@@ -1457,12 +1416,22 @@ describe('destructive cleanup races and credential-value provenance', () => {
       if (operation === 'delete-profile') await manager.create({ name: 'Keep' });
       const legacy = idb.databases.get(`${namespace}:chat`)!;
       legacy.set('entries', [copied, uncopied]); legacy.set('entriesEpoch', 'old');
-      const old = new BrowserChatStore(namespace); t.after(() => old.close());
+      const old = new LegacyV1ChatFixture(namespace); t.after(() => old.close());
       const snapshot = (await old.load()).entries;
       const seam = manager as unknown as { retireLegacy: (...args: unknown[]) => Promise<void> };
       const retire = seam.retireLegacy.bind(manager); let inject = true;
       t.mock.method(seam, 'retireLegacy', async (...args: unknown[]) => {
-        if (inject && args[2] !== 'automatic') { inject = false; await old.saveEntries([...snapshot, concurrent]); }
+        if (inject && args[2] !== 'automatic') {
+          inject = false;
+          if (operation === 'delete-profile') {
+            // The v1 adapter was correctly fenced already. Model a concurrent
+            // latest-version source writer without inventing a production one.
+            const writer = await openStateDatabase(`${namespace}:chat`, { isClosed: () => false, onFailure: () => {} }, 'latest');
+            assert.ok(writer);
+            try { assert.equal(await stateTransaction(writer, true, (store) => { store.put([...snapshot, concurrent], 'entries'); }), true); }
+            finally { writer.close(); }
+          } else await old.saveEntries([...snapshot, concurrent]);
+        }
         return retire(...args);
       });
       const perform = () => operation === 'clear' ? manager.storage(id).clearEntries()
@@ -1554,11 +1523,124 @@ describe('destructive cleanup races and credential-value provenance', () => {
       assert.equal(fresh.storedConnection(id)!.apiKey, connection.apiKey);
     }
     abort = false; idb.fail('none');
-    await runtime.configure(runtime.model!, false);
-    assert.equal(manager.storedConnection(id)!.apiKey, undefined);
+    await assert.rejects(runtime.configure(runtime.model!, false), { code: 'legacy-cleanup' });
+    assert.equal(manager.storedConnection(id)!.apiKey, connection.apiKey);
+    assert.equal(manager.persistenceWarning, true, 'sticky RAM fallback requires reload, never a hidden warning reset');
+    const reloaded = await store(t, 'profile-cleanup-debt');
+    const replacement = new ChatRuntime({ storage: reloaded.runtimeStorage(id) }); t.after(() => replacement.destroy());
+    await replacement.initialize(); await replacement.configure(replacement.model!, false);
+    assert.equal(reloaded.storedConnection(id)!.apiKey, undefined);
     assert.equal((idb.databases.get('profile-cleanup-debt:profiles')!.get(`profile:${id}`) as { profile: ProfileRecord }).profile.connection!.apiKey, undefined);
+    assert.equal(replacement.rememberKey, false);
+  });
+});
+
+describe('single production persistence boundary and durable privacy operations', () => {
+  for (const failure of ['write', 'put', 'commit'] as const) {
+    it(`rejects profile deletion after a ${failure} failure and preserves committed profile, selection and session`, async (t) => {
+      const idb = installChatIndexedDB(t);
+      const namespace = `durable-remove-${failure}`;
+      const manager = await store(t, namespace);
+      await manager.restore(document([profile('target', { connection, entries: [entry('saved')] })], [
+        { profileId: 'target', connection: { ...connection, apiKey: 'session-key' }, rememberKey: false },
+      ]));
+      const id = manager.activeProfileId; const before = manager.profiles;
+      const sessions = (await manager.storage(id).load()).sessionConnections;
+      const seam = manager as unknown as { reconcileLegacy: (...args: unknown[]) => Promise<void> };
+      const reconcile = seam.reconcileLegacy.bind(manager);
+      t.mock.method(seam, 'reconcileLegacy', async (...args: unknown[]) => {
+        await reconcile(...args); if (args[1] === 'profile') idb.fail(failure);
+      });
+      await assert.rejects(manager.remove(id), { code: 'profile-delete' });
+      assert.deepEqual(manager.profiles, before);
+      assert.equal(manager.activeProfileId, id);
+      assert.deepEqual((await manager.storage(id).load()).sessionConnections, sessions);
+      idb.fail('none');
+      const reopened = await store(t, namespace);
+      assert.deepEqual(reopened.profiles, before);
+      assert.equal(reopened.storedConnection(id)!.apiKey, connection.apiKey);
+    });
+  }
+
+  it('permits explicit memory-only profile removal without implying a persistent deletion', async (t) => {
+    const manager = await store(t, 'ram-remove', false);
+    const target = await manager.create({ name: 'RAM target' });
+    await manager.storage(target.id).saveConnection(connection);
+    await manager.remove(target.id);
+    assert.equal(manager.profileInfo(target.id), undefined);
+    assert.equal(manager.listProfiles().length, 1);
     assert.equal(manager.persistenceWarning, false);
-    assert.equal(runtime.rememberKey, false);
+  });
+
+  it('rejects credential saves after an unknown persistent read while preserving session-only configuration', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const namespace = 'unknown-persistent-connection';
+    const committed = await store(t, namespace);
+    const committedId = committed.activeProfileId;
+    await committed.storage(committedId).saveConnection(connection);
+    const before = structuredClone(idb.databases.get(`${namespace}:profiles`));
+    idb.fail('open');
+    const unknown = await store(t, namespace);
+    const runtime = new ChatRuntime({ model: { ...connection, apiKey: 'session-only-new-key' }, storage: unknown.runtimeStorage(unknown.activeProfileId) });
+    t.after(() => runtime.destroy());
+    await runtime.initialize();
+    await runtime.setModel({ ...connection, id: 'session-remains-usable', apiKey: 'session-only-new-key' });
+    assert.equal(runtime.model!.id, 'session-remains-usable');
+    await assert.rejects(runtime.configure(runtime.model!, false), { code: 'legacy-cleanup' });
+    assert.equal(unknown.activeProfile.connection, undefined);
+    assert.deepEqual(idb.databases.get(`${namespace}:profiles`), before);
+    assert.equal(runtime.model!.apiKey, 'session-only-new-key');
+    idb.fail('none');
+    await assert.rejects(runtime.configure(runtime.model!, false), { code: 'legacy-cleanup' });
+    assert.deepEqual(idb.databases.get(`${namespace}:profiles`), before);
+    const reopened = await store(t, namespace);
+    assert.equal(reopened.storedConnection(committedId)!.apiKey, connection.apiKey);
+  });
+
+  it('retains unsaved RAM history and its warning across failed credential saves and retries', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const namespace = 'sticky-ram-history';
+    const manager = await store(t, namespace); const id = manager.activeProfileId;
+    await manager.storage(id).saveConnection(connection);
+    idb.fail('write');
+    const unsaved = entry('unsaved-turn', 'An important turn not yet on disk');
+    await manager.storage(id).saveEntries([unsaved]);
+    assert.equal(manager.persistenceWarning, true);
+    assert.deepEqual(manager.historyPage(id, '', 10).entries, [unsaved]);
+    idb.fail('none');
+    const runtime = new ChatRuntime({ storage: manager.runtimeStorage(id) }); t.after(() => runtime.destroy());
+    await runtime.initialize();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await assert.rejects(runtime.configure(runtime.model!, false), { code: 'legacy-cleanup' });
+      assert.deepEqual(runtime.entries, [unsaved]);
+      assert.deepEqual(manager.historyPage(id, '', 10).entries, [unsaved]);
+      assert.equal(manager.persistenceWarning, true);
+    }
+    const disk = idb.databases.get(`${namespace}:profiles`)!.get(`profile:${id}`) as { profile: ProfileRecord };
+    assert.deepEqual(disk.profile.entries, []);
+    assert.equal(disk.profile.connection!.apiKey, connection.apiKey);
+    assert.deepEqual(decode(await manager.backup()).profiles[0]!.entries, [unsaved], 'unsaved turns remain exportable');
+  });
+
+  it('does not mistake unrelated known C for identification of an unresolved callback legacy key K', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const namespace = 'unresolved-callback-residue';
+    const manager = await store(t, namespace); const id = manager.activeProfileId;
+    await manager.storage(id).saveConnection({ ...connection, apiKey: 'known-C' });
+    const legacy = idb.databases.get(`${namespace}:chat`)!;
+    legacy.set('connection', { ...connection, id: 'independent-legacy-model', apiKey: 'unresolved-K' });
+    let resolved = 0;
+    const runtime = new ChatRuntime({ model: { id: connection.id, baseUrl: connection.baseUrl, getApiKey: () => { resolved++; return 'unresolved-K'; } }, storage: manager.runtimeStorage(id) });
+    t.after(() => runtime.destroy()); await runtime.initialize();
+    await assert.rejects(runtime.configure(runtime.model!, false), { code: 'legacy-cleanup' });
+    assert.equal(resolved, 0);
+    assert.equal((legacy.get('connection') as StoredConnection).apiKey, 'unresolved-K');
+    assert.equal(manager.storedConnection(id)!.apiKey, 'known-C');
+    await manager.clearLegacyData();
+    await runtime.configure(runtime.model!, false);
+    assert.equal(resolved, 0);
+    assert.equal(manager.storedConnection(id)!.apiKey, undefined);
+    assert.equal(legacy.has('connection'), false);
   });
 });
 

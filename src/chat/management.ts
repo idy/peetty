@@ -4,6 +4,7 @@ import type { BackupDownloadFile, BrowserProfileStore, MemoryEntry, ProfileInfo 
 import type { ChatEntry, CompanionAction } from './types.ts';
 import { COPY as CHAT_COPY } from './copy.ts';
 import { PROFILE_LIMITS } from './limits.ts';
+import { ChatStorageError } from './store.ts';
 
 const HISTORY_PREVIEW_CHARS = 4_000;
 
@@ -48,6 +49,7 @@ const COPY = {
     legacyTitle: 'Previous-format data', legacyHint: 'Preserve pending work and upgrade pages running older Peetty releases before cleanup. Old clients stop saving; reloading a page pinned to an old version will not restore saving. This removes previous-format chat and key copies while keeping current profiles, conversations and connections.',
     clearLegacy: 'Delete previous-format copies', confirmLegacy: 'Permanently delete old chat and key copies', legacyCleared: 'Previous-format copies deleted. Current profiles are kept.',
     legacyFailed: 'Could not complete cleanup. Close other Peetty tabs, check browser storage, and try again.',
+    profileDeleteFailed: 'Could not delete this profile from browser storage. Your profile has been kept. Export unsaved changes before reloading to restore storage access, then retry.',
     restore: 'Restore backup', restoreHint: 'Restore creates independent profiles and keeps your existing data. Select the backup file, or all files of a multipart backup together. Connections are used only after you start chatting.',
     memoryTitle: 'Import and export memory', memoryHint: 'Only the selected profile’s memories. Source messages, conversation history and API keys are omitted.',
     exportMemory: 'Download memory JSON', exportMarkdown: 'Download memory Markdown', importMemory: 'Import memory JSON',
@@ -76,6 +78,7 @@ const COPY = {
     legacyTitle: '旧格式数据', legacyHint: '清理前请先保留旧版 Peetty 网页中尚未保存的内容，并升级这些网页。旧版客户端将停止保存，刷新仍固定使用旧版的网页不能恢复保存功能。此操作删除旧格式聊天与密钥副本，当前档案、聊天和模型连接都会保留。',
     clearLegacy: '删除旧格式副本', confirmLegacy: '永久删除旧聊天与密钥副本', legacyCleared: '旧格式副本已删除，当前档案已保留。',
     legacyFailed: '暂时无法完成清理。请关闭其他 Peetty 标签页，并确认浏览器存储可用后重试。',
+    profileDeleteFailed: '暂时无法从浏览器存储删除档案。当前档案已保留，请先导出尚未保存的数据，再刷新页面恢复存储访问后重试。',
     restore: '恢复备份', restoreHint: '恢复为独立的新档案，保留现有数据。请选择备份文件，分卷备份需一次选中全部文件。只有你开始聊天后才会使用恢复的连接。',
     memoryTitle: '导入与导出记忆', memoryHint: '只包含当前档案的记忆，不包含来源消息、聊天历史或 API Key。',
     exportMemory: '下载记忆 JSON', exportMarkdown: '下载记忆 Markdown', importMemory: '导入记忆 JSON',
@@ -352,7 +355,10 @@ export function createManagement(options: Options) {
     const focus = captureFocus();
     captureDrafts(); say('working'); lockControls();
     try { await action(); if (!destroyed) say(typeof success === 'function' ? success() : success); }
-    catch { if (!destroyed) say(failure, true); }
+    catch (error) {
+      if (!destroyed) say(error instanceof ChatStorageError && error.code === 'profile-delete' ? 'profileDeleteFailed'
+        : error instanceof ChatStorageError && error.code === 'legacy-cleanup' ? 'legacyFailed' : failure, true);
+    }
     finally {
       try {
         // Authoritative exports can discover that a peer deleted the selected profile.

@@ -3,7 +3,6 @@ import { describe, it } from 'node:test';
 import type { TestContext } from 'node:test';
 import { BrowserProfileStore } from '../src/chat/profiles.ts';
 import type { MemoryEntry, ProfileRecord } from '../src/chat/profiles.ts';
-import { BrowserChatStore } from '../src/chat/store.ts';
 import type { StoredConnection } from '../src/chat/store.ts';
 import type { ChatEntry } from '../src/chat/types.ts';
 import { installChatIndexedDB as indexedDBFixture } from './helpers/chat-storage.ts';
@@ -26,12 +25,8 @@ async function rejects(operation: () => unknown) {
 describe('browser profile persistence', () => {
   it('migrates legacy history and keys once without applying runtime history bounds', async (t) => {
     const idb = indexedDBFixture(t);
-    const legacy = new BrowserChatStore('migration');
-    await legacy.saveConnection(connection);
-    await legacy.saveEntries([entry('legacy')]);
-    legacy.close();
     const history = Array.from({ length: 230 }, (_, i) => entry(`old-${i}`));
-    idb.databases.get('migration:chat')!.set('entries', history);
+    idb.databases.set('migration:chat', new Map<string, unknown>([['entries', history], ['connection', connection]]));
     const first = new BrowserProfileStore('migration');
     t.after(() => first.close());
     await first.initialize({ name: 'Legacy pet', figure: 'koharu', personality: 'Be curious.' });
@@ -207,12 +202,13 @@ describe('browser profile persistence', () => {
       const writesBefore = idb.writes.length;
       if (failure !== 'open') idb.fail(failure);
       await adapter.saveEntries([entry('kept')]);
-      await adapter.saveConnection(connection);
+      await assert.rejects(adapter.saveConnection(connection), { code: 'legacy-cleanup' });
       await manager.saveMemory(id, { text: 'Kept in memory' });
       assert.equal(manager.persistenceWarning, true);
       assert.equal(adapter.persistenceWarning, true);
       assert.deepEqual((await adapter.load()).entries, [entry('kept')]);
-      assert.equal(decode(await manager.backup()).profiles[0]!.connection!.apiKey, connection.apiKey);
+      assert.equal(decode(await manager.backup()).profiles[0]!.connection, undefined);
+      assert.equal(manager.activeProfile.memories[0]!.text, 'Kept in memory');
       assert.deepEqual(idb.databases.get(`failed-${failure}:profiles`), persistedBefore);
       assert.equal(idb.writes.length, writesBefore);
     });

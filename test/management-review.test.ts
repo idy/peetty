@@ -6,6 +6,7 @@ import { COPY as CHAT_COPY } from '../src/chat/copy.ts';
 import { COMPANION_ACTIONS } from '../src/chat/types.ts';
 import { BrowserProfileStore, type BackupDownloadFile } from '../src/chat/profiles.ts';
 import { PROFILE_LIMITS } from '../src/chat/limits.ts';
+import { ChatStorageError } from '../src/chat/store.ts';
 import type { Language } from '../src/pet/i18n.ts';
 import type { Figure } from '../src/figure/types.ts';
 import { installChatIndexedDB } from './helpers/chat-storage.ts';
@@ -440,6 +441,25 @@ describe('management list position and keyboard focus', () => {
 });
 
 describe('management profile ownership', () => {
+  it('reports failed persistent profile deletion without claiming the profile was removed', async (t) => {
+    installChatIndexedDB(t);
+    const ui = await mount(t, { seed: async (store) => {
+      const first = store.activeProfileId;
+      await store.create({ name: 'Another profile' });
+      await store.select(first);
+    } });
+    const before = ui.store.activeProfile;
+    t.mock.method(ui.store, 'remove', async () => {
+      throw new ChatStorageError('profile-delete', 'Could not delete this profile. Restore browser storage and try again.');
+    });
+    ui.tab('profile'); ui.click('Delete profile'); ui.click('Confirm deletion'); await flush();
+    assert.deepEqual(ui.store.activeProfile, before);
+    assert.equal(ui.store.listProfiles().length, 2);
+    assert.match(ui.query('.pc-manage-status').textContent!, /Your profile has been kept/);
+    assert.equal(ui.query('.pc-manage-status').hasAttribute('data-error'), true);
+    ui.language('zh');
+    assert.match(ui.query('.pc-manage-status').textContent!, /当前档案已保留/);
+  });
   it('saves only edited profile fields and preserves unrelated peer edits', async (t) => {
     installChatIndexedDB(t);
     const namespace = `management-peer-edit-${crypto.randomUUID()}`;
