@@ -282,13 +282,14 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
     return Limits(left, right, top, bottom);
   }
 
-  /// The safe-area insets that overlap the host, in host coordinates.
+  /// The safe-area insets that overlap the host, in host coordinates: the safe
+  /// band's edges are mapped into the host, so scaled hosts measure consistently.
   (double, double) _insets(RenderBox host) {
     final screen = _screen;
     if (screen == null) return (0, 0);
-    final top = host.localToGlobal(Offset.zero).dy;
-    final bottom = top + host.size.height;
-    return (math.max(0.0, _padding.top - top), math.max(0.0, bottom - (screen.height - _padding.bottom)));
+    final safeTop = host.globalToLocal(Offset(0, _padding.top)).dy;
+    final safeBottom = host.globalToLocal(Offset(0, screen.height - _padding.bottom)).dy;
+    return (math.max(0.0, safeTop), math.max(0.0, host.size.height - safeBottom));
   }
 
   List<Perch> _scan(RenderBox host) {
@@ -610,8 +611,9 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
         onPointerDown: _onPointer,
         onPointerUp: _onPointerGone,
         onPointerCancel: _onPointerGone,
+        // Opaque with translucent behavior reports exactly what its children hit, so the
+        // host stays in the hit-test path (a non-opaque region always reports a miss).
         child: MouseRegion(
-          opaque: false,
           hitTestBehavior: HitTestBehavior.translucent,
           onExit: _onPointerGone,
           child: Stack(

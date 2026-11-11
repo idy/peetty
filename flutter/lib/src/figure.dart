@@ -62,7 +62,13 @@ const maxShapesPerPart = 64;
 const maxPathLength = 20000;
 const maxPaletteEntries = 64;
 const maxGradients = 64;
-const maxClips = 64;
+
+/// Path data and shapes parsed for one figure, together: the counterpart of the
+/// web validator's 2 MB `maxBytes` budget, charged before each path is built.
+const maxGeometry = 2000000;
+
+/// Each shape costs at least this much of [maxGeometry], so many tiny shapes add up too.
+const _shapeCost = 32;
 const maxGradientStops = 16;
 final _pathData = RegExp(r'^[MmLlHhVvCcSsQqTtAaZz0-9eE.,\s+-]*$');
 
@@ -97,9 +103,18 @@ class RadialFigureGradient extends FigureGradient {
 }
 
 /// One drawn shape with its paint; the geometry is parsed once.
+/// One subpath flattened to a polyline: lines keep their exact vertices and
+/// curves are split into a bounded number of chords. Used to hit-test strokes.
+class Contour {
+  const Contour(this.points, this.closed);
+  final List<Offset> points;
+  final bool closed;
+}
+
 class FigureShape {
   FigureShape({
     required this.path,
+    this.outline = const [],
     this.fill,
     this.stroke,
     this.strokeWidth = 1,
@@ -110,6 +125,9 @@ class FigureShape {
   });
 
   final Path path;
+
+  /// The path's subpaths as polylines, for stroke hit testing.
+  final List<Contour> outline;
   final String? fill;
   final String? stroke;
   final double strokeWidth;
@@ -129,17 +147,7 @@ class FigureSpring {
 }
 
 class FigurePart {
-  const FigurePart({
-    required this.id,
-    required this.bone,
-    required this.z,
-    required this.shapes,
-    this.slot,
-    this.pivot,
-    this.spring,
-    this.look,
-    this.clip,
-  });
+  const FigurePart({required this.id, required this.bone, required this.z, required this.shapes, this.slot, this.pivot, this.spring, this.look, this.clip});
 
   final String id;
   final Bone bone;
@@ -153,13 +161,7 @@ class FigurePart {
 }
 
 class FigureBehavior {
-  const FigureBehavior({
-    this.weights = const {},
-    this.walkSpeed = 1,
-    this.jumpPower = 1,
-    this.idleProp = 'none',
-    this.fallProp = 'none',
-  });
+  const FigureBehavior({this.weights = const {}, this.walkSpeed = 1, this.jumpPower = 1, this.idleProp = 'none', this.fallProp = 'none'});
 
   final Map<FigureState, double> weights;
   final double walkSpeed;
@@ -210,8 +212,7 @@ class Figure {
   double get unit => viewBox.height / animationHeight;
 
   /// Display name for a language code such as `zh`, falling back to English.
-  String name([String language = 'en']) =>
-      names[language] ?? names['en'] ?? names[''] ?? (names.isEmpty ? 'Peetty' : names.values.first);
+  String name([String language = 'en']) => names[language] ?? names['en'] ?? names[''] ?? (names.isEmpty ? 'Peetty' : names.values.first);
 
   /// Parses a figure from decoded JSON. Only rig figures are supported.
   factory Figure.fromJson(Object? json) {
@@ -243,14 +244,14 @@ class Figure {
     }
 
     final clips = <String, Path>{};
+    final budget = _Budget();
     final clipsJson = _obj(f['clips'] ?? const {}, 'clips');
-    if (clipsJson.length > maxClips) throw const FigureFormatException('clips has more than $maxClips entries');
     for (final MapEntry(:key, :value) in clipsJson.entries) {
       // A geometric union, as an SVG clipPath combines its children; appending
       // contours to one nonzero path would cancel overlaps of opposite winding.
       Path? union;
       for (final shape in _shapeList(value, 'clips.$key')) {
-        final path = _geometry(_obj(shape, 'clips.$key[]'), 'clips.$key');
+        final (path, _) = _geometry(_obj(shape, 'clips.$key[]'), 'clips.$key', budget);
         union = union == null ? path : Path.combine(PathOperation.union, union, path);
       }
       clips[key] = union!;
@@ -260,7 +261,7 @@ class Figure {
     final partsJson = _list(f['parts'], 'parts');
     if (partsJson.isEmpty || partsJson.length > maxParts) throw const FigureFormatException('parts needs 1–$maxParts parts');
     for (var i = 0; i < partsJson.length; i++) {
-      parts.add(_part(_obj(partsJson[i], 'parts[$i]'), 'parts[$i]', clips));
+      parts.add(_part(_obj(partsJson[i], 'parts[$i]'), 'parts[$i]', clips, budget));
     }
     // Stable sort by z, like Array.prototype.sort.
     final indexed = [for (var i = 0; i < parts.length; i++) (i, parts[i])]
@@ -285,7 +286,16 @@ class Figure {
   }
 }
 
-FigurePart _part(Map<String, Object?> p, String at, Map<String, Path> clips) {
+class _Budget {
+  int left = maxGeometry;
+
+  void charge(int cost, String at) {
+    left -= math.max(cost, _shapeCost);
+    if (left < 0) throw FigureFormatException('$at: the figure exceeds the geometry budget of $maxGeometry');
+  }
+}
+
+FigurePart _part(Map<String, Object?> p, String at, Map<String, Path> clips, _Budget budget) {
   final boneName = _string(p['bone'], '$at.bone');
   final bone = Bone.values.where((b) => b.name == boneName).firstOrNull;
   if (bone == null) throw FigureFormatException('$at.bone is not a standard bone');
@@ -309,56 +319,82 @@ FigurePart _part(Map<String, Object?> p, String at, Map<String, Path> clips) {
             limit: _optionalNumber(spring['limit']),
             hang: _optionalNumber(spring['hang']),
           ),
-    shapes: [for (final shape in _shapeList(p['shapes'], '$at.shapes')) _shape(_obj(shape, '$at.shapes[]'), '$at.shapes')],
+    shapes: [for (final shape in _shapeList(p['shapes'], '$at.shapes')) _shape(_obj(shape, '$at.shapes[]'), '$at.shapes', budget)],
   );
 }
 
-FigureShape _shape(Map<String, Object?> s, String at) => FigureShape(
-      path: _geometry(s, at),
-      fill: _optionalString(s['fill'], '$at.fill'),
-      stroke: _optionalString(s['stroke'], '$at.stroke'),
-      strokeWidth: _optionalNumber(s['strokeWidth']) ?? 1,
-      opacity: _optionalNumber(s['opacity']),
-      lineCap: switch (s['lineCap']) { 'butt' => StrokeCap.butt, 'square' => StrokeCap.square, _ => StrokeCap.round },
-      lineJoin: switch (s['lineJoin']) { 'miter' => StrokeJoin.miter, 'bevel' => StrokeJoin.bevel, _ => StrokeJoin.round },
-      blend: switch (s['blend']) {
-        'multiply' => BlendMode.multiply,
-        'screen' => BlendMode.screen,
-        'overlay' => BlendMode.overlay,
-        _ => BlendMode.srcOver,
-      },
-    );
+FigureShape _shape(Map<String, Object?> s, String at, _Budget budget) {
+  final (path, outline) = _geometry(s, at, budget);
+  return FigureShape(
+    path: path,
+    outline: outline,
+    fill: _optionalString(s['fill'], '$at.fill'),
+    stroke: _optionalString(s['stroke'], '$at.stroke'),
+    strokeWidth: _optionalNumber(s['strokeWidth']) ?? 1,
+    opacity: _optionalNumber(s['opacity']),
+    lineCap: switch (s['lineCap']) {
+      'butt' => StrokeCap.butt,
+      'square' => StrokeCap.square,
+      _ => StrokeCap.round,
+    },
+    lineJoin: switch (s['lineJoin']) {
+      'miter' => StrokeJoin.miter,
+      'bevel' => StrokeJoin.bevel,
+      _ => StrokeJoin.round,
+    },
+    blend: switch (s['blend']) {
+      'multiply' => BlendMode.multiply,
+      'screen' => BlendMode.screen,
+      'overlay' => BlendMode.overlay,
+      _ => BlendMode.srcOver,
+    },
+  );
+}
 
-Path _geometry(Map<String, Object?> s, String at) {
+(Path, List<Contour>) _geometry(Map<String, Object?> s, String at, _Budget budget) {
   switch (s['type']) {
     case 'path':
       final d = _string(s['d'], '$at.d');
       if (d.length > maxPathLength || !_pathData.hasMatch(d)) {
         throw FigureFormatException('$at.d must be SVG path data of at most $maxPathLength characters');
       }
-      final path = Path();
+      budget.charge(d.length, at);
+      final writer = _PathWriter();
       try {
-        writeSvgPathDataToPath(d, _PathWriter(path));
+        writeSvgPathDataToPath(d, writer);
       } on StateError catch (e) {
         throw FigureFormatException('$at.d: ${e.message}');
       }
-      return path;
+      return (writer.path, writer.finish());
     case 'ellipse':
+      budget.charge(_shapeCost, at);
       final cx = _number(s['cx'], '$at.cx');
       final cy = _number(s['cy'], '$at.cy');
-      final oval = Path()
-        ..addOval(Rect.fromCenter(center: Offset(cx, cy), width: _number(s['rx'], '$at.rx') * 2, height: _number(s['ry'], '$at.ry') * 2));
+      final rx = _number(s['rx'], '$at.rx'), ry = _number(s['ry'], '$at.ry');
+      final oval = Path()..addOval(Rect.fromCenter(center: Offset(cx, cy), width: rx * 2, height: ry * 2));
       final rotate = _optionalNumber(s['rotate']) ?? 0;
-      if (rotate == 0) return oval;
       final r = rotate * math.pi / 180;
       final cos = math.cos(r), sin = math.sin(r);
+      final outline = [
+        Contour([
+          for (var i = 0; i < 48; i++)
+            if ((rx * math.cos(i * math.pi / 24), ry * math.sin(i * math.pi / 24)) case (final x, final y))
+              Offset(cx + x * cos - y * sin, cy + x * sin + y * cos),
+        ], true),
+      ];
+      if (rotate == 0) return (oval, outline);
       // rotate(deg cx cy) as a column-major 4x4 matrix.
-      return oval.transform(Float64List.fromList([
-        cos, sin, 0, 0, //
-        -sin, cos, 0, 0,
-        0, 0, 1, 0,
-        cx - cos * cx + sin * cy, cy - sin * cx - cos * cy, 0, 1,
-      ]));
+      return (
+        oval.transform(
+          Float64List.fromList([
+            cos, sin, 0, 0, //
+            -sin, cos, 0, 0,
+            0, 0, 1, 0,
+            cx - cos * cx + sin * cy, cy - sin * cx - cos * cy, 0, 1,
+          ]),
+        ),
+        outline,
+      );
     default:
       throw FigureFormatException('$at.type must be "path" or "ellipse"');
   }
@@ -375,11 +411,11 @@ FigureGradient _gradient(Map<String, Object?> g, String at) {
   return switch (g['type']) {
     'linear' => LinearFigureGradient(_point(g['from'], '$at.from'), _point(g['to'], '$at.to'), stops),
     'radial' => RadialFigureGradient(
-        _point(g['center'], '$at.center'),
-        _positive(g['radius'], '$at.radius'),
-        g['focus'] == null ? null : _point(g['focus'], '$at.focus'),
-        stops,
-      ),
+      _point(g['center'], '$at.center'),
+      _positive(g['radius'], '$at.radius'),
+      g['focus'] == null ? null : _point(g['focus'], '$at.focus'),
+      stops,
+    ),
     _ => throw FigureFormatException('$at.type must be "linear" or "radial"'),
   };
 }
@@ -401,17 +437,62 @@ FigureBehavior _behavior(Object? json) {
   );
 }
 
+/// Builds the path and records its subpaths as polylines.
 class _PathWriter extends PathProxy {
-  _PathWriter(this.path);
-  final Path path;
+  final path = Path();
+  final _contours = <Contour>[];
+  List<Offset>? _points;
+  Offset _start = Offset.zero;
+  Offset _pen = Offset.zero;
+
+  void _end({bool closed = false}) {
+    if (_points case final points? when points.isNotEmpty) _contours.add(Contour(points, closed));
+    _points = null;
+  }
+
+  /// Drawing after a close (or before any move) continues from the subpath's start, as in SVG.
+  List<Offset> get _current => _points ??= [_pen];
+
+  List<Contour> finish() {
+    _end();
+    return _contours;
+  }
+
   @override
-  void moveTo(double x, double y) => path.moveTo(x, y);
+  void moveTo(double x, double y) {
+    path.moveTo(x, y);
+    _end();
+    _start = _pen = Offset(x, y);
+    _points = [_pen];
+  }
+
   @override
-  void lineTo(double x, double y) => path.lineTo(x, y);
+  void lineTo(double x, double y) {
+    path.lineTo(x, y);
+    _current.add(_pen = Offset(x, y));
+  }
+
   @override
-  void cubicTo(double x1, double y1, double x2, double y2, double x3, double y3) => path.cubicTo(x1, y1, x2, y2, x3, y3);
+  void cubicTo(double x1, double y1, double x2, double y2, double x3, double y3) {
+    path.cubicTo(x1, y1, x2, y2, x3, y3);
+    final points = _current;
+    final p0 = _pen, p1 = Offset(x1, y1), p2 = Offset(x2, y2), p3 = Offset(x3, y3);
+    // A bounded number of chords per curve, from its control polygon's length.
+    final hull = (p1 - p0).distance + (p2 - p1).distance + (p3 - p2).distance;
+    final n = (hull / 4).ceil().clamp(2, 16);
+    for (var i = 1; i <= n; i++) {
+      final t = i / n, u = 1 - t;
+      points.add(p0 * (u * u * u) + p1 * (3 * u * u * t) + p2 * (3 * u * t * t) + p3 * (t * t * t));
+    }
+    _pen = p3;
+  }
+
   @override
-  void close() => path.close();
+  void close() {
+    path.close();
+    _end(closed: true);
+    _pen = _start;
+  }
 }
 
 Map<String, Object?> _obj(Object? v, String at) {

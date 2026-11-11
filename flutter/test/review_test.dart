@@ -88,6 +88,50 @@ void main() {
     expect(view.hitTest(const Offset(50, 70)), isFalse);
   });
 
+  group('stroke hit testing', () {
+    FigureController line(String d, {String cap = 'butt', String join = 'miter'}) => FigureController(Figure.fromJson(
+          _tiny(shape: {'type': 'path', 'd': d, 'stroke': 'ink', 'strokeWidth': 10, 'lineCap': cap, 'lineJoin': join}),
+        ))
+          ..step(0);
+
+    test('stays bounded for very long strokes', () {
+      final view = line('M0 50 L1000000000 50');
+      final watch = Stopwatch()..start();
+      expect(view.hitTest(const Offset(50, 53)), isTrue);
+      expect(view.hitTest(const Offset(50, 60)), isFalse);
+      expect(watch.elapsedMilliseconds, lessThan(200));
+    });
+
+    test('matches butt, square and round caps', () {
+      expect(line('M20 50 L80 50').hitTest(const Offset(78, 50)), isTrue);
+      expect(line('M20 50 L80 50').hitTest(const Offset(83, 50)), isFalse);
+      expect(line('M20 50 L80 50', cap: 'square').hitTest(const Offset(84, 54)), isTrue);
+      expect(line('M20 50 L80 50', cap: 'round').hitTest(const Offset(84, 54)), isFalse);
+      expect(line('M20 50 L80 50', cap: 'round').hitTest(const Offset(84, 50)), isTrue);
+    });
+
+    test('matches miter, bevel and round joins', () {
+      const tip = Offset(50, 11);
+      expect(line('M20 80 L50 20 L80 80').hitTest(tip), isTrue);
+      expect(line('M20 80 L50 20 L80 80', join: 'bevel').hitTest(tip), isFalse);
+      expect(line('M20 80 L50 20 L80 80', join: 'round').hitTest(tip), isFalse);
+    });
+  });
+
+  test('enforces an aggregate geometry budget but accepts many small clips', () {
+    final big = _tiny();
+    final d = 'M0 0${' L1 1' * 3800}';
+    final part = {'id': 'p', 'bone': 'body', 'z': 0, 'shapes': List.filled(64, {'type': 'path', 'd': d, 'fill': 'ink'})};
+    big['parts'] = List.filled(9, part);
+    expect(() => Figure.fromJson(big), throwsA(isA<FigureFormatException>()));
+    final clips = _tiny(extra: {
+      'clips': {
+        for (var i = 0; i < 65; i++) 'c$i': [{'type': 'ellipse', 'cx': 50, 'cy': 50, 'rx': 5, 'ry': 5}],
+      },
+    });
+    expect(Figure.fromJson(clips).clips, hasLength(65));
+  });
+
   Widget host({required Widget child, Figure? figure, bool visible = true}) => Directionality(
         textDirection: TextDirection.ltr,
         child: Peetty(figureData: figure ?? _miru, random: _seeded(), visible: visible, child: child),
@@ -153,6 +197,47 @@ void main() {
     final state = _state(tester);
     expect(await _until(tester, () => state.action != FigureState.fall && state.position != null), isTrue);
     expect(state.position!.dy, 400);
+  });
+
+  testWidgets('safe-area insets are measured in a scaled host', (tester) async {
+    await tester.pumpWidget(MediaQuery(
+      data: const MediaQueryData(size: Size(800, 600), padding: EdgeInsets.only(bottom: 34)),
+      child: Directionality(
+        textDirection: TextDirection.ltr,
+        child: Stack(children: [
+          Positioned(
+            left: 0,
+            top: 300,
+            width: 800,
+            height: 400,
+            // 800x400 at half scale: it ends at y = 500 on screen, clear of the inset.
+            child: Transform.scale(
+              scale: 0.5,
+              alignment: Alignment.topLeft,
+              child: Peetty(figureData: _miru, random: _seeded(), child: const SizedBox.expand()),
+            ),
+          ),
+        ]),
+      ),
+    ));
+    final state = _state(tester);
+    expect(await _until(tester, () => state.action != FigureState.fall && state.position != null), isTrue);
+    expect(state.position!.dy, 400);
+  });
+
+  testWidgets('the host reports what its children hit, keeping siblings below out', (tester) async {
+    await tester.pumpWidget(Directionality(
+      textDirection: TextDirection.ltr,
+      child: Stack(children: [
+        const ColoredBox(key: ValueKey('below'), color: Colors.black, child: SizedBox.expand()),
+        Peetty(figureData: _miru, random: _seeded(), child: const ColoredBox(color: Colors.white, child: SizedBox.expand())),
+      ]),
+    ));
+    await tester.pump();
+    final path = tester.hitTestOnBinding(const Offset(20, 20)).path.map((e) => e.target).toList();
+    final listener = tester.renderObject(find.descendant(of: find.byType(Peetty), matching: find.byType(Listener)).first);
+    expect(path, contains(listener));
+    expect(path, isNot(contains(tester.renderObject(find.byKey(const ValueKey('below'))))));
   });
 
   testWidgets('a hidden companion schedules no frames', (tester) async {

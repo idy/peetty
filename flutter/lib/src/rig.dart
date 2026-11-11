@@ -13,6 +13,9 @@ const _soulRadius = 22.0;
 const _soulRise = Offset(58, -96);
 const _soulMouth = 9.0;
 
+/// The canvas default, and SVG's: sharper miter joins are drawn beveled.
+const _miterLimit = 4.0;
+
 /// Fallback order when a figure does not draw a requested slot state.
 const _slotFallbacks = <String, List<String>>{
   'eyes:closed': ['eyes:open'],
@@ -104,7 +107,6 @@ class Rig {
   final _available = <String>{};
   final _slots = <String, String>{};
   final _shaders = <String, ui.Shader>{};
-  final _outlines = Expando<List<Offset>>();
   late final Offset _mouth;
   Offset _look = Offset.zero;
   Map<Bone, Affine> _world = {};
@@ -214,31 +216,91 @@ class Rig {
     final stroke = _paint(shape.stroke);
     if (fill == null && stroke == null) return false;
     final half = stroke == null ? 0.0 : shape.strokeWidth / 2;
-    if (!shape.path.getBounds().inflate(half + 0.5).contains(local)) return false;
+    // Miter joins reach up to the miter limit; square caps reach a corner.
+    final reach = half * (shape.lineJoin == ui.StrokeJoin.miter ? _miterLimit : math.sqrt2);
+    if (!shape.path.getBounds().inflate(reach + 0.5).contains(local)) return false;
     if (fill != null && shape.path.contains(local)) return true;
-    return stroke != null && _nearOutline(shape, local, half + 0.5);
+    return stroke != null && half > 0 && _onStroke(shape, local, half);
   }
 
-  /// Whether [local] lies within [reach] of the shape's outline, sampled once per shape.
-  bool _nearOutline(FigureShape shape, Offset local, double reach) {
-    final samples = _outlines[shape] ??= _sampleOutline(shape.path, math.max(0.5, shape.strokeWidth / 4));
-    final limit = reach * reach;
-    for (final p in samples) {
-      final d = p - local;
-      if (d.dx * d.dx + d.dy * d.dy <= limit) return true;
+  /// Whether [p] lies in the painted stroke: each segment's band, the caps at
+  /// open ends and the joins between segments, as the canvas strokes them.
+  static bool _onStroke(FigureShape shape, Offset p, double h) {
+    for (final contour in shape.outline) {
+      final points = _distinct(contour);
+      final closed = contour.closed && points.length > 2;
+      final n = points.length;
+      if (n < 2) continue;
+      final segments = closed ? n : n - 1;
+      for (var i = 0; i < segments; i++) {
+        final a = points[i], b = points[(i + 1) % n];
+        final d = b - a;
+        final length = d.distance;
+        final u = d / length;
+        final t = _dot(p - a, u);
+        final square = !closed && shape.lineCap == ui.StrokeCap.square;
+        final before = square && i == 0 ? h : 0.0;
+        final after = square && i == segments - 1 ? h : 0.0;
+        if (t >= -before && t <= length + after && _cross(u, p - a).abs() <= h) return true;
+      }
+      if (!closed && shape.lineCap == ui.StrokeCap.round) {
+        if ((p - points.first).distance <= h || (p - points.last).distance <= h) return true;
+      }
+      for (var i = closed ? 0 : 1; i < (closed ? n : n - 1); i++) {
+        final previous = points[(i - 1 + n) % n], vertex = points[i], next = points[(i + 1) % n];
+        if (_inJoin(shape.lineJoin, previous, vertex, next, p, h)) return true;
+      }
     }
     return false;
   }
 
-  static List<Offset> _sampleOutline(Path path, double spacing) {
-    final points = <Offset>[];
-    for (final metric in path.computeMetrics()) {
-      for (var d = 0.0; d <= metric.length; d += spacing) {
-        if (metric.getTangentForOffset(d) case final t?) points.add(t.position);
+  /// Consecutive repeated points removed, including a closing point equal to the start.
+  static List<Offset> _distinct(Contour contour) {
+    final out = <Offset>[];
+    for (final point in contour.points) {
+      if (out.isEmpty || (point - out.last).distanceSquared > 1e-12) out.add(point);
+    }
+    if (contour.closed && out.length > 1 && (out.first - out.last).distanceSquared <= 1e-12) out.removeLast();
+    return out;
+  }
+
+  static bool _inJoin(ui.StrokeJoin join, Offset previous, Offset vertex, Offset next, Offset p, double h) {
+    if (join == ui.StrokeJoin.round) return (p - vertex).distance <= h;
+    final d1 = (vertex - previous) / (vertex - previous).distance;
+    final d2 = (next - vertex) / (next - vertex).distance;
+    final turn = _cross(d1, d2);
+    if (turn.abs() < 1e-9) return false;
+    // The outer side of the corner, where the stroke needs filling in.
+    final side = turn > 0 ? -1.0 : 1.0;
+    final n1 = Offset(-d1.dy, d1.dx) * side, n2 = Offset(-d2.dy, d2.dx) * side;
+    final a = vertex + n1 * h, b = vertex + n2 * h;
+    if (join == ui.StrokeJoin.miter) {
+      final bisector = n1 + n2;
+      final cosHalf = _dot(bisector / bisector.distance, n1);
+      if (cosHalf > 0 && 1 / cosHalf <= _miterLimit) {
+        final tip = vertex + bisector / bisector.distance * (h / cosHalf);
+        return _inConvex([vertex, a, tip, b], p);
       }
     }
-    return points;
+    return _inConvex([vertex, a, b], p);
   }
+
+  static bool _inConvex(List<Offset> polygon, Offset p) {
+    var sign = 0.0;
+    for (var i = 0; i < polygon.length; i++) {
+      final c = _cross(polygon[(i + 1) % polygon.length] - polygon[i], p - polygon[i]);
+      if (c.abs() < 1e-9) continue;
+      if (sign == 0) {
+        sign = c.sign;
+      } else if (c.sign != sign) {
+        return false;
+      }
+    }
+    return sign != 0;
+  }
+
+  static double _dot(Offset a, Offset b) => a.dx * b.dx + a.dy * b.dy;
+  static double _cross(Offset a, Offset b) => a.dx * b.dy - a.dy * b.dx;
 
   void _drawShape(Canvas canvas, FigureShape shape) {
     final fill = _paint(shape.fill);
