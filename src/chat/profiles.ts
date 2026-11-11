@@ -414,7 +414,6 @@ export class BrowserProfileStore {
   private failed = false;
   private legacyProof: LegacyProof | undefined;
   private readonly cleanupDebt = new Map<string, CleanupDebt>();
-  private readonly connectionCommits = new Map<string, { revision: number; epoch: string }>();
   private connectionReadKnown = false;
   private reconcilingLegacy = false;
   private legacyReconciliation: Promise<void> | undefined;
@@ -544,9 +543,6 @@ export class BrowserProfileStore {
     return result;
   }
 
-  private connectionCommitted(profileId: string, epoch: string): void {
-    this.connectionCommits.set(profileId, { revision: (this.connectionCommits.get(profileId)?.revision ?? 0) + 1, epoch });
-  }
   private ready(): void { check(this.initialized, 'Initialize profile storage first.'); }
   private queued<T>(selection: readonly string[], write: boolean, action: (draft: Draft) => T, privacyMutation = false): Promise<T> {
     return this.enqueue(async () => {
@@ -804,7 +800,6 @@ export class BrowserProfileStore {
           const updated = { ...cached, connectionEpoch: epoch };
           delete updated.unresolvedCleanup;
           this.state.records.set(profileId, updated);
-          this.connectionCommitted(profileId, epoch);
         }
       }
       this.legacyProof = undefined;
@@ -901,7 +896,7 @@ export class BrowserProfileStore {
       const source = await this.run([profileId], false, (draft) => {
         const record = getRecord(draft, profileId);
         check(draft.directory.ids.length > 1, 'Cannot remove the last profile.');
-        return { connection: record.profile.connection, unresolvedCleanup: record.unresolvedCleanup };
+        return { connection: record.profile.connection, connectionEpoch: record.connectionEpoch ?? '', unresolvedCleanup: record.unresolvedCleanup };
       });
       if (this.persist && this.failed) throw new ChatStorageError('profile-delete', 'Could not delete this profile. Restore browser storage and try again.');
       const pending = this.cleanupDebt.get(profileId);
@@ -910,9 +905,9 @@ export class BrowserProfileStore {
       await this.reconcileLegacy(true, 'profile', credentials, unresolvedAuthentication);
       let committed: State | undefined;
       const session = this.sessions.get(profileId);
-      await this.run([profileId], true, (draft) => {
+      const removed = await this.run([profileId], true, (draft) => {
         const current = getRecord(draft, profileId);
-        if (current.unresolvedCleanup !== source.unresolvedCleanup) throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
+        if (current.unresolvedCleanup !== source.unresolvedCleanup || (current.connectionEpoch ?? '') !== source.connectionEpoch) return false;
         check(draft.directory.ids.length > 1, 'Cannot remove the last profile.');
         committed = { directory: { ...draft.directory, ids: [...draft.directory.ids] }, records: new Map(draft.records) };
         useBootstrap(draft, profileId);
@@ -921,14 +916,15 @@ export class BrowserProfileStore {
         draft.records.delete(profileId);
         draft.dirty.add(profileId);
         draft.directoryDirty = true;
+        return true;
       });
       if (this.persist && this.failed) {
         if (committed) this.state = committed;
         if (session) this.sessions.set(profileId, session);
         throw new ChatStorageError('profile-delete', 'Could not delete this profile. Restore browser storage and try again.');
       }
+      if (!removed) throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
       this.cleanupDebt.delete(profileId);
-      this.connectionCommits.delete(profileId);
       this.sessions.delete(profileId);
     });
   }
@@ -943,6 +939,14 @@ export class BrowserProfileStore {
     let snapshot: ChatEntry[] = this.state.records.get(profileId)?.profile.entries ?? [];
     if (runtime) snapshot = runtimeWindow(snapshot).originals;
     let epoch = this.state.records.get(profileId)?.epoch;
+    // Manager refreshes are shared; authorization belongs to the connection
+    // this particular adapter exposed, not to unrelated history/cache activity.
+    let observedConnectionEpoch = this.state.records.get(profileId)?.connectionEpoch ?? '';
+    let connectionRevision = 0;
+    let authoredConnectionEpoch = observedConnectionEpoch;
+    const connectionCommitted = (epoch: string) => {
+      observedConnectionEpoch = epoch; authoredConnectionEpoch = epoch; connectionRevision++;
+    };
     let closing = false;
     const manager = this;
     return {
@@ -960,6 +964,7 @@ export class BrowserProfileStore {
           entries = window.entries;
         } else { snapshot = record.profile.entries; entries = clone(sanitizeEntries(snapshot, projection?.sanitizeText)); }
         epoch = record.epoch;
+        if (projection?.observeConnection !== false) observedConnectionEpoch = record.connectionEpoch ?? '';
         return { entries, ...connections };
       }),
       ensureCapacity: (additionalEntries) => this.queued([profileId], false, (draft) => {
@@ -972,8 +977,8 @@ export class BrowserProfileStore {
         const supplied = options?.credentialsToForget?.map((source) => connectionFrom(source, false)) ?? [];
         // Submission owns this authorization snapshot, even while initialize or
         // another manager operation is ahead of it in the queue.
-        const requestEpoch = this.state.records.get(profileId)?.connectionEpoch ?? '';
-        const requestRevision = this.connectionCommits.get(profileId)?.revision ?? 0;
+        const requestEpoch = observedConnectionEpoch;
+        const requestRevision = connectionRevision;
         return this.enqueue(async () => {
           this.ready();
           const pending = this.cleanupDebt.get(profileId);
@@ -981,8 +986,7 @@ export class BrowserProfileStore {
           // contain unsaved turns. Credential retry must never reload over that
           // archive or clear its warning; require a fresh manager after recovery.
           let previous: StoredConnection | undefined;
-          const ownCommit = this.connectionCommits.get(profileId);
-          let connectionEpoch = ownCommit && ownCommit.revision > requestRevision ? ownCommit.epoch : requestEpoch;
+          let connectionEpoch = connectionRevision > requestRevision ? authoredConnectionEpoch : requestEpoch;
           let unresolvedCleanup: string | undefined;
           let observedEpoch = '';
           try { previous = await this.run([profileId], false, (draft) => {
@@ -996,6 +1000,7 @@ export class BrowserProfileStore {
             throw error;
           }
           this.connectionReadKnown = !this.persist || !this.failed;
+          if (this.connectionReadKnown) observedConnectionEpoch = observedEpoch;
           const sources = [...pending?.credentials ?? [], ...supplied, ...(previous ? [previous] : []), ...(options?.rememberCredentials === false ? [copy] : [])];
           const unresolvedAuthentication = !!unresolvedCleanup && pending?.intent !== unresolvedCleanup
             || pending?.unresolvedAuthentication === true || options?.unresolvedAuthentication === true;
@@ -1017,7 +1022,7 @@ export class BrowserProfileStore {
             const intent = freshId(); const epoch = freshId();
             const checkpointed = await this.run([profileId], true, (draft) => {
               const record = getRecord(draft, profileId);
-              if ((record.connectionEpoch ?? '') !== connectionEpoch) return false;
+              if ((record.connectionEpoch ?? '') !== connectionEpoch) { observedConnectionEpoch = record.connectionEpoch ?? ''; return false; }
               draft.records.set(profileId, { ...record, connectionEpoch: epoch, unresolvedCleanup: intent });
               draft.dirty.add(profileId);
               useBootstrap(draft, profileId);
@@ -1027,13 +1032,16 @@ export class BrowserProfileStore {
             if (!checkpointed) throw new ChatStorageError('stale-connection', 'Connection settings changed. Reload before saving again.');
             unresolvedCleanup = intent; connectionEpoch = epoch;
             this.cleanupDebt.set(profileId, { credentials: sources, unresolvedAuthentication, intent });
-            this.connectionCommitted(profileId, epoch);
+            connectionCommitted(epoch);
           }
           await this.reconcileLegacy(true, forget ? 'credentials' : 'automatic', sources, unresolvedAuthentication);
           let baseline = previous;
           const result = await this.run([profileId], true, (draft) => {
             const current = getRecord(draft, profileId);
-            if ((current.connectionEpoch ?? '') !== connectionEpoch || current.unresolvedCleanup !== unresolvedCleanup) return { stale: true as const };
+            if ((current.connectionEpoch ?? '') !== connectionEpoch || current.unresolvedCleanup !== unresolvedCleanup) {
+              observedConnectionEpoch = current.connectionEpoch ?? '';
+              return { stale: true as const };
+            }
             baseline = current.profile.connection;
             const known = this.sessions.get(profileId)?.at(-1)?.connection ?? baseline;
             const saved = prepareSavedConnection(copy, known, options?.rememberCredentials);
@@ -1060,7 +1068,7 @@ export class BrowserProfileStore {
             }
             throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
           }
-          if (!this.persist || !this.failed) this.connectionCommitted(profileId, this.state.records.get(profileId)?.connectionEpoch ?? '');
+          if (!this.persist || !this.failed) connectionCommitted(this.state.records.get(profileId)?.connectionEpoch ?? '');
           this.cleanupDebt.delete(profileId);
           this.sessions.delete(profileId);
           return saved;

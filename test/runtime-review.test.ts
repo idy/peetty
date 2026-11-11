@@ -80,6 +80,27 @@ function createRuntime(t: TestContext, options: ChatRuntimeOptions): ChatRuntime
 }
 
 describe('runtime archive and credential regressions', () => {
+  it('does not let a history refresh reauthorize a remembered key after a peer opts out', async (t) => {
+    installRuntimeFixture(t);
+    const namespace = 'runtime-history-consent-owner';
+    const manager = await profileStore(t, namespace); const id = manager.activeProfileId;
+    await manager.storage(id).saveConnection(MODEL, { rememberCredentials: true });
+    const provider = scripted({ message: assistant('Visit-only reply.') });
+    const runtime = createRuntime(t, { storage: manager.runtimeStorage(id), _testing: { streamFn: provider.streamFn } });
+    await runtime.initialize();
+    assert.equal(runtime.model!.apiKey, MODEL.apiKey);
+    assert.equal(runtime.rememberKey, true);
+    const peer = await profileStore(t, namespace);
+    await peer.storage(id).saveConnection(MODEL, { rememberCredentials: false });
+    await runtime.send('Refresh the conversation while preserving the visit connection.');
+    assert.equal(provider.calls.length, 1);
+    assert.equal(runtime.model!.apiKey, MODEL.apiKey, 'the current visit can keep using its connection');
+    assert.equal(manager.storedConnection(id)!.apiKey, undefined, 'history operations may observe peer state without granting new consent');
+    await assert.rejects(runtime.configure(runtime.model!, runtime.rememberKey), { code: 'stale-connection' });
+    assert.equal(manager.storedConnection(id)!.apiKey, undefined, 'stale settings must not restore the key');
+    await runtime.configure(MODEL, true);
+    assert.equal(manager.storedConnection(id)!.apiKey, MODEL.apiKey, 'one fresh explicit confirmation can authorize saving again');
+  });
   for (const ending of ['success', 'provider error'] as const) {
     it(`preserves restored archive text clipped by entry and total budgets after runtime.send ${ending}`, async (t) => {
       installRuntimeFixture(t);

@@ -227,8 +227,9 @@ export class ChatRuntime {
     return restored;
   }
 
-  private loadHistory(): Promise<StoredChat> {
+  private loadHistory(observeConnection = false): Promise<StoredChat> {
     return this.storage.load({
+      observeConnection,
       registerConnections: (stored) => this.registerStoredConnections(stored),
       sanitizeText: (text) => this.redact(text),
     });
@@ -238,7 +239,7 @@ export class ChatRuntime {
     if (this.destroyed) return Promise.resolve();
     this.initialization ??= (async () => {
       try {
-        const stored = await this.loadHistory();
+        const stored = await this.loadHistory(true);
         if (this.destroyed) return;
         // All known stored credentials are redacted even when an SDK override is active.
         const restored = this.adoptStoredConnections(stored);

@@ -63,7 +63,13 @@ const NONCREDENTIAL_HEADERS = new Set([
 const AUTHENTICATION_HEADER = /(?:^|[-_])(?:auth(?:entication|orization)?(?:[-_]?(?:key|token|secret|password|credential))?|[a-z0-9]*(?:tokens?|secrets?|passwords?|credentials?|cookies?)(?:[-_]?(?:key|token|secret))?|(?:api|access|subscription)[-_]?(?:key|token))(?:$|[-_])|^(?:x[-_])?key$/i;
 // Token budgets are metadata only when explicitly declared with a finite integer value.
 const TOKEN_COUNT_HEADER = /^(?:x[-_])?(?:(?:max|min|input|output|total|prompt|completion|cached|context|remaining|used|budget)[-_]?tokens?|[a-z0-9][a-z0-9_-]*tokens|(?:[a-z0-9][a-z0-9_-]*)?tokens?[-_]?(?:count|limit|budget))$/i;
-const AUTHENTICATION_COUNTER_ROOT = /^(?:auth(?:entication|orization)?|api|subscription|access|refresh|client|session|bearer|private|secret|password|credential|cookie|oauth|gateway|service|jwt|identity|security|sas|pat|id|sso)$/i;
+const AUTHENTICATION_COMPONENT = 'auth(?:entication|orization)?|api|subscription|access|refresh|client|session|bearer|private|secrets?|passwords?|credentials?|cookies?|oauth2?|gateway|service|jwt|identity|security|signing|signature|hmac';
+// Short words require the original segment boundary (ID must not match Paid).
+const SHORT_AUTHENTICATION_COMPONENT = 'sas|pat|id|sso';
+const AUTHENTICATION_COUNTER_ROOT = new RegExp(`^(?:${AUTHENTICATION_COMPONENT}|${SHORT_AUTHENTICATION_COMPONENT})$`, 'i');
+// Recognize sequences such as Secret + Access + Key, including a vendor prefix.
+// Unknown intervening words keep Author/Secretariat from becoming credentials.
+const COMPOUND_AUTHENTICATION_STEM = new RegExp(`(?:${AUTHENTICATION_COMPONENT})(?:${AUTHENTICATION_COMPONENT}|${SHORT_AUTHENTICATION_COMPONENT}|keys?|tokens?)+$`, 'i');
 function tokenCountSyntax(name: string): boolean {
   return TOKEN_COUNT_HEADER.test(name.replace(/^x[-_]?/i, ''));
 }
@@ -74,11 +80,12 @@ function hasAuthenticationCounterTerm(name: string): boolean {
   // Keeping segment boundaries also prevents matching ID inside Paid/Rapid.
   return name.split(/[-_]/).some((part) => {
     const root = part.replace(/^x/i, '').replace(/(?:count|limit|budget)?tokens?(?:count|limit|budget)?$/i, '');
-    return AUTHENTICATION_HEADER.test(root) || AUTHENTICATION_COUNTER_ROOT.test(root.replace(/keys?$/i, ''));
+    return AUTHENTICATION_HEADER.test(root) || AUTHENTICATION_COUNTER_ROOT.test(root.replace(/keys?$/i, '')) || COMPOUND_AUTHENTICATION_STEM.test(root);
   });
 }
 function isAuthenticationHeaderName(name: string): boolean {
-  return AUTHENTICATION_HEADER.test(name) || tokenCountSyntax(name) && hasAuthenticationCounterTerm(name);
+  return AUTHENTICATION_HEADER.test(name) || name.split(/[-_]/).some(part => COMPOUND_AUTHENTICATION_STEM.test(part))
+    || tokenCountSyntax(name) && hasAuthenticationCounterTerm(name);
 }
 function isTokenCountName(name: string): boolean {
   return tokenCountSyntax(name) && !hasAuthenticationCounterTerm(name);

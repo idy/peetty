@@ -66,6 +66,8 @@ export class ChatStorageError extends Error {
 }
 
 export interface HistoryProjection {
+  /** False for history refreshes that preserve the caller's current connection/consent. */
+  observeConnection?: boolean;
   /** Register complete saved credentials before any history text is clipped. */
   registerConnections?: (stored: Omit<StoredChat, 'entries'>) => void;
   sanitizeText?: (text: string) => string;

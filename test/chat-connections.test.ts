@@ -94,7 +94,7 @@ describe('explicit nonsecret header classification', () => {
   });
 
   it('accepts explicitly declared numeric token-count metadata without exempting credentials', () => {
-    for (const name of ['X-MaxTokens', 'X-InputTokens', 'X-Output-Tokens', 'X-TotalTokens', 'X-PromptTokens', 'X-Completion-Tokens-Limit', 'X-ContextTokens', 'X-RemainingTokens', 'X-UsedTokens', 'X-GenerationTokens', 'X-Token-Count', 'X-Custom-Context-Token-Budget', 'X-Paid-Tokens', 'X-PaidTokens', 'X-Unpaid-Tokens', 'X-RapidTokens', 'X-CapitalizeTokens', 'X-CompatibilityTokens', 'X-Author-Tokens', 'X-AuthorKeyTokens', 'X-SecretariatTokens', 'X-MonkeyTokens']) {
+    for (const name of ['X-MaxTokens', 'X-InputTokens', 'X-Output-Tokens', 'X-TotalTokens', 'X-PromptTokens', 'X-Completion-Tokens-Limit', 'X-ContextTokens', 'X-RemainingTokens', 'X-UsedTokens', 'X-GenerationTokens', 'X-Token-Count', 'X-Custom-Context-Token-Budget', 'X-Paid-Tokens', 'X-PaidTokens', 'X-Unpaid-Tokens', 'X-RapidTokens', 'X-CapitalizeTokens', 'X-CompatibilityTokens', 'X-Author-Tokens', 'X-AuthorKeyTokens', 'X-SecretariatTokens', 'X-MonkeyTokens', 'X-SecretariatKeyTokens', 'X-RapidKeyTokens', 'X-CapitalizeKeyTokens', 'X-CompatKeyTokens']) {
       for (const value of ['0', '42', '4096']) {
         const model = normalizeModelOptions({ ...base, headers: { [name]: value }, nonCredentialHeaders: [name] });
         assert.equal(isCredentialHeader(name), true, 'undeclared values remain sensitive');
@@ -130,6 +130,20 @@ describe('explicit nonsecret header classification', () => {
     }
   });
 
+  it('recognizes compound credential word sequences with vendor prefixes and counter suffixes', () => {
+    const stems = ['SecretAccessKey', 'SecretSessionToken', 'ClientSecretAccessKey', 'GatewayPrivateAccessKey', 'ApiAccessKey', 'ClientSessionToken', 'OAuth2AccessToken', 'PrivateSigningKey', 'HmacAccessKey', 'SecurityIdentityToken', 'ClientIDKey'];
+    for (const stem of stems) for (const prefix of ['X-', 'X-Amz', 'X-Vendor']) {
+      for (const suffix of ['', '-Tokens', 'Tokens', '-Token-Count', '_Token_Count', '-CountTokens']) {
+        const name = `${prefix}${stem}${suffix}`;
+        const connection = { ...base, headers: { [name]: '42' }, nonCredentialHeaders: [name] };
+        assert.throws(() => normalizeModelOptions(connection), Error, name);
+        assert.equal(isCredentialHeader(name, [name]), true, name);
+        assert.throws(() => prepareSavedConnection(connection, connection, false), Error, name);
+        assert.equal(hasStoredCredentials(connection), true, name);
+      }
+    }
+  });
+
   it('never permits authentication names to be exempted', () => {
     for (const name of ['Authorization', 'Proxy-Authorization', 'Api-Key', 'X-Api-Key', 'X-Auth', 'X-Access-Key', 'X-Token', 'X-Secret', 'Cookie', 'Set-Cookie', 'Ocp-Apim-Subscription-Key', 'X-Key', 'Gateway-Credential', 'X-Password', 'X-Authentication', 'X-AccessToken', 'X-AuthToken', 'x-AUTHTOKEN', 'X-Auth-Token', 'X-SecretKey', 'x-secretkey', 'X-Secret-Key', 'X-APIKEY', 'X-SubscriptionKey', 'X-Subscription-Token']) {
       assert.throws(() => normalizeModelOptions({ ...base, headers: { [name]: 'fixture-sensitive' }, nonCredentialHeaders: [name] }));
@@ -139,7 +153,7 @@ describe('explicit nonsecret header classification', () => {
 
   it('keeps prefixed and compound secret-bearing names sensitive', () => {
     for (const prefix of ['Client', 'Auth', 'Session', 'Gateway', 'Service', 'Private', 'Refresh']) {
-      for (const suffix of ['Secret', 'SecretKey', 'Token', 'Credential', 'Password', 'Cookie']) {
+      for (const suffix of ['Key', 'Keys', 'Secret', 'SecretKey', 'Token', 'Credential', 'Password', 'Cookie']) {
         const name = `X-${prefix}${suffix}`;
         assert.throws(() => normalizeModelOptions({ ...base, headers: { [name]: 'synthetic-compound-secret' }, nonCredentialHeaders: [name] }));
         assert.equal(isCredentialHeader(name, [name]), true);

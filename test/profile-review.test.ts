@@ -1637,6 +1637,7 @@ describe('single production persistence boundary and durable privacy operations'
     assert.equal((legacy.get('connection') as StoredConnection).apiKey, 'unresolved-K');
     assert.equal(manager.storedConnection(id)!.apiKey, 'known-C');
     await manager.clearLegacyData();
+    await assert.rejects(runtime.configure(runtime.model!, false), { code: 'stale-connection' });
     await runtime.configure(runtime.model!, false);
     assert.equal(resolved, 0);
     assert.equal(manager.storedConnection(id)!.apiKey, undefined);
@@ -1756,6 +1757,7 @@ describe('profile authentication generation and complete cleanup debt', () => {
       if (recovery === 'explicit') {
         await manager.clearLegacyData();
         assert.equal(debt.cleanupDebt.has(id), false);
+        await adapter.load();
         await adapter.saveConnection(keyless, { rememberCredentials: false });
       } else {
         await adapter.saveConnection(keyless, { rememberCredentials: false, credentialsToForget: [{ ...connection, apiKey: 'unknown-K' }] });
@@ -1891,13 +1893,14 @@ describe('request-time saves and durable unresolved intent', () => {
     assert.deepEqual(first.historyPage(id, '', 10).entries, [entry('peer-history')]);
   });
 
-  it('allows a deliberate new save queued after this manager own committed opt-out', async (t) => {
+  it('allows a deliberate new save queued after the same adapter own committed opt-out', async (t) => {
     installChatIndexedDB(t);
     const manager = await store(t, 'request-own-write'); const id = manager.activeProfileId;
     await manager.storage(id).saveConnection(connection);
-    const forgetting = manager.storage(id).saveConnection(connection, { rememberCredentials: false });
+    const adapter = manager.storage(id);
+    const forgetting = adapter.saveConnection(connection, { rememberCredentials: false });
     const fresh = { ...connection, apiKey: 'new-user-confirmed-key' };
-    const saving = manager.storage(id).saveConnection(fresh, { rememberCredentials: true });
+    const saving = adapter.saveConnection(fresh, { rememberCredentials: true });
     await Promise.all([forgetting, saving]);
     assert.deepEqual(manager.storedConnection(id), fresh);
   });
@@ -2057,6 +2060,133 @@ describe('request-time saves and durable unresolved intent', () => {
       assert.equal(manager.persistenceWarning, false);
       assert.equal(legacy.has('connection'), false);
     }
+  });
+});
+
+describe('adapter-observed authentication and deletion source races', () => {
+  function latch() {
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => { resolve = done; });
+    return { promise, resolve: () => resolve() };
+  }
+
+  for (const refresh of ['capacity', 'history-save', 'history-load'] as const) {
+    for (const differentEndpoint of [false, true]) {
+      it(`does not reauthorize stale settings after ${refresh} refreshes shared cache with endpoint change ${differentEndpoint}`, async (t) => {
+        const idb = installChatIndexedDB(t);
+        const namespace = `adapter-observed-${refresh}-${differentEndpoint}`;
+        const manager = await store(t, namespace); const id = manager.activeProfileId;
+        await manager.storage(id).saveConnection(connection);
+        const adapter = manager.runtimeStorage(id);
+        const old = (await adapter.load()).connection!;
+        const peer = await store(t, namespace);
+        const choice = { ...connection, ...(differentEndpoint ? { baseUrl: 'https://peer-choice.example/v1' } : {}) };
+        await peer.storage(id).saveConnection(choice, { rememberCredentials: false });
+        if (refresh === 'capacity') await adapter.ensureCapacity?.(2);
+        else if (refresh === 'history-save') await adapter.saveEntries([entry('retained-turn')], ['retained-turn']);
+        else await adapter.load({ observeConnection: false });
+        assert.equal(manager.storedConnection(id)!.apiKey, undefined, 'the shared cache was really refreshed');
+        const committed = peer.storedConnection(id);
+        await assert.rejects(adapter.saveConnection(old, { rememberCredentials: true }), { code: 'stale-connection' });
+        assert.deepEqual(manager.storedConnection(id), committed);
+        assert.equal((idb.databases.get(`${namespace}:profiles`)!.get(`profile:${id}`) as { profile: ProfileRecord }).profile.connection!.apiKey, undefined);
+        assert.equal(manager.persistenceWarning, false);
+        const fresh = { ...old, apiKey: 'fresh-explicit-reconfirmation' };
+        await adapter.saveConnection(fresh, { rememberCredentials: true });
+        assert.deepEqual(manager.storedConnection(id), fresh, 'one explicit retry on the same adapter succeeds');
+        if (refresh === 'history-save') assert.deepEqual(manager.historyPage(id, '', 10).entries, [entry('retained-turn')]);
+      });
+    }
+  }
+
+  for (const queued of [false, true]) {
+    it(`does not grant a stale adapter another adapter own opt-out authorization with queued save ${queued}`, async (t) => {
+      installChatIndexedDB(t);
+      const manager = await store(t, `adapter-independent-${queued}`); const id = manager.activeProfileId;
+      await manager.storage(id).saveConnection(connection);
+      const stale = manager.runtimeStorage(id); const writer = manager.storage(id);
+      const old = (await stale.load()).connection!; await writer.load();
+      const forgetting = writer.saveConnection(connection, { rememberCredentials: false });
+      if (!queued) await forgetting;
+      const saving = stale.saveConnection(old, { rememberCredentials: true });
+      const rejected = assert.rejects(saving, { code: 'stale-connection' });
+      await forgetting; await rejected;
+      assert.equal(manager.storedConnection(id)!.apiKey, undefined);
+      await stale.saveConnection({ ...old, apiKey: 'new-explicit-key' }, { rememberCredentials: true });
+      assert.equal(manager.storedConnection(id)!.apiKey, 'new-explicit-key');
+    });
+  }
+
+  it('permits explicit connection observation while history-only observation remains non-authorizing', async (t) => {
+    installChatIndexedDB(t);
+    const manager = await store(t, 'adapter-explicit-observation'); const id = manager.activeProfileId;
+    await manager.storage(id).saveConnection(connection);
+    const adapter = manager.runtimeStorage(id); const old = (await adapter.load()).connection!;
+    const peer = await store(t, 'adapter-explicit-observation');
+    await peer.storage(id).saveConnection(connection, { rememberCredentials: false });
+    await adapter.load({ observeConnection: false });
+    await adapter.load(); // Successful deliberate connection adoption, default true.
+    await adapter.saveConnection({ ...old, apiKey: 'new-user-input' }, { rememberCredentials: true });
+    assert.equal(manager.storedConnection(id)!.apiKey, 'new-user-input');
+  });
+
+  for (const failure of ['registration', 'sanitization'] as const) {
+    it(`does not adopt a newer epoch when load ${failure} throws`, async (t) => {
+      installChatIndexedDB(t);
+      const namespace = `adapter-failed-observation-${failure}`;
+      const manager = await store(t, namespace); const id = manager.activeProfileId;
+      await manager.storage(id).saveConnection(connection);
+      await manager.storage(id).saveEntries([entry('visible-history')]);
+      const adapter = manager.runtimeStorage(id); const old = (await adapter.load()).connection!;
+      const peer = await store(t, namespace);
+      await peer.storage(id).saveConnection(connection, { rememberCredentials: false });
+      const fail = () => { throw new Error('Fixed projection failure.'); };
+      await assert.rejects(adapter.load(failure === 'registration' ? { registerConnections: fail } : { sanitizeText: fail }), /Fixed projection failure/u);
+      await assert.rejects(adapter.saveConnection(old, { rememberCredentials: true }), { code: 'stale-connection' });
+      assert.equal(manager.storedConnection(id)!.apiKey, undefined);
+      assert.equal(manager.persistenceWarning, false);
+    });
+  }
+
+  it('rejects deletion if a peer adds owned credentials after reconciliation, then safely reconciles on fresh retry', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const namespace = 'delete-credential-source-race';
+    const manager = await store(t, namespace); const id = manager.activeProfileId;
+    await manager.storage(id).saveConnection({ id: 'keyless', baseUrl: connection.baseUrl }, { rememberCredentials: true });
+    await manager.create({ name: 'Keep' });
+    const peer = await store(t, namespace);
+    const legacy = idb.databases.get(`${namespace}:chat`)!;
+    const independent = entry('independent-old-work');
+    legacy.set('entries', [independent]);
+    legacy.set('connection', { ...connection, id: 'legacy-route', apiKey: 'newly-owned-K', headers: { 'x-other-auth': 'independent-J', 'openai-project': 'legacy-project' } });
+    const paused = latch(); const release = latch(); t.after(() => release.resolve());
+    const seam = manager as unknown as { reconcileLegacy: (...args: unknown[]) => Promise<void> };
+    const reconcile = seam.reconcileLegacy.bind(manager); let once = true;
+    t.mock.method(seam, 'reconcileLegacy', async (...args: unknown[]) => {
+      await reconcile(...args);
+      if (once && args[1] === 'profile') { once = false; paused.resolve(); await release.promise; }
+    });
+    const deleting = manager.remove(id);
+    const rejected = assert.rejects(deleting, { code: 'legacy-cleanup' });
+    await paused.promise;
+    await peer.storage(id).saveConnection({ ...connection, id: 'peer-owned-model', apiKey: 'newly-owned-K' }, { rememberCredentials: true });
+    const before = peer.profiles;
+    release.resolve(); await rejected;
+    assert.deepEqual(manager.profiles, before);
+    assert.equal(manager.storedConnection(id)!.apiKey, 'newly-owned-K');
+    assert.equal((legacy.get('connection') as StoredConnection).apiKey, 'newly-owned-K');
+    assert.deepEqual(legacy.get('entries'), [independent]);
+    assert.equal(manager.persistenceWarning, false);
+    await manager.remove(id);
+    assert.equal(manager.profileInfo(id), undefined);
+    const remaining = legacy.get('connection') as StoredConnection;
+    assert.equal(remaining.apiKey, undefined);
+    assert.equal(remaining.headers!['x-other-auth'], 'independent-J');
+    assert.equal(remaining.headers!['openai-project'], 'legacy-project');
+    assert.deepEqual(legacy.get('entries'), [independent]);
+    const reopened = await store(t, namespace);
+    assert.equal(reopened.profileInfo(id), undefined);
+    assert.equal(reopened.listProfiles().length, 1);
   });
 });
 
