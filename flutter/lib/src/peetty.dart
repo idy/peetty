@@ -9,6 +9,59 @@ import 'figure_view.dart';
 import 'perch.dart';
 import 'physics.dart';
 
+/// The longest run of host rows, at least [need] tall, where a figure overhanging
+/// the host's right [edge] by [overhang] host units projects to at most a
+/// millionth of a pixel past it, in front of the viewer; null when there is none.
+///
+/// Along a row the projection `(X/W, Y/W)` moves from the edge by exactly
+/// `overhang · (xx·W − wx·X, yx·W − wx·Y) / (W(edge)·W(edge + overhang))`, whose
+/// numerators are linear in the row. Runs are located on 512 rows and their ends
+/// refined by bisection.
+@visibleForTesting
+(double, double)? overhangRows(Matrix4 transform, double edge, double overhang, double height, double need) {
+  final m = transform.storage;
+  final (xx, xy, xc) = (m[0], m[4], m[12]);
+  final (yx, yy, yc) = (m[1], m[5], m[13]);
+  final (wx, wy, wc) = (m[3], m[7], m[15]);
+  bool ok(double y) {
+    final wa = wx * edge + wy * y + wc, wb = wa + wx * overhang;
+    if (wa <= 0 || wb <= 0) return false;
+    final nx = xx * (wy * y + wc) - wx * (xy * y + xc);
+    final ny = yx * (wy * y + wc) - wx * (yy * y + yc);
+    return overhang * math.sqrt(nx * nx + ny * ny) <= 1e-6 * wa * wb;
+  }
+
+  double refine(double good, double bad) {
+    for (var i = 0; i < 60; i++) {
+      final mid = (good + bad) / 2;
+      if (ok(mid)) {
+        good = mid;
+      } else {
+        bad = mid;
+      }
+    }
+    return good;
+  }
+
+  (double, double)? best;
+  void consider(double start, double end) {
+    if (end - start >= need && (best == null || end - start > best!.$2 - best!.$1)) best = (start, end);
+  }
+
+  const samples = 512;
+  var start = 0.0, previous = 0.0, previousOk = false;
+  for (var i = 0; i <= samples; i++) {
+    final y = height * i / samples;
+    final good = ok(y);
+    if (good && !previousOk) start = i == 0 ? 0.0 : refine(y, previous);
+    if (!good && previousOk) consider(start, refine(previous, y));
+    previousOk = good;
+    previous = y;
+  }
+  if (previousOk) consider(start, height);
+  return best;
+}
+
 /// How often she moves on her own.
 enum PeettyActivity { calm, normal, lively }
 
@@ -304,10 +357,13 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
     if (size.width - figureWidth < -rounding) return null;
     if (screen == null) {
       // No screen to check against (a View always provides one, so this is a
-      // fallback): she must fit inside the host outright, with no allowance a
-      // transform could magnify.
-      if (figureWidth > size.width || size.height < anchor.dy) return null;
-      return box(0, size.width, 0, size.height);
+      // fallback). A figure wider than the host only by rounding may stand on
+      // the rows where that overhang projects to under a millionth of a pixel.
+      if (size.height < anchor.dy) return null;
+      final overhang = figureWidth - size.width;
+      if (overhang <= 0) return box(0, size.width, 0, size.height);
+      final rows = overhang > rounding ? null : overhangRows(transform, size.width, overhang, size.height, anchor.dy);
+      return rows == null ? null : box(0, size.width, rows.$1, rows.$2);
     }
     // A host point (x, y) lands on screen at (X/W, Y/W), each of X, Y and W linear
     // in x and y, so perspective is covered too. Where W > 0 a screen bound such as

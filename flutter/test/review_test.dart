@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:peetty/peetty.dart';
+import 'package:peetty/src/peetty.dart' show overhangRows;
 import 'package:peetty/src/rig.dart';
 
 Map<String, Object?> _json(String id) => jsonDecode(File('assets/figures/$id.json').readAsStringSync()) as Map<String, Object?>;
@@ -169,6 +170,35 @@ void main() {
     final huge = Rig(Figure.fromJson(_tiny(shape: {'type': 'path', 'd': 'M0 0 C1e9 0 0 0 0 0', 'stroke': 'ink', 'strokeWidth': 2})));
     expect(huge.hitTest(const Offset(10, 0)), isTrue);
     expect(huge.hitTest(const Offset(10, 50)), isFalse);
+  });
+
+  group('overhang rows without screen bounds', () {
+    test('a rounding-sized overhang under an identity transform keeps every row', () {
+      final overhang = (0.1 + 0.2) * 1000 - 300;
+      expect(overhang, greaterThan(0));
+      expect(overhangRows(Matrix4.identity(), 300, overhang, 600, 192), (0.0, 600.0));
+    });
+
+    test('a magnified overhang near a horizon leaves no rows', () {
+      final transform = Matrix4.identity()
+        ..setEntry(0, 0, 1e-7)
+        ..setEntry(1, 1, 1e-7)
+        ..setEntry(3, 0, -(1 - 1e-9));
+      expect(overhangRows(transform, 1, 5e-10, 2, 1), isNull);
+    });
+
+    test('only the rows where the overhang stays invisible are used', () {
+      // W = 1 − (1 − 1e-9)·x + y: near y = 0 the overhang is magnified, lower down it is not.
+      final transform = Matrix4.identity()
+        ..setEntry(0, 0, 1e-7)
+        ..setEntry(1, 1, 1e-7)
+        ..setEntry(3, 0, -(1 - 1e-9))
+        ..setEntry(3, 1, 1);
+      final rows = overhangRows(transform, 1, 5e-10, 2, 1)!;
+      expect(rows.$1, lessThanOrEqualTo(1));
+      expect(rows.$1, greaterThan(0));
+      expect(rows.$2, 2);
+    });
   });
 
   test('enforces an aggregate geometry budget but accepts many small clips', () {
