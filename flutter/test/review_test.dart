@@ -401,7 +401,29 @@ void main() {
     ));
     final state = _state(tester);
     expect(await _until(tester, () => state.action != FigureState.fall && state.position != null), isTrue);
-    expect(state.position!.dy, 1300);
+    // She stands where her feet and head are both on screen, not on the far edge.
+    final host = tester.renderObject<RenderBox>(find.descendant(of: find.byType(Peetty), matching: find.byType(Stack)).first);
+    final feet = host.localToGlobal(state.position!);
+    final head = host.localToGlobal(state.position! - Offset(0, tester.getSize(find.byType(FigureCanvas)).height * 0.9));
+    for (final point in [feet, head]) {
+      expect(point.dx, inInclusiveRange(0, 800), reason: '$point');
+      expect(point.dy, inInclusiveRange(0, 600), reason: '$point');
+    }
+  });
+
+  testWidgets('a host too short for her below a large inset leaves her nowhere to stand', (tester) async {
+    await tester.pumpWidget(MediaQuery(
+      data: const MediaQueryData(size: Size(800, 600), padding: EdgeInsets.only(top: 80)),
+      child: Directionality(
+        textDirection: TextDirection.ltr,
+        child: Align(
+          alignment: Alignment.topCenter,
+          child: SizedBox(height: 150, child: Peetty(figureData: _miru, random: _seeded(), child: const SizedBox.expand())),
+        ),
+      ),
+    ));
+    await _until(tester, () => false, frames: 60);
+    expect(_state(tester).position, isNull);
   });
 
   testWidgets('pointer events reach the host over children that do not hit-test', (tester) async {

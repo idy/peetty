@@ -269,55 +269,74 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
 
   Offset _topLeft(FigureController view) => Offset(_x, _y) - view.anchor;
 
-  /// Where her feet may be so that all of her stays on screen.
+  /// Where her feet may be so that all of her, from her feet up, stays inside
+  /// both the host and the screen's safe area; null when nowhere fits.
+  ///
+  /// Screen coordinates are affine in host coordinates, so for a scaled, rotated,
+  /// skewed or flipped host the safe area is a slanted region of the host. Her
+  /// limits are an axis-aligned box in host coordinates: candidate column ranges
+  /// are tried, the rows that keep the whole box inside the safe area are solved
+  /// exactly for each, and the largest box that fits her wins.
   Limits? _limits(RenderBox host) {
     final view = _view!;
     final size = host.size;
-    Limits? within(EdgeInsets insets) {
-      final left = view.anchor.dx + insets.left;
-      final right = size.width - (view.width - view.anchor.dx) - insets.right;
-      final top = view.anchor.dy + insets.top;
-      final bottom = size.height - insets.bottom;
-      return right < left || bottom < top ? null : Limits(left, right, top, bottom);
-    }
-
-    // A host tilted so far that no whole row or column fits inside the safe band
-    // keeps its full area, rather than leaving her nowhere to be.
-    return within(_insets(host)) ?? within(EdgeInsets.zero);
+    final screen = _screen;
+    final transform = host.getTransformTo(null);
+    final key = (transform.storage.join(','), size, screen, _padding, view.width, view.anchor);
+    if (key == _limitsKey) return _limitsCache;
+    _limitsKey = key;
+    return _limitsCache = _solveLimits(transform, size, screen, view.width, view.anchor);
   }
 
-  /// The safe-area insets that overlap the host, in host coordinates.
-  ///
-  /// Screen y is affine in host coordinates, `y = a·x + b·y' + c`, so for a scaled,
-  /// rotated, skewed or flipped host the safe band's edges are slanted lines. When
-  /// host rows run across the screen (|b| ≥ |a|) the insets are the nearest rows lying
-  /// wholly inside the band; when the host is turned sideways they are columns.
-  EdgeInsets _insets(RenderBox host) {
-    final screen = _screen;
-    if (screen == null) return EdgeInsets.zero;
-    final transform = host.getTransformTo(null);
-    double screenY(double x, double y) => MatrixUtils.transformPoint(transform, Offset(x, y)).dy;
-    final c = screenY(0, 0);
-    final a = screenY(1, 0) - c;
-    final b = screenY(0, 1) - c;
-    final safeTop = _padding.top, safeBottom = screen.height - _padding.bottom;
-    final size = host.size;
-    // The part of one host axis whose points stay inside the band across the other axis.
-    (double, double) span(double slope, double across, double acrossLength, double extent) {
-      final fromTop = (safeTop - c - math.min(0.0, across * acrossLength)) / slope;
-      final fromBottom = (safeBottom - c - math.max(0.0, across * acrossLength)) / slope;
-      // A reversed axis (negative slope) meets the bottom band first.
-      final (low, high) = slope > 0 ? (fromTop, fromBottom) : (fromBottom, fromTop);
-      return (math.max(0.0, low), math.max(0.0, extent - high));
+  Object? _limitsKey;
+  Limits? _limitsCache;
+
+  Limits? _solveLimits(Matrix4 transform, Size size, Size? screen, double figureWidth, Offset anchor) {
+    Limits box(double x0, double x1, double y0, double y1) => Limits(x0 + anchor.dx, x1 - (figureWidth - anchor.dx), y0 + anchor.dy, y1);
+    if (screen == null) return size.width < figureWidth || size.height < anchor.dy ? null : box(0, size.width, 0, size.height);
+    Offset toScreen(double x, double y) => MatrixUtils.transformPoint(transform, Offset(x, y));
+    final origin = toScreen(0, 0);
+    final alongX = toScreen(1, 0) - origin;
+    final alongY = toScreen(0, 1) - origin;
+    final band = [
+      (alongX.dx, alongY.dx, origin.dx, _padding.left, screen.width - _padding.right),
+      (alongX.dy, alongY.dy, origin.dy, _padding.top, screen.height - _padding.bottom),
+    ];
+
+    // Rows y where `slope·y + offset` stays in [low, high] for every offset in [omin, omax].
+    (double, double) solve(double slope, double omin, double omax, double low, double high) {
+      final from = low - omin, to = high - omax;
+      if (from > to) return (1, 0);
+      // Rows do not move this coordinate: the columns alone must already fit.
+      if (slope.abs() <= 1e-12) return from <= 0 && to >= 0 ? (double.negativeInfinity, double.infinity) : (1, 0);
+      return slope > 0 ? (from / slope, to / slope) : (to / slope, from / slope);
     }
 
-    if (math.max(a.abs(), b.abs()) <= 1e-12) return EdgeInsets.zero;
-    if (b.abs() >= a.abs()) {
-      final (top, bottom) = span(b, a, size.width, size.height);
-      return EdgeInsets.only(top: top, bottom: bottom);
+    Limits? best;
+    var bestArea = -1.0;
+    final spare = size.width - figureWidth;
+    if (spare < 0) return null;
+    for (final fraction in const [1.0, 0.8, 0.6, 0.45, 0.3, 0.2, 0.12, 0.06, 0.0]) {
+      final width = figureWidth + spare * fraction;
+      final slack = size.width - width;
+      final steps = slack <= 0 ? 0 : 16;
+      for (var i = 0; i <= steps; i++) {
+        final x0 = steps == 0 ? 0.0 : slack * i / steps, x1 = x0 + width;
+        var (y0, y1) = (0.0, size.height);
+        for (final (ax, ay, c, low, high) in band) {
+          final (from, to) = solve(ay, c + math.min(ax * x0, ax * x1), c + math.max(ax * x0, ax * x1), low, high);
+          y0 = math.max(y0, from);
+          y1 = math.min(y1, to);
+        }
+        if (y1 - y0 < anchor.dy) continue;
+        final area = width * (y1 - y0);
+        if (area > bestArea) {
+          bestArea = area;
+          best = box(x0, x1, y0, y1);
+        }
+      }
     }
-    final (left, right) = span(a, b, size.height, size.width);
-    return EdgeInsets.only(left: left, right: right);
+    return best;
   }
 
   List<Perch> _scan(RenderBox host) {
