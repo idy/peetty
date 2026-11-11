@@ -298,8 +298,9 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
       final left = x0 + anchor.dx, top = y0 + anchor.dy;
       return Limits(left, math.max(left, x1 - (figureWidth - anchor.dx)), top, math.max(top, y1));
     }
-    // Rounding in host units: bounds that cross by less than this still meet.
-    final rounding = 1e-9 * math.max(1.0, size.width);
+    // Rounding in host units, relative to the host: bounds that cross by less than
+    // this still meet. It never admits more than a billionth of the host's width.
+    final rounding = 1e-9 * size.width;
     if (size.width - figureWidth < -rounding) return null;
     if (screen == null) return size.height < anchor.dy ? null : box(0, size.width, 0, size.height);
     // A host point (x, y) lands on screen at (X/W, Y/W), each of X, Y and W linear
@@ -375,6 +376,9 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
     // the safe area on screen, checked at its projected corners to within a
     // millionth of a logical pixel.
     bool onScreen(double x0, double x1, double y0, double y1) {
+      // Inside the host first, to within rounding.
+      if (x0 < -rounding || x1 > size.width + rounding) return false;
+      if (y0 < -1e-9 * size.height || y1 > size.height * (1 + 1e-9)) return false;
       for (final (x, y) in [(x0, y0), (x1, y0), (x0, y1), (x1, y1)]) {
         if (wx * x + wy * y + wc <= 0) return false;
         final p = MatrixUtils.transformPoint(transform, Offset(x, y));

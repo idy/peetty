@@ -595,6 +595,14 @@ void main() {
     expect(_state(tester).position, isNotNull);
   });
 
+  testWidgets('rounding allowance never lets her overhang a tiny host', (tester) async {
+    // A 5e-10-wide host shown 1e12 times wider, with an 8e-10-wide figure: 300 pixels too wide.
+    // Vertically 1e11 times taller, so her height alone would fit.
+    await tester.pumpWidget(transformed(Matrix4.diagonal3Values(1e12, 1e11, 1), const Size(5e-10, 5e-9), 8e-10));
+    await _until(tester, () => false, frames: 30);
+    expect(_state(tester).position, isNull);
+  });
+
   testWidgets('a host too short for her below a large inset leaves her nowhere to stand', (tester) async {
     await tester.pumpWidget(MediaQuery(
       data: const MediaQueryData(size: Size(800, 600), padding: EdgeInsets.only(top: 80)),
