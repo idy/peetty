@@ -352,23 +352,12 @@ function figurePath(path: readonly string[]): readonly string[] | undefined {
 function figureCollectionLimit(path: readonly string[], array: boolean): number {
   const relative = figurePath(path)!;
   const location = relative.join('.');
-  if (!array) {
-    if (location === 'palette') return FIGURE_LIMITS.maxPaletteEntries;
-    if (location === 'gradients') return FIGURE_LIMITS.maxGradients;
-    return Infinity; // The cumulative figure byte budget bounds extension data.
-  }
-  if (location === 'parts') return FIGURE_LIMITS.maxParts;
+  if (!array) return location === 'palette' ? FIGURE_LIMITS.maxPaletteEntries : Infinity;
+  // Only renderer-independent fields are constrained here. Renderer-specific
+  // fields and extensions share the cumulative byte budget, then validateFigure
+  // checks the completed figure with its actual renderer and recognized bones.
   if (location === 'viewBox') return 4;
   if (location === 'anchor') return 2;
-  if (relative.length === 2 && relative[0] === 'clips') return FIGURE_LIMITS.maxShapesPerPart;
-  if (location === 'parts.*.shapes') return FIGURE_LIMITS.maxShapesPerPart;
-  if (location === 'parts.*.pivot' || location === 'parts.*.look') return 2;
-  if (relative.length === 3 && relative[0] === 'skeleton' && relative[2] === 'pivot') return 2;
-  if (relative.length === 3 && relative[0] === 'gradients') {
-    if (relative[2] === 'stops') return 16;
-    if (['from', 'to', 'center', 'focus'].includes(relative[2]!)) return 2;
-  }
-  if (relative.length === 4 && relative[0] === 'sprite' && relative[1] === 'animations' && relative[3] === 'frames') return FIGURE_LIMITS.maxFrames;
   if (relative.length === 3 && relative[0] === 'sounds' && relative[1] === 'events') return 8;
   if (relative.length === 5 && relative[0] === 'sounds' && relative[1] === 'events' && relative[3] === '*' && relative[4] === 'notes') return 8;
   return Infinity;
@@ -417,6 +406,9 @@ function backupAllowedType(path: readonly string[], type: string): boolean {
 }
 function validateBackupValue(path: readonly string[], value: unknown): void {
   switch (path.join('.')) {
+    case 'profiles.*.figure':
+      if (typeof value !== 'string') { try { validateFigure(value); } catch { throw new Error(INVALID); } }
+      break;
     case 'profiles.*.entries.*': entryFrom(value); break;
     case 'profiles.*.memories.*': memoryFrom(value); break;
     case 'sessions.*': sessionFrom(value); break;

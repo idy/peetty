@@ -76,6 +76,48 @@ describe('figure bounds in multipart restores', () => {
     assert.deepEqual(target.activeProfile.figure, figure);
   });
 
+  for (const renderer of ['rig', 'sprite'] as const) {
+    it(`round-trips ${renderer} extensions outside the validator's renderer and bone scope`, async (t) => {
+      const rig = structuredClone(PRESETS.miru); assert.ok(rig.renderer === 'rig');
+      const figure = renderer === 'rig' ? {
+        ...rig, skeleton: { ...rig.skeleton, custom: { pivot: [1, 2, 3] } },
+        sprite: { animations: { idle: { frames: Array.from({ length: LIMITS.maxFrames + 1 }, () => 0) } } },
+      } : {
+        format: 'peetty.figure', version: 1, id: 'sprite-extension', name: 'Sprite extension', renderer: 'sprite',
+        viewBox: [0, 0, 32, 32], anchor: [16, 32], height: 64, palette: {},
+        sprite: { image: 'data:image/png;base64,iVBORw0KGgo=', frameWidth: 32, frameHeight: 32, columns: 1, animations: { idle: { frames: [0], fps: 4 } } },
+        skeleton: { root: { pivot: [1, 2, 3] }, custom: { pivot: [1, 2, 3, 4] } },
+        parts: Array.from({ length: LIMITS.maxParts + 1 }, () => null),
+        gradients: Object.fromEntries(Array.from({ length: LIMITS.maxGradients + 1 }, (_, i) => [`g${i}`, null])),
+        padding: 'x'.repeat(2_000),
+      };
+      validateFigure(figure);
+      const source = new BrowserProfileStore(`extension-${renderer}-source`, false); await source.initialize(); t.after(() => source.close());
+      await source.update(source.activeProfileId, { figure });
+      const output = await source.backupDownload({ _testing: { fileBytes: 2_048 } });
+      assert.notEqual(typeof output, 'string');
+      const encoded: string[] = [];
+      if (typeof output !== 'string') for await (const part of output) encoded.push(part.text);
+      for (const method of ['files', 'strings'] as const) {
+        const target = new BrowserProfileStore(`extension-${renderer}-${method}`, false); await target.initialize(); t.after(() => target.close());
+        if (method === 'files') await target.restoreFileSelection(files(encoded)); else await target.restoreFiles(encoded);
+        assert.deepEqual(target.activeProfile.figure, figure);
+      }
+    });
+  }
+
+  it('still rejects invalid recognized rig pivots through the renderer validator', async (t) => {
+    const figure = structuredClone(PRESETS.miru); assert.ok(figure.renderer === 'rig');
+    const invalid = { ...figure, skeleton: { ...figure.skeleton, root: { pivot: [1, 2, 3] } } };
+    assert.throws(() => validateFigure(invalid));
+    const payload = archive(invalid); const encoded = parts([payload.slice(0, -10), payload.slice(-10)]);
+    const target = new BrowserProfileStore('invalid-recognized-bone', false); await target.initialize(); t.after(() => target.close());
+    const before = target.profiles;
+    await assert.rejects(target.restoreFileSelection(files(encoded)), /Invalid/u);
+    await assert.rejects(target.restoreFiles(encoded), /Invalid/u);
+    assert.deepEqual(target.profiles, before);
+  });
+
   it('uses full schema paths for dynamic clip keys instead of matching their final names', async (t) => {
     const figure = structuredClone(PRESETS.miru);
     assert.ok(figure.renderer === 'rig');
