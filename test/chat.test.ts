@@ -4,9 +4,9 @@ import type { StreamFn } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage, Message, SimpleStreamOptions, TranscriptContext } from '@earendil-works/pi-ai';
 import { AssistantMessageEventStream } from '@earendil-works/pi-ai/utils/event-stream';
 import { ChatRuntime, fetchModelList, normalizeBaseUrl } from '../src/chat/runtime.ts';
-import { boundedEntries, BrowserChatStore } from '../src/chat/store.ts';
+import { boundedEntries } from '../src/chat/store.ts';
 import type { ChatEntry, CompanionAction, PeettyModelOptions } from '../src/chat/types.ts';
-import { installChatIndexedDB, MemoryChatStorage } from './helpers/chat-storage.ts';
+import { installChatIndexedDB, MemoryChatStorage, profileStorage } from './helpers/chat-storage.ts';
 
 const MODEL: PeettyModelOptions = { id: 'manual-model', baseUrl: 'https://model.example/v1', apiKey: 'secret-user-key' };
 const entry = (role: ChatEntry['role'], text: string, n = 0): ChatEntry => ({ id: `entry-${n}`, role, text, createdAt: n });
@@ -61,6 +61,88 @@ function heldProvider() {
   };
   return { calls, streamFn, partial, end };
 }
+
+describe('explicit nonsecret runtime headers', () => {
+  for (const classified of [false, true]) {
+    it(`keeps routing metadata ${classified ? 'public and persistable with an explicit marker' : 'sensitive for unmarked old data'}`, async (t) => {
+      installChatIndexedDB(t);
+      const namespace = `runtime-routing-${classified}`;
+      const storage = await profileStorage(t, namespace); t.after(() => storage.close());
+      const names = classified ? ['X-Route'] : [];
+      const chosen = { ...MODEL, headers: { 'X-Route': 'fixture-public-route', 'X-Unclassified': 'fixture-unknown-secret' }, nonCredentialHeaders: names };
+      let context: TranscriptContext | undefined;
+      const runtime = new ChatRuntime({ model: chosen, storage, _testing: { streamFn: (_model, next) => { context = structuredClone(next); return finished(assistant('Done.')); } } });
+      t.after(() => runtime.destroy());
+      names.push('X-Unclassified');
+      const returned = runtime.model!; returned.nonCredentialHeaders?.push('X-Unclassified'); returned.headers!['x-route'] = 'changed';
+      assert.equal(runtime.model!.headers!['x-route'], 'fixture-public-route');
+      assert.deepEqual(runtime.model!.nonCredentialHeaders, classified ? ['x-route'] : undefined);
+      await runtime.configure(runtime.model!, false);
+      const saved = (await storage.load()).connection!;
+      assert.equal(saved.apiKey, undefined);
+      assert.deepEqual(saved.headers, classified ? { 'x-route': 'fixture-public-route' } : undefined);
+      assert.deepEqual(saved.nonCredentialHeaders, classified ? ['x-route'] : undefined);
+      await runtime.send(`Route fixture-public-route; credential fixture-unknown-secret; key ${MODEL.apiKey}`);
+      assert.equal(runtime.error, null);
+      assert.equal(runtime.entries[0]!.text.includes('fixture-public-route'), classified);
+      assert.doesNotMatch(runtime.entries[0]!.text, /fixture-unknown-secret|secret-user-key/);
+      assert.equal(JSON.stringify(context).includes('fixture-public-route'), classified);
+      assert.doesNotMatch(JSON.stringify(context), /fixture-unknown-secret|secret-user-key/);
+      const reader = await profileStorage(t, namespace); const restored = new ChatRuntime({ storage: reader }); t.after(() => restored.destroy());
+      await restored.initialize();
+      assert.deepEqual(restored.model?.headers, classified ? { 'x-route': 'fixture-public-route' } : undefined);
+      assert.deepEqual(restored.model?.nonCredentialHeaders, classified ? ['x-route'] : undefined);
+      assert.equal(restored.rememberKey, false);
+    });
+  }
+});
+
+describe('profile memory in model turns', () => {
+  it('includes enabled memories, redacts credentials and saves facts with the current user message as source', async () => {
+    const saved: { text: string; source: string }[] = [];
+    const contexts: TranscriptContext[] = [];
+    let calls = 0;
+    const runtime = new ChatRuntime({
+      model: MODEL,
+      memory: {
+        entries: [{ text: 'Prefers Chinese. secret-user-key' }], enabled: true,
+        remember: async (text, source) => { saved.push({ text, source }); },
+      },
+      _testing: { storage: new MemoryChatStorage(), streamFn: (_model, context) => {
+        contexts.push(structuredClone(context));
+        if (++calls !== 1) return finished(assistant('Remembered.'));
+        const message = assistant('', 'toolUse');
+        message.content = [{ type: 'toolCall', id: 'remember-1', name: 'remember_fact', arguments: { text: 'Likes green tea.' } }];
+        return finished(message);
+      } },
+    });
+    await runtime.send('Remember that I like green tea.');
+    assert.equal(runtime.error, null);
+    assert.match(JSON.stringify(contexts[0]!.messages.filter((entry) => entry.role === 'system')), /Prefers Chinese/);
+    assert.doesNotMatch(JSON.stringify(contexts), /secret-user-key/);
+    assert.deepEqual(saved, [{ text: 'Likes green tea.', source: runtime.entries.find((entry) => entry.role === 'user')!.id }]);
+    runtime.destroy();
+  });
+  it('omits disabled memory and never stores a tool argument containing known credentials', async () => {
+    let saved = false;
+    let context: TranscriptContext | undefined;
+    let calls = 0;
+    const runtime = new ChatRuntime({
+      model: MODEL,
+      memory: { entries: [{ text: 'A disabled private fact' }], enabled: false, remember: async () => { saved = true; } },
+      _testing: { storage: new MemoryChatStorage(), streamFn: (_model, incoming) => {
+        context = incoming;
+        if (++calls !== 1) return finished(assistant('Done.'));
+        const message = assistant('', 'toolUse');
+        message.content = [{ type: 'toolCall', id: 'remember-secret', name: 'remember_fact', arguments: { text: MODEL.apiKey! } }];
+        return finished(message);
+      } },
+    });
+    await runtime.send('Hello');
+    assert.doesNotMatch(JSON.stringify(context?.messages.filter((entry) => entry.role === 'system')), /A disabled private fact/);
+    assert.equal(saved, false); runtime.destroy();
+  });
+});
 
 describe('OpenAI-compatible endpoint setup', () => {
   it('normalizes API roots, preserves custom paths, and rejects URLs carrying credentials', () => {
@@ -126,21 +208,29 @@ describe('OpenAI-compatible endpoint setup', () => {
 });
 
 describe('local persistence and credential ownership', () => {
+  it('requires explicit profile or test storage and never opens a writable legacy default', (t) => {
+    const idb = installChatIndexedDB(t);
+    assert.throws(() => new ChatRuntime({ model: MODEL }), /requires injected profile storage/);
+    assert.deepEqual(idb.opened, []);
+    const runtime = new ChatRuntime({ model: MODEL, storage: new MemoryChatStorage() });
+    runtime.destroy();
+  });
   it('stores connection and plain history in a namespaced IndexedDB and restores it', async (t) => {
     const idb = installChatIndexedDB(t);
-    const first = new BrowserChatStore('test-pet');
+    const first = await profileStorage(t, 'test-pet');
     assert.deepEqual(await first.load(), { entries: [] });
     await first.saveConnection({ id: MODEL.id, baseUrl: MODEL.baseUrl, apiKey: MODEL.apiKey! });
     await first.saveEntries([entry('user', 'hello'), entry('assistant', 'hi', 1), entry('action', 'wave', 2)]);
     first.close();
-    const second = new BrowserChatStore('test-pet');
+    const second = await profileStorage(t, 'test-pet');
     assert.deepEqual(await second.load(), {
       connection: { id: MODEL.id, baseUrl: MODEL.baseUrl, apiKey: MODEL.apiKey },
       entries: [entry('user', 'hello'), entry('assistant', 'hi', 1), entry('action', 'wave', 2)],
     });
-    assert.deepEqual(idb.opened, ['test-pet:chat', 'test-pet:chat']);
+    assert.ok(idb.opened.includes('test-pet:profiles'));
+    assert.equal(idb.databases.get('test-pet:chat')!.has('connection'), false);
     assert.equal(second.persistenceWarning, false);
-    const other = new BrowserChatStore('other-pet');
+    const other = await profileStorage(t, 'other-pet');
     assert.deepEqual(await other.load(), { entries: [] });
     second.close(); other.close();
   });
@@ -149,16 +239,16 @@ describe('local persistence and credential ownership', () => {
     installChatIndexedDB(t);
     for (const tools of [false, true]) {
       const namespace = `tools-${tools}`;
-      const runtime = new ChatRuntime({ _testing: { storage: new BrowserChatStore(namespace) } });
+      const runtime = new ChatRuntime({ _testing: { storage: await profileStorage(t, namespace) } });
       await runtime.configure({ ...MODEL, tools }, false);
       runtime.destroy();
-      const restored = new ChatRuntime({ _testing: { storage: new BrowserChatStore(namespace) } });
+      const restored = new ChatRuntime({ _testing: { storage: await profileStorage(t, namespace) } });
       await restored.initialize();
       assert.deepEqual(restored.model, { id: MODEL.id, baseUrl: MODEL.baseUrl, tools });
       await restored.setModel({ ...MODEL, tools: !tools });
       assert.equal(restored.model?.tools, !tools);
       restored.destroy();
-      const saved = new BrowserChatStore(namespace);
+      const saved = await profileStorage(t, namespace);
       assert.deepEqual((await saved.load()).connection, { id: MODEL.id, baseUrl: MODEL.baseUrl, tools });
       saved.close();
     }
@@ -168,10 +258,10 @@ describe('local persistence and credential ownership', () => {
     installChatIndexedDB(t);
     for (const effort of ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const) {
       const namespace = `effort-${effort}`;
-      const runtime = new ChatRuntime({ _testing: { storage: new BrowserChatStore(namespace) } });
+      const runtime = new ChatRuntime({ _testing: { storage: await profileStorage(t, namespace) } });
       await runtime.configure({ ...MODEL, effort }, false);
       runtime.destroy();
-      const restored = new ChatRuntime({ _testing: { storage: new BrowserChatStore(namespace) } });
+      const restored = new ChatRuntime({ _testing: { storage: await profileStorage(t, namespace) } });
       await restored.initialize();
       const saved = { id: MODEL.id, baseUrl: MODEL.baseUrl, effort };
       assert.deepEqual(restored.model, saved);
@@ -180,22 +270,22 @@ describe('local persistence and credential ownership', () => {
       await restored.setModel(MODEL);
       assert.equal('effort' in restored.model!, false);
       restored.destroy();
-      const storage = new BrowserChatStore(namespace);
+      const storage = await profileStorage(t, namespace);
       assert.deepEqual((await storage.load()).connection, saved);
       storage.close();
       const injected: PeettyModelOptions = { ...MODEL, effort: effort === 'max' ? 'minimal' : 'max' };
-      const session = new ChatRuntime({ model: injected, _testing: { storage: new BrowserChatStore(namespace) } });
+      const session = new ChatRuntime({ model: injected, _testing: { storage: await profileStorage(t, namespace) } });
       await session.initialize();
       assert.deepEqual(session.model, injected);
       session.destroy();
-      const unchanged = new BrowserChatStore(namespace);
+      const unchanged = await profileStorage(t, namespace);
       assert.deepEqual((await unchanged.load()).connection, saved);
       unchanged.close();
       // Saving the default explicitly clears an earlier effort preference.
-      const reset = new ChatRuntime({ _testing: { storage: new BrowserChatStore(namespace) } });
+      const reset = new ChatRuntime({ _testing: { storage: await profileStorage(t, namespace) } });
       await reset.configure(MODEL, false);
       reset.destroy();
-      const defaults = new BrowserChatStore(namespace);
+      const defaults = await profileStorage(t, namespace);
       assert.deepEqual((await defaults.load()).connection, { id: MODEL.id, baseUrl: MODEL.baseUrl });
       defaults.close();
     }
@@ -214,8 +304,8 @@ describe('local persistence and credential ownership', () => {
       await restored.initialize();
       assert.equal(restored.model, undefined);
       restored.destroy();
-      const storage = new BrowserChatStore('invalid-effort');
-      await storage.saveConnection(invalid);
+      const storage = await profileStorage(t, 'invalid-effort');
+      await assert.rejects(storage.saveConnection(invalid), /Invalid or unsupported profile data/);
       assert.equal((await storage.load()).connection, undefined);
       storage.close();
     }
@@ -230,19 +320,19 @@ describe('local persistence and credential ownership', () => {
 
   it('flushes already queued history before closing IndexedDB', async (t) => {
     installChatIndexedDB(t);
-    const store = new BrowserChatStore('closing');
+    const store = await profileStorage(t, 'closing');
     await store.load();
     const writing = store.saveEntries([entry('assistant', 'partial answer')]);
     store.close();
     await writing;
-    const restored = new BrowserChatStore('closing');
+    const restored = await profileStorage(t, 'closing');
     assert.deepEqual((await restored.load()).entries, [entry('assistant', 'partial answer')]);
     restored.close();
   });
 
   it('falls back to memory when IndexedDB is absent or a write fails', async (t) => {
     const idb = installChatIndexedDB(t);
-    const store = new BrowserChatStore('failure');
+    const store = await profileStorage(t, 'failure');
     await store.load();
     idb.failWrites();
     await store.saveEntries([entry('user', 'kept in memory')]);
@@ -250,13 +340,13 @@ describe('local persistence and credential ownership', () => {
     assert.deepEqual((await store.load()).entries, [entry('user', 'kept in memory')]);
     store.close();
     Object.defineProperty(globalThis, 'indexedDB', { configurable: true, value: undefined });
-    const unavailable = new BrowserChatStore();
+    const unavailable = await profileStorage(t);
     await unavailable.load();
     await unavailable.saveEntries([entry('assistant', 'still works')]);
     assert.equal(unavailable.persistenceWarning, true);
     assert.deepEqual((await unavailable.load()).entries, [entry('assistant', 'still works')]);
     unavailable.close();
-    const disabled = new BrowserChatStore('off', false);
+    const disabled = await profileStorage(t, 'off', false);
     await disabled.load();
     assert.equal(disabled.persistenceWarning, false);
     disabled.close();
@@ -353,6 +443,8 @@ describe('local persistence and credential ownership', () => {
       { ...MODEL, headers: { Authorization: 123 } as unknown as Record<string, string> },
       { ...MODEL, headers: { 'x-api-key': null } as unknown as Record<string, string> },
       { ...MODEL, headers: { 'bad header': 'private-secret' } },
+      { ...MODEL, headers: { Authorization: 'Bearer private-secret' }, nonCredentialHeaders: ['Authorization'] },
+      { ...MODEL, headers: { 'X-Route': 'private-secret' }, nonCredentialHeaders: ['X-Missing'] },
       { ...MODEL, headers: { Authorization: 'Bearer private-secret\r\nX-Injected: true' } },
     ]) {
       await assert.rejects(runtime.configure(replacement, true), (error: Error) => {
@@ -651,6 +743,17 @@ describe('Pi chat streaming and actions', () => {
     assert.equal(runtime.error, null);
     assert.equal(requests[2]?.url, 'https://root.example/chat/completions');
     assert.equal(requests[2]?.headers.get('Authorization'), 'Bearer root-key');
+    await runtime.configure({ id: 'gateway', baseUrl: 'https://gateway.example/v1', headers: { 'cf-aig-authorization': 'Bearer synthetic-gateway-only' } }, false);
+    await runtime.send('Gateway-only authentication');
+    assert.equal(runtime.error, null);
+    assert.equal(requests[3]?.headers.get('cf-aig-authorization'), 'Bearer synthetic-gateway-only');
+    assert.equal(requests[3]?.headers.get('Authorization'), null, 'gateway auth must never enable the sentinel upstream Bearer');
+    await runtime.configure({ id: 'gateway', baseUrl: 'https://gateway.example/v1', headers: {
+      'cf-aig-authorization': 'Bearer synthetic-gateway-only', Authorization: 'Bearer synthetic-explicit-upstream',
+    } }, false);
+    await runtime.send('Explicit upstream authentication');
+    assert.equal(runtime.error, null);
+    assert.equal(requests[4]?.headers.get('Authorization'), 'Bearer synthetic-explicit-upstream');
     runtime.destroy();
   });
 });
@@ -665,9 +768,9 @@ describe('shared history runtime ownership', () => {
     t.mock.method(Date, 'now', () => 123_456);
     const a = heldProvider();
     const b = heldProvider();
-    const first = new tabA.ChatRuntime({ model: MODEL, chat: { storageKey: 'tabs' }, _testing: { streamFn: a.streamFn } });
-    const second = new tabB.ChatRuntime({ model: MODEL, chat: { storageKey: 'tabs' }, _testing: { streamFn: b.streamFn } });
-    const reader = new BrowserChatStore('tabs');
+    const first = new tabA.ChatRuntime({ model: MODEL, storage: await profileStorage(t, 'tabs'), chat: { storageKey: 'tabs' }, _testing: { streamFn: a.streamFn } });
+    const second = new tabB.ChatRuntime({ model: MODEL, storage: await profileStorage(t, 'tabs'), chat: { storageKey: 'tabs' }, _testing: { streamFn: b.streamFn } });
+    const reader = await profileStorage(t, 'tabs');
     t.after(() => { first.destroy(); second.destroy(); reader.close(); });
     await Promise.all([first.initialize(), second.initialize()]);
     const sendingA = first.send('tab-a-question');
@@ -697,9 +800,9 @@ describe('shared history runtime ownership', () => {
   for (const ending of ['complete', 'stop', 'destroy'] as const) {
     it(`rejects a peer's old turn on ${ending} after clear and accepts subsequent fresh turns`, async (t) => {
       installChatIndexedDB(t);
-      const clearingStore = new BrowserChatStore(`runtime-clear-${ending}`);
-      const peerStore = new BrowserChatStore(`runtime-clear-${ending}`);
-      const reader = new BrowserChatStore(`runtime-clear-${ending}`);
+      const clearingStore = await profileStorage(t, `runtime-clear-${ending}`);
+      const peerStore = await profileStorage(t, `runtime-clear-${ending}`);
+      const reader = await profileStorage(t, `runtime-clear-${ending}`);
       await clearingStore.saveEntries([entry('user', 'before-clear-question'), entry('assistant', 'before-clear-answer', 1)]);
       const a = heldProvider();
       const b = heldProvider();
@@ -723,7 +826,7 @@ describe('shared history runtime ownership', () => {
       assert.deepEqual((await reader.load()).entries, []);
       let peer = second;
       if (ending === 'destroy') {
-        peer = new ChatRuntime({ model: MODEL, _testing: { storage: new BrowserChatStore(`runtime-clear-${ending}`), streamFn: b.streamFn } });
+        peer = new ChatRuntime({ model: MODEL, _testing: { storage: await profileStorage(t, `runtime-clear-${ending}`), streamFn: b.streamFn } });
         t.after(() => peer.destroy());
       }
       const freshB = peer.send('fresh-b-question');
@@ -753,8 +856,8 @@ describe('shared history runtime ownership', () => {
   for (const cancellation of ['stop', 'configure', 'destroy'] as const) {
     it(`does not save the old UI snapshot on ${cancellation} during a history refresh`, async (t) => {
       installChatIndexedDB(t);
-      const store = new BrowserChatStore(`refresh-${cancellation}`);
-      const peer = new BrowserChatStore(`refresh-${cancellation}`);
+      const store = await profileStorage(t, `refresh-${cancellation}`);
+      const peer = await profileStorage(t, `refresh-${cancellation}`);
       await store.saveEntries([entry('user', 'cleared-old-history')]);
       const contexts: TranscriptContext[] = [];
       const runtime = new ChatRuntime({ model: MODEL, _testing: { storage: store, streamFn: (_model, context) => {
@@ -797,8 +900,8 @@ describe('shared history runtime ownership', () => {
 
   it('queues an early clear before an immediate new turn and flushes clear on destruction', async (t) => {
     installChatIndexedDB(t);
-    const store = new BrowserChatStore('early-clear');
-    const reader = new BrowserChatStore('early-clear');
+    const store = await profileStorage(t, 'early-clear');
+    const reader = await profileStorage(t, 'early-clear');
     await reader.saveEntries([entry('user', 'old-early-history')]);
     const contexts: TranscriptContext[] = [];
     const runtime = new ChatRuntime({ model: MODEL, _testing: { storage: store, streamFn: (_model, context) => {

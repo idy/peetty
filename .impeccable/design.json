@@ -1,0 +1,768 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-10T09:04:36.036628+00:00",
+  "title": "Design System: Peetty",
+  "extensions": {
+    "colorMeta": {
+      "violet": {
+        "role": "primary",
+        "displayName": "Violet",
+        "canonical": "#6a58e0",
+        "tonalRamp": [
+          "oklch(15% 0.050 283.9)",
+          "oklch(26% 0.089 283.9)",
+          "oklch(38% 0.129 283.9)",
+          "oklch(49% 0.169 283.9)",
+          "oklch(61% 0.199 283.9)",
+          "oklch(72% 0.159 283.9)",
+          "oklch(84% 0.119 283.9)",
+          "oklch(95% 0.050 283.9)"
+        ]
+      },
+      "violet-end": {
+        "role": "primary",
+        "displayName": "Violet End",
+        "canonical": "#9a4fd3",
+        "tonalRamp": [
+          "oklch(15% 0.050 307.5)",
+          "oklch(26% 0.090 307.5)",
+          "oklch(38% 0.129 307.5)",
+          "oklch(49% 0.169 307.5)",
+          "oklch(61% 0.199 307.5)",
+          "oklch(72% 0.159 307.5)",
+          "oklch(84% 0.119 307.5)",
+          "oklch(95% 0.050 307.5)"
+        ]
+      },
+      "violet-light": {
+        "role": "primary",
+        "displayName": "Violet Light",
+        "canonical": "#b9afff",
+        "tonalRamp": [
+          "oklch(15% 0.028 289.3)",
+          "oklch(26% 0.051 289.3)",
+          "oklch(38% 0.073 289.3)",
+          "oklch(49% 0.096 289.3)",
+          "oklch(61% 0.113 289.3)",
+          "oklch(72% 0.090 289.3)",
+          "oklch(84% 0.068 289.3)",
+          "oklch(95% 0.028 289.3)"
+        ]
+      },
+      "pink": {
+        "role": "primary",
+        "displayName": "Pink",
+        "canonical": "#d02f74",
+        "tonalRamp": [
+          "oklch(15% 0.050 0.3)",
+          "oklch(26% 0.091 0.3)",
+          "oklch(38% 0.131 0.3)",
+          "oklch(49% 0.172 0.3)",
+          "oklch(61% 0.202 0.3)",
+          "oklch(72% 0.162 0.3)",
+          "oklch(84% 0.121 0.3)",
+          "oklch(95% 0.050 0.3)"
+        ]
+      },
+      "pink-end": {
+        "role": "primary",
+        "displayName": "Pink End",
+        "canonical": "#b845b0",
+        "tonalRamp": [
+          "oklch(15% 0.048 330.6)",
+          "oklch(26% 0.087 330.6)",
+          "oklch(38% 0.126 330.6)",
+          "oklch(49% 0.164 330.6)",
+          "oklch(61% 0.193 330.6)",
+          "oklch(72% 0.155 330.6)",
+          "oklch(84% 0.116 330.6)",
+          "oklch(95% 0.048 330.6)"
+        ]
+      },
+      "pink-light": {
+        "role": "primary",
+        "displayName": "Pink Light",
+        "canonical": "#ff9dc0",
+        "tonalRamp": [
+          "oklch(15% 0.031 357.3)",
+          "oklch(26% 0.055 357.3)",
+          "oklch(38% 0.080 357.3)",
+          "oklch(49% 0.105 357.3)",
+          "oklch(61% 0.123 357.3)",
+          "oklch(72% 0.099 357.3)",
+          "oklch(84% 0.074 357.3)",
+          "oklch(95% 0.031 357.3)"
+        ]
+      },
+      "red": {
+        "role": "primary",
+        "displayName": "Red",
+        "canonical": "#d43545",
+        "tonalRamp": [
+          "oklch(15% 0.049 20.7)",
+          "oklch(26% 0.087 20.7)",
+          "oklch(38% 0.126 20.7)",
+          "oklch(49% 0.165 20.7)",
+          "oklch(61% 0.194 20.7)",
+          "oklch(72% 0.156 20.7)",
+          "oklch(84% 0.117 20.7)",
+          "oklch(95% 0.049 20.7)"
+        ]
+      },
+      "red-end": {
+        "role": "primary",
+        "displayName": "Red End",
+        "canonical": "#c8491f",
+        "tonalRamp": [
+          "oklch(15% 0.043 37.5)",
+          "oklch(26% 0.077 37.5)",
+          "oklch(38% 0.111 37.5)",
+          "oklch(49% 0.145 37.5)",
+          "oklch(61% 0.170 37.5)",
+          "oklch(72% 0.136 37.5)",
+          "oklch(84% 0.102 37.5)",
+          "oklch(95% 0.043 37.5)"
+        ]
+      },
+      "red-light": {
+        "role": "primary",
+        "displayName": "Red Light",
+        "canonical": "#ffa0a3",
+        "tonalRamp": [
+          "oklch(15% 0.028 17.9)",
+          "oklch(26% 0.051 17.9)",
+          "oklch(38% 0.074 17.9)",
+          "oklch(49% 0.096 17.9)",
+          "oklch(61% 0.113 17.9)",
+          "oklch(72% 0.091 17.9)",
+          "oklch(84% 0.068 17.9)",
+          "oklch(95% 0.028 17.9)"
+        ]
+      },
+      "orange": {
+        "role": "primary",
+        "displayName": "Orange",
+        "canonical": "#bd5008",
+        "tonalRamp": [
+          "oklch(15% 0.039 45.5)",
+          "oklch(26% 0.071 45.5)",
+          "oklch(38% 0.102 45.5)",
+          "oklch(49% 0.133 45.5)",
+          "oklch(61% 0.157 45.5)",
+          "oklch(72% 0.126 45.5)",
+          "oklch(84% 0.094 45.5)",
+          "oklch(95% 0.039 45.5)"
+        ]
+      },
+      "orange-end": {
+        "role": "primary",
+        "displayName": "Orange End",
+        "canonical": "#a8650a",
+        "tonalRamp": [
+          "oklch(15% 0.031 65.1)",
+          "oklch(26% 0.056 65.1)",
+          "oklch(38% 0.081 65.1)",
+          "oklch(49% 0.106 65.1)",
+          "oklch(61% 0.125 65.1)",
+          "oklch(72% 0.100 65.1)",
+          "oklch(84% 0.075 65.1)",
+          "oklch(95% 0.031 65.1)"
+        ]
+      },
+      "orange-light": {
+        "role": "primary",
+        "displayName": "Orange Light",
+        "canonical": "#ffb37c",
+        "tonalRamp": [
+          "oklch(15% 0.028 56.3)",
+          "oklch(26% 0.051 56.3)",
+          "oklch(38% 0.074 56.3)",
+          "oklch(49% 0.097 56.3)",
+          "oklch(61% 0.114 56.3)",
+          "oklch(72% 0.091 56.3)",
+          "oklch(84% 0.068 56.3)",
+          "oklch(95% 0.028 56.3)"
+        ]
+      },
+      "green": {
+        "role": "primary",
+        "displayName": "Green",
+        "canonical": "#148049",
+        "tonalRamp": [
+          "oklch(15% 0.031 154.4)",
+          "oklch(26% 0.057 154.4)",
+          "oklch(38% 0.082 154.4)",
+          "oklch(49% 0.107 154.4)",
+          "oklch(61% 0.126 154.4)",
+          "oklch(72% 0.101 154.4)",
+          "oklch(84% 0.075 154.4)",
+          "oklch(95% 0.031 154.4)"
+        ]
+      },
+      "green-end": {
+        "role": "primary",
+        "displayName": "Green End",
+        "canonical": "#0d7f78",
+        "tonalRamp": [
+          "oklch(15% 0.023 187.9)",
+          "oklch(26% 0.041 187.9)",
+          "oklch(38% 0.059 187.9)",
+          "oklch(49% 0.077 187.9)",
+          "oklch(61% 0.091 187.9)",
+          "oklch(72% 0.073 187.9)",
+          "oklch(84% 0.055 187.9)",
+          "oklch(95% 0.023 187.9)"
+        ]
+      },
+      "green-light": {
+        "role": "primary",
+        "displayName": "Green Light",
+        "canonical": "#7fdcaa",
+        "tonalRamp": [
+          "oklch(15% 0.029 159.0)",
+          "oklch(26% 0.052 159.0)",
+          "oklch(38% 0.075 159.0)",
+          "oklch(49% 0.098 159.0)",
+          "oklch(61% 0.115 159.0)",
+          "oklch(72% 0.092 159.0)",
+          "oklch(84% 0.069 159.0)",
+          "oklch(95% 0.029 159.0)"
+        ]
+      },
+      "teal": {
+        "role": "primary",
+        "displayName": "Teal",
+        "canonical": "#0c7f8f",
+        "tonalRamp": [
+          "oklch(15% 0.023 210.5)",
+          "oklch(26% 0.042 210.5)",
+          "oklch(38% 0.060 210.5)",
+          "oklch(49% 0.079 210.5)",
+          "oklch(61% 0.093 210.5)",
+          "oklch(72% 0.074 210.5)",
+          "oklch(84% 0.056 210.5)",
+          "oklch(95% 0.023 210.5)"
+        ]
+      },
+      "teal-end": {
+        "role": "primary",
+        "displayName": "Teal End",
+        "canonical": "#2a70c9",
+        "tonalRamp": [
+          "oklch(15% 0.039 256.3)",
+          "oklch(26% 0.070 256.3)",
+          "oklch(38% 0.101 256.3)",
+          "oklch(49% 0.131 256.3)",
+          "oklch(61% 0.155 256.3)",
+          "oklch(72% 0.124 256.3)",
+          "oklch(84% 0.093 256.3)",
+          "oklch(95% 0.039 256.3)"
+        ]
+      },
+      "teal-light": {
+        "role": "primary",
+        "displayName": "Teal Light",
+        "canonical": "#72d6e2",
+        "tonalRamp": [
+          "oklch(15% 0.024 205.7)",
+          "oklch(26% 0.043 205.7)",
+          "oklch(38% 0.062 205.7)",
+          "oklch(49% 0.081 205.7)",
+          "oklch(61% 0.095 205.7)",
+          "oklch(72% 0.076 205.7)",
+          "oklch(84% 0.057 205.7)",
+          "oklch(95% 0.024 205.7)"
+        ]
+      },
+      "blue": {
+        "role": "primary",
+        "displayName": "Blue",
+        "canonical": "#2d6bd8",
+        "tonalRamp": [
+          "oklch(15% 0.045 260.8)",
+          "oklch(26% 0.081 260.8)",
+          "oklch(38% 0.117 260.8)",
+          "oklch(49% 0.153 260.8)",
+          "oklch(61% 0.179 260.8)",
+          "oklch(72% 0.144 260.8)",
+          "oklch(84% 0.108 260.8)",
+          "oklch(95% 0.045 260.8)"
+        ]
+      },
+      "blue-end": {
+        "role": "primary",
+        "displayName": "Blue End",
+        "canonical": "#5a5fdc",
+        "tonalRamp": [
+          "oklch(15% 0.047 276.6)",
+          "oklch(26% 0.084 276.6)",
+          "oklch(38% 0.122 276.6)",
+          "oklch(49% 0.159 276.6)",
+          "oklch(61% 0.187 276.6)",
+          "oklch(72% 0.150 276.6)",
+          "oklch(84% 0.112 276.6)",
+          "oklch(95% 0.047 276.6)"
+        ]
+      },
+      "blue-light": {
+        "role": "primary",
+        "displayName": "Blue Light",
+        "canonical": "#9bbdff",
+        "tonalRamp": [
+          "oklch(15% 0.025 263.2)",
+          "oklch(26% 0.046 263.2)",
+          "oklch(38% 0.066 263.2)",
+          "oklch(49% 0.086 263.2)",
+          "oklch(61% 0.101 263.2)",
+          "oklch(72% 0.081 263.2)",
+          "oklch(84% 0.061 263.2)",
+          "oklch(95% 0.025 263.2)"
+        ]
+      },
+      "bg": {
+        "role": "neutral",
+        "displayName": "Bg",
+        "canonical": "color-mix(in srgb, var(--pc-color) 5%, #fff)",
+        "note": "Dynamic mix from the selected page or character colour and light/dark scheme."
+      },
+      "input": {
+        "role": "neutral",
+        "displayName": "Input",
+        "canonical": "#fff",
+        "tonalRamp": [
+          "oklch(15% 0.000 89.9)",
+          "oklch(26% 0.000 89.9)",
+          "oklch(38% 0.000 89.9)",
+          "oklch(49% 0.000 89.9)",
+          "oklch(61% 0.000 89.9)",
+          "oklch(72% 0.000 89.9)",
+          "oklch(84% 0.000 89.9)",
+          "oklch(95% 0.000 89.9)"
+        ]
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Ink",
+        "canonical": "#2a2b47",
+        "tonalRamp": [
+          "oklch(15% 0.013 281.4)",
+          "oklch(26% 0.023 281.4)",
+          "oklch(38% 0.033 281.4)",
+          "oklch(49% 0.043 281.4)",
+          "oklch(61% 0.050 281.4)",
+          "oklch(72% 0.040 281.4)",
+          "oklch(84% 0.030 281.4)",
+          "oklch(95% 0.013 281.4)"
+        ]
+      },
+      "muted": {
+        "role": "neutral",
+        "displayName": "Muted",
+        "canonical": "#636786",
+        "tonalRamp": [
+          "oklch(15% 0.012 278.8)",
+          "oklch(26% 0.022 278.8)",
+          "oklch(38% 0.032 278.8)",
+          "oklch(49% 0.042 278.8)",
+          "oklch(61% 0.049 278.8)",
+          "oklch(72% 0.039 278.8)",
+          "oklch(84% 0.029 278.8)",
+          "oklch(95% 0.012 278.8)"
+        ]
+      },
+      "error": {
+        "role": "neutral",
+        "displayName": "Error",
+        "canonical": "#b8203f",
+        "tonalRamp": [
+          "oklch(15% 0.046 16.6)",
+          "oklch(26% 0.083 16.6)",
+          "oklch(38% 0.120 16.6)",
+          "oklch(49% 0.157 16.6)",
+          "oklch(61% 0.185 16.6)",
+          "oklch(72% 0.148 16.6)",
+          "oklch(84% 0.111 16.6)",
+          "oklch(95% 0.046 16.6)"
+        ]
+      },
+      "accent": {
+        "role": "neutral",
+        "displayName": "Accent",
+        "canonical": "color-mix(in srgb, var(--pc-color) 80%, #17172e)",
+        "note": "Dynamic mix from the selected page or character colour and light/dark scheme."
+      },
+      "soft": {
+        "role": "neutral",
+        "displayName": "Soft",
+        "canonical": "color-mix(in srgb, var(--pc-color) 11%, #fff)",
+        "note": "Dynamic mix from the selected page or character colour and light/dark scheme."
+      },
+      "line": {
+        "role": "neutral",
+        "displayName": "Line",
+        "canonical": "color-mix(in srgb, var(--pc-color) 18%, #e9e9f0)",
+        "note": "Dynamic mix from the selected page or character colour and light/dark scheme."
+      },
+      "line-strong": {
+        "role": "neutral",
+        "displayName": "Line Strong",
+        "canonical": "color-mix(in srgb, var(--pc-color) 35%, #9a9cb5)",
+        "note": "Dynamic mix from the selected page or character colour and light/dark scheme."
+      },
+      "bg-dark": {
+        "role": "neutral",
+        "displayName": "Bg Dark",
+        "canonical": "color-mix(in srgb, var(--pc-color) 7%, #131322)",
+        "note": "Dynamic mix from the selected page or character colour and light/dark scheme."
+      },
+      "input-dark": {
+        "role": "neutral",
+        "displayName": "Input Dark",
+        "canonical": "color-mix(in srgb, var(--pc-color) 10%, #1d1d31)",
+        "note": "Dynamic mix from the selected page or character colour and light/dark scheme."
+      },
+      "ink-dark": {
+        "role": "neutral",
+        "displayName": "Ink Dark",
+        "canonical": "#eeedf7",
+        "tonalRamp": [
+          "oklch(15% 0.003 290.7)",
+          "oklch(26% 0.006 290.7)",
+          "oklch(38% 0.009 290.7)",
+          "oklch(49% 0.011 290.7)",
+          "oklch(61% 0.013 290.7)",
+          "oklch(72% 0.011 290.7)",
+          "oklch(84% 0.008 290.7)",
+          "oklch(95% 0.003 290.7)"
+        ]
+      },
+      "muted-dark": {
+        "role": "neutral",
+        "displayName": "Muted Dark",
+        "canonical": "#a5a7c4",
+        "tonalRamp": [
+          "oklch(15% 0.010 282.2)",
+          "oklch(26% 0.019 282.2)",
+          "oklch(38% 0.027 282.2)",
+          "oklch(49% 0.035 282.2)",
+          "oklch(61% 0.042 282.2)",
+          "oklch(72% 0.033 282.2)",
+          "oklch(84% 0.025 282.2)",
+          "oklch(95% 0.010 282.2)"
+        ]
+      },
+      "error-dark": {
+        "role": "neutral",
+        "displayName": "Error Dark",
+        "canonical": "#ff9db0",
+        "tonalRamp": [
+          "oklch(15% 0.030 7.5)",
+          "oklch(26% 0.053 7.5)",
+          "oklch(38% 0.077 7.5)",
+          "oklch(49% 0.101 7.5)",
+          "oklch(61% 0.118 7.5)",
+          "oklch(72% 0.095 7.5)",
+          "oklch(84% 0.071 7.5)",
+          "oklch(95% 0.030 7.5)"
+        ]
+      },
+      "accent-dark": {
+        "role": "neutral",
+        "displayName": "Accent Dark",
+        "canonical": "var(--pc-light)",
+        "note": "Dynamic mix from the selected page or character colour and light/dark scheme."
+      },
+      "soft-dark": {
+        "role": "neutral",
+        "displayName": "Soft Dark",
+        "canonical": "color-mix(in srgb, var(--pc-color) 22%, #1a1a2d)",
+        "note": "Dynamic mix from the selected page or character colour and light/dark scheme."
+      },
+      "line-dark": {
+        "role": "neutral",
+        "displayName": "Line Dark",
+        "canonical": "color-mix(in srgb, var(--pc-color) 24%, #303044)",
+        "note": "Dynamic mix from the selected page or character colour and light/dark scheme."
+      },
+      "line-strong-dark": {
+        "role": "neutral",
+        "displayName": "Line Strong Dark",
+        "canonical": "color-mix(in srgb, var(--pc-light) 38%, #4a4c6c)",
+        "note": "Dynamic mix from the selected page or character colour and light/dark scheme."
+      },
+      "white": {
+        "role": "neutral",
+        "displayName": "White",
+        "canonical": "#fff",
+        "tonalRamp": [
+          "oklch(15% 0.000 89.9)",
+          "oklch(26% 0.000 89.9)",
+          "oklch(38% 0.000 89.9)",
+          "oklch(49% 0.000 89.9)",
+          "oklch(61% 0.000 89.9)",
+          "oklch(72% 0.000 89.9)",
+          "oklch(84% 0.000 89.9)",
+          "oklch(95% 0.000 89.9)"
+        ]
+      },
+      "portrait-ground": {
+        "role": "neutral",
+        "displayName": "Portrait Ground",
+        "canonical": "#f5f1ff"
+      },
+      "accent-mix-base": {
+        "role": "neutral",
+        "displayName": "Accent Mix Base",
+        "canonical": "#17172e"
+      },
+      "mask-opaque": {
+        "role": "neutral",
+        "displayName": "Mask Opaque",
+        "canonical": "#000"
+      },
+      "status-overlay": {
+        "role": "neutral",
+        "displayName": "Status Overlay",
+        "canonical": "rgb(0 0 0 / .18)"
+      },
+      "icon-overlay": {
+        "role": "neutral",
+        "displayName": "Icon Overlay",
+        "canonical": "rgb(0 0 0 / .12)"
+      },
+      "icon-hover-overlay": {
+        "role": "neutral",
+        "displayName": "Icon Hover Overlay",
+        "canonical": "rgb(0 0 0 / .25)"
+      }
+    },
+    "typographyMeta": {
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Empty-state greeting."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Character name."
+      },
+      "setup-title": {
+        "displayName": "Setup Title",
+        "purpose": "Connection heading."
+      },
+      "section": {
+        "displayName": "Section",
+        "purpose": "Management heading."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "General body text."
+      },
+      "dialogue": {
+        "displayName": "Dialogue",
+        "purpose": "Dialogue bubble text."
+      },
+      "body-ui": {
+        "displayName": "Body Ui",
+        "purpose": "Inputs and interface prose."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Field labels."
+      },
+      "byline": {
+        "displayName": "Byline",
+        "purpose": "Message author."
+      },
+      "status": {
+        "displayName": "Status",
+        "purpose": "Header model status."
+      },
+      "mobile-title": {
+        "displayName": "Mobile title",
+        "purpose": "19px character name in compact windows."
+      },
+      "mobile-input": {
+        "displayName": "Mobile input",
+        "purpose": "16px input text avoids mobile browser focus zoom."
+      }
+    },
+    "shadows": [
+      {
+        "name": "floating-frame",
+        "value": "0 18px 54px rgb(30 24 65 / .24), 0 4px 12px rgb(30 24 65 / .1)",
+        "purpose": "Popup frame only."
+      }
+    ],
+    "motion": [
+      {
+        "name": "popup-enter",
+        "value": ".24s cubic-bezier(.16, 1, .3, 1); translateY(8px), opacity .7 to none, 1",
+        "purpose": "Reduced-motion-gated entrance."
+      },
+      {
+        "name": "portrait-tick",
+        "value": "170ms",
+        "purpose": "Blink and talk frames; paused while hidden or reduced motion is enabled."
+      },
+      {
+        "name": "control-state",
+        "value": "150ms",
+        "purpose": "Colour, border and background transitions."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "mobile",
+        "value": "480px",
+        "purpose": "Host viewport controls mobile sizing: 16px input text and 44px icon/tab targets."
+      }
+    ],
+    "imageColorAssignment": {
+      "bundled": {
+        "miru": "violet",
+        "koharu": "orange",
+        "xiaoxiao": "red",
+        "riley": "green",
+        "amara": "teal",
+        "elsie": "blue"
+      },
+      "custom": "First usable hue from iris, hair, ribbon; otherwise figure id hash. Before an object portrait resolves, use Profile id hash.",
+      "hashOrder": [
+        "violet",
+        "pink",
+        "red",
+        "orange",
+        "green",
+        "teal",
+        "blue"
+      ]
+    },
+    "scope": "Embedded chat and settings popup only.",
+    "previewNote": "Component previews use default violet. Synthesized tonal ramps are swatch aids, not shipped CSS tokens.",
+    "notCanonized": "System-derived rounded heading faces are retained only as the explicit local-font platform constraint, not endorsed as a reusable display-face standard. Visual contrast and rendering were not re-audited in this documentation pass.",
+    "pageColorSelection": {
+      "source": "src/chat/page-color.ts",
+      "priority": [
+        "host theme tokens",
+        "matching theme-color metadata",
+        "visible filled controls",
+        "coloured page background",
+        "styled links",
+        "character colour"
+      ],
+      "maxVisitedNodes": 600,
+      "maxSampledControls": 24,
+      "refresh": "open, root theme changes, head changes, colour scheme, resize; 100ms coalescing while visible",
+      "network": false
+    }
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Character-filled primary action.",
+      "html": "<div class=\"ds-messenger\"><button class=\"ds-primary\">Connect</button></div>",
+      "css": ".ds-messenger {\n  --pc-color: #6a58e0; --pc-color-end: #9a4fd3; --pc-light: #b9afff;\n  --pc-bg: color-mix(in srgb, var(--pc-color) 5%, #fff); --pc-input: #fff;\n  --pc-ink: #2a2b47; --pc-muted: #636786; --pc-error: #b8203f;\n  --pc-accent: color-mix(in srgb, var(--pc-color) 80%, #17172e);\n  --pc-soft: color-mix(in srgb, var(--pc-color) 11%, #fff);\n  --pc-line: color-mix(in srgb, var(--pc-color) 18%, #e9e9f0);\n  --pc-line-strong: color-mix(in srgb, var(--pc-color) 35%, #9a9cb5);\n  --pc-round: ui-rounded, 'Hiragino Maru Gothic ProN', 'Yuanti SC', system-ui, sans-serif;\n  \n  background: var(--pc-bg); color: var(--pc-ink); border-radius: 22px;\n  font: 400 14px/1.6 system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;\n  isolation: isolate; text-align: left; color-scheme: light; pointer-events: auto;\n  font-variant-numeric: tabular-nums;\n}\n\n.ds-primary { display: inline-flex; justify-content: center; align-items: center; gap: 8px; width: 100%; padding: 12px 16px; min-height: 44px; border: 0; border-radius: 24px; color: #fff !important; background: var(--pc-color); font-weight: 650 !important; transition: background-color .15s; }\n\n.ds-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--pc-color) 85%, #17172e); }\n\n.ds-primary svg { width: 17px; height: 17px; }\n\n.ds-manage-page form > .ds-primary, .ds-manage-page form > .ds-small { margin-top: 2px; }\n.ds-messenger button,.ds-messenger input{font:inherit}.ds-messenger :focus-visible{outline:2px solid var(--pc-accent);outline-offset:3px}"
+    },
+    {
+      "name": "Small Button",
+      "kind": "button",
+      "refersTo": "button-small",
+      "description": "Bordered secondary pill.",
+      "html": "<div class=\"ds-messenger\"><button class=\"ds-small\">Load models</button></div>",
+      "css": ".ds-messenger {\n  --pc-color: #6a58e0; --pc-color-end: #9a4fd3; --pc-light: #b9afff;\n  --pc-bg: color-mix(in srgb, var(--pc-color) 5%, #fff); --pc-input: #fff;\n  --pc-ink: #2a2b47; --pc-muted: #636786; --pc-error: #b8203f;\n  --pc-accent: color-mix(in srgb, var(--pc-color) 80%, #17172e);\n  --pc-soft: color-mix(in srgb, var(--pc-color) 11%, #fff);\n  --pc-line: color-mix(in srgb, var(--pc-color) 18%, #e9e9f0);\n  --pc-line-strong: color-mix(in srgb, var(--pc-color) 35%, #9a9cb5);\n  --pc-round: ui-rounded, 'Hiragino Maru Gothic ProN', 'Yuanti SC', system-ui, sans-serif;\n  \n  background: var(--pc-bg); color: var(--pc-ink); border-radius: 22px;\n  font: 400 14px/1.6 system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;\n  isolation: isolate; text-align: left; color-scheme: light; pointer-events: auto;\n  font-variant-numeric: tabular-nums;\n}\n\n.ds-small { border: 1px solid var(--pc-line-strong); background: var(--pc-input); color: var(--pc-accent) !important; min-height: 36px; padding: 7px 14px; border-radius: 20px; font-size: 12px !important; font-weight: 600 !important; transition: background-color .15s, border-color .15s; }\n\n.ds-small:hover:not(:disabled), .ds-key button:hover:not(:disabled) { background: var(--pc-soft); border-color: var(--pc-accent); }\n\n.ds-manage-page form > .ds-primary, .ds-manage-page form > .ds-small { margin-top: 2px; }\n.ds-messenger button,.ds-messenger input{font:inherit}.ds-messenger :focus-visible{outline:2px solid var(--pc-accent);outline-offset:3px}"
+    },
+    {
+      "name": "Link",
+      "kind": "button",
+      "refersTo": "link",
+      "description": "Underlined tertiary action.",
+      "html": "<div class=\"ds-messenger\"><button class=\"ds-link\">Enter a model ID</button></div>",
+      "css": ".ds-messenger {\n  --pc-color: #6a58e0; --pc-color-end: #9a4fd3; --pc-light: #b9afff;\n  --pc-bg: color-mix(in srgb, var(--pc-color) 5%, #fff); --pc-input: #fff;\n  --pc-ink: #2a2b47; --pc-muted: #636786; --pc-error: #b8203f;\n  --pc-accent: color-mix(in srgb, var(--pc-color) 80%, #17172e);\n  --pc-soft: color-mix(in srgb, var(--pc-color) 11%, #fff);\n  --pc-line: color-mix(in srgb, var(--pc-color) 18%, #e9e9f0);\n  --pc-line-strong: color-mix(in srgb, var(--pc-color) 35%, #9a9cb5);\n  --pc-round: ui-rounded, 'Hiragino Maru Gothic ProN', 'Yuanti SC', system-ui, sans-serif;\n  \n  background: var(--pc-bg); color: var(--pc-ink); border-radius: 22px;\n  font: 400 14px/1.6 system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;\n  isolation: isolate; text-align: left; color-scheme: light; pointer-events: auto;\n  font-variant-numeric: tabular-nums;\n}\n\n.ds-link { border: 0; padding: 6px 0; background: none; color: var(--pc-accent) !important; font-size: 12px !important; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }\n\n.ds-link:hover:not(:disabled) { text-decoration-thickness: 2px; }\n\n.ds-record .ds-link:not(.ds-danger) { color: var(--pc-ink) !important; }\n.ds-messenger button,.ds-messenger input{font:inherit}.ds-messenger :focus-visible{outline:2px solid var(--pc-accent);outline-offset:3px}"
+    },
+    {
+      "name": "Labelled Field",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Rounded field with an accent focus outline.",
+      "html": "<div class=\"ds-messenger\"><label class=\"ds-field\"><span>API URL</span><input class=\"ds-input\" placeholder=\"https://api.example.com/v1\"></label></div>",
+      "css": ".ds-messenger {\n  --pc-color: #6a58e0; --pc-color-end: #9a4fd3; --pc-light: #b9afff;\n  --pc-bg: color-mix(in srgb, var(--pc-color) 5%, #fff); --pc-input: #fff;\n  --pc-ink: #2a2b47; --pc-muted: #636786; --pc-error: #b8203f;\n  --pc-accent: color-mix(in srgb, var(--pc-color) 80%, #17172e);\n  --pc-soft: color-mix(in srgb, var(--pc-color) 11%, #fff);\n  --pc-line: color-mix(in srgb, var(--pc-color) 18%, #e9e9f0);\n  --pc-line-strong: color-mix(in srgb, var(--pc-color) 35%, #9a9cb5);\n  --pc-round: ui-rounded, 'Hiragino Maru Gothic ProN', 'Yuanti SC', system-ui, sans-serif;\n  \n  background: var(--pc-bg); color: var(--pc-ink); border-radius: 22px;\n  font: 400 14px/1.6 system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;\n  isolation: isolate; text-align: left; color-scheme: light; pointer-events: auto;\n  font-variant-numeric: tabular-nums;\n}\n\n.ds-field > span { display: block; margin-bottom: 6px; }\n\n.ds-input { width: 100%; min-height: 42px; padding: 10px 12px; background: var(--pc-input); color: var(--pc-ink); border: 1px solid var(--pc-line-strong); border-radius: 10px; caret-color: var(--pc-accent); font-size: 13px !important; transition: border-color .15s; }\n\n.ds-messenger .ds-input, .ds-messenger .ds-key button { font-weight: 400; }\n\n.ds-input:hover:not(:disabled) { border-color: var(--pc-accent); }\n\n.ds-input:focus-visible { border-color: var(--pc-accent); outline-offset: 2px; }\n\n.ds-input::placeholder { color: var(--pc-muted); opacity: 1; }\n\ntextarea.ds-input { line-height: 1.65; }\n\n.ds-mobile .ds-input, .ds-mobile .ds-compose-row textarea { font-size: 16px !important; }\n\n.ds-manage-page textarea.ds-input { resize: vertical; min-height: 72px; }\n.ds-messenger button,.ds-messenger input{font:inherit}.ds-messenger :focus-visible{outline:2px solid var(--pc-accent);outline-offset:3px}"
+    },
+    {
+      "name": "Settings Tabs",
+      "kind": "nav",
+      "refersTo": "tab-active",
+      "description": "Character-filled active tab among scrolling pills.",
+      "html": "<div class=\"ds-messenger\"><nav class=\"ds-tabs\"><button aria-pressed=\"true\">Profile</button><button>Memory</button><button>History</button></nav></div>",
+      "css": ".ds-messenger {\n  --pc-color: #6a58e0; --pc-color-end: #9a4fd3; --pc-light: #b9afff;\n  --pc-bg: color-mix(in srgb, var(--pc-color) 5%, #fff); --pc-input: #fff;\n  --pc-ink: #2a2b47; --pc-muted: #636786; --pc-error: #b8203f;\n  --pc-accent: color-mix(in srgb, var(--pc-color) 80%, #17172e);\n  --pc-soft: color-mix(in srgb, var(--pc-color) 11%, #fff);\n  --pc-line: color-mix(in srgb, var(--pc-color) 18%, #e9e9f0);\n  --pc-line-strong: color-mix(in srgb, var(--pc-color) 35%, #9a9cb5);\n  --pc-round: ui-rounded, 'Hiragino Maru Gothic ProN', 'Yuanti SC', system-ui, sans-serif;\n  \n  background: var(--pc-bg); color: var(--pc-ink); border-radius: 22px;\n  font: 400 14px/1.6 system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;\n  isolation: isolate; text-align: left; color-scheme: light; pointer-events: auto;\n  font-variant-numeric: tabular-nums;\n}\n\n.ds-tabs { display: flex; gap: 4px; overflow-x: auto; scrollbar-width: thin; scrollbar-color: var(--pc-line-strong) transparent; margin: 12px -6px 24px; padding: 4px 2px; }\n\n.ds-tabs button { flex: 1 0 auto; border: 0; border-radius: 22px; background: transparent; min-height: 38px; padding: 8px 10px; font-size: 12px; color: var(--pc-muted) !important; white-space: nowrap; transition: color .15s, background-color .15s; }\n\n.ds-tabs button:hover { background: var(--pc-soft); color: var(--pc-accent) !important; }\n\n.ds-tabs button[aria-pressed='true'] { background: var(--pc-color); color: #fff !important; font-weight: 650; }\n\n.ds-tabs button:focus-visible { outline-offset: -3px; }\n\n.ds-mobile .ds-tabs button { min-height: 44px; }\n.ds-messenger button,.ds-messenger input{font:inherit}.ds-messenger :focus-visible{outline:2px solid var(--pc-accent);outline-offset:3px}"
+    },
+    {
+      "name": "Status Pill",
+      "kind": "chip",
+      "refersTo": "status",
+      "description": "Compact model status on the gradient header.",
+      "html": "<div class=\"ds-messenger\"><header class=\"ds-header\"><div class=\"ds-status\">demo-model</div></header></div>",
+      "css": ".ds-messenger {\n  --pc-color: #6a58e0; --pc-color-end: #9a4fd3; --pc-light: #b9afff;\n  --pc-bg: color-mix(in srgb, var(--pc-color) 5%, #fff); --pc-input: #fff;\n  --pc-ink: #2a2b47; --pc-muted: #636786; --pc-error: #b8203f;\n  --pc-accent: color-mix(in srgb, var(--pc-color) 80%, #17172e);\n  --pc-soft: color-mix(in srgb, var(--pc-color) 11%, #fff);\n  --pc-line: color-mix(in srgb, var(--pc-color) 18%, #e9e9f0);\n  --pc-line-strong: color-mix(in srgb, var(--pc-color) 35%, #9a9cb5);\n  --pc-round: ui-rounded, 'Hiragino Maru Gothic ProN', 'Yuanti SC', system-ui, sans-serif;\n  \n  background: var(--pc-bg); color: var(--pc-ink); border-radius: 22px;\n  font: 400 14px/1.6 system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;\n  isolation: isolate; text-align: left; color-scheme: light; pointer-events: auto;\n  font-variant-numeric: tabular-nums;\n}\n\n.ds-header::before { content: ''; position: absolute; inset: 0; z-index: -1; pointer-events: none; background: radial-gradient(circle, rgb(255 255 255 / .18) 1px, transparent 1.5px) right top / 7px 7px; mask-image: linear-gradient(105deg, transparent 35%, #000); }\n\n.ds-header::after { content: ''; position: absolute; width: 90px; height: 180px; right: 16px; top: -60px; transform: rotate(32deg); border-inline: 1px solid rgb(255 255 255 / .15); z-index: -1; pointer-events: none; }\n\n.ds-status { width: fit-content; max-width: 100%; padding: 3px 8px; border-radius: 20px; background: rgb(0 0 0 / .18); color: #fff; font-size: 10px; line-height: 1.5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n.ds-messenger button,.ds-messenger input{font:inherit}.ds-messenger :focus-visible{outline:2px solid var(--pc-accent);outline-offset:3px}"
+    },
+    {
+      "name": "Dialogue Bubbles",
+      "kind": "custom",
+      "refersTo": "dialogue",
+      "description": "Opposing tail corners and character-filled user dialogue.",
+      "html": "<div class=\"ds-messenger\"><div class=\"ds-messages\"><div class=\"ds-message\" data-role=\"assistant\"><div class=\"ds-author\">Miru</div><div class=\"ds-text\">Want to pick colours together?</div></div><div class=\"ds-message\" data-role=\"user\"><div class=\"ds-author\">You</div><div class=\"ds-text\">Yes, let’s try violet.</div></div></div></div>",
+      "css": ".ds-messenger {\n  --pc-color: #6a58e0; --pc-color-end: #9a4fd3; --pc-light: #b9afff;\n  --pc-bg: color-mix(in srgb, var(--pc-color) 5%, #fff); --pc-input: #fff;\n  --pc-ink: #2a2b47; --pc-muted: #636786; --pc-error: #b8203f;\n  --pc-accent: color-mix(in srgb, var(--pc-color) 80%, #17172e);\n  --pc-soft: color-mix(in srgb, var(--pc-color) 11%, #fff);\n  --pc-line: color-mix(in srgb, var(--pc-color) 18%, #e9e9f0);\n  --pc-line-strong: color-mix(in srgb, var(--pc-color) 35%, #9a9cb5);\n  --pc-round: ui-rounded, 'Hiragino Maru Gothic ProN', 'Yuanti SC', system-ui, sans-serif;\n  \n  background: var(--pc-bg); color: var(--pc-ink); border-radius: 22px;\n  font: 400 14px/1.6 system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;\n  isolation: isolate; text-align: left; color-scheme: light; pointer-events: auto;\n  font-variant-numeric: tabular-nums;\n}\n\n.ds-message[data-role='user'] { margin-left: 42px; display: flex; align-items: flex-end; flex-direction: column; }\n\n.ds-message[data-role='user'] .ds-text { max-width: 100%; background: var(--pc-color); color: #fff; border-radius: 17px 4px 17px 17px; }\n\n.ds-message[data-role='user'] .ds-author { text-align: right; }\n.ds-messenger button,.ds-messenger input{font:inherit}.ds-messenger :focus-visible{outline:2px solid var(--pc-accent);outline-offset:3px}"
+    },
+    {
+      "name": "Remembered Record",
+      "kind": "custom",
+      "refersTo": "",
+      "description": "Memory text with the implemented four-point marker.",
+      "html": "<div class=\"ds-messenger\"><div class=\"ds-record-list\"><div class=\"ds-record\" data-memory-id=\"sample\"><p>You like TypeScript.</p><p class=\"ds-note\">Remembered from chat</p><button class=\"ds-link\">Edit</button></div></div></div>",
+      "css": ".ds-messenger {\n  --pc-color: #6a58e0; --pc-color-end: #9a4fd3; --pc-light: #b9afff;\n  --pc-bg: color-mix(in srgb, var(--pc-color) 5%, #fff); --pc-input: #fff;\n  --pc-ink: #2a2b47; --pc-muted: #636786; --pc-error: #b8203f;\n  --pc-accent: color-mix(in srgb, var(--pc-color) 80%, #17172e);\n  --pc-soft: color-mix(in srgb, var(--pc-color) 11%, #fff);\n  --pc-line: color-mix(in srgb, var(--pc-color) 18%, #e9e9f0);\n  --pc-line-strong: color-mix(in srgb, var(--pc-color) 35%, #9a9cb5);\n  --pc-round: ui-rounded, 'Hiragino Maru Gothic ProN', 'Yuanti SC', system-ui, sans-serif;\n  \n  background: var(--pc-bg); color: var(--pc-ink); border-radius: 22px;\n  font: 400 14px/1.6 system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;\n  isolation: isolate; text-align: left; color-scheme: light; pointer-events: auto;\n  font-variant-numeric: tabular-nums;\n}\n\n.ds-link { border: 0; padding: 6px 0; background: none; color: var(--pc-accent) !important; font-size: 12px !important; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }\n\n.ds-link:hover:not(:disabled) { text-decoration-thickness: 2px; }\n\n.ds-record-list { margin-top: 4px; border-top: 1px solid var(--pc-line); }\n\n.ds-record { padding: 13px 0 6px; border-bottom: 1px solid var(--pc-line); overflow-wrap: anywhere; }\n\n.ds-record p { margin: 0 0 6px; white-space: pre-wrap; line-height: 1.7; }\n\n.ds-record[data-entry-id] > p { color: var(--pc-ink); }\n\n.ds-record[data-memory-id] { position: relative; padding-left: 24px; }\n\n.ds-record[data-memory-id]::before { content: ''; position: absolute; left: 0; top: 20px; width: 12px; height: 12px; background: var(--pc-accent); clip-path: polygon(50% 0, 63% 37%, 100% 50%, 63% 63%, 50% 100%, 37% 63%, 0 50%, 37% 37%); }\n\n.ds-record[data-memory-id] > p:first-child + .ds-note { margin-top: 6px; }\n\n.ds-record .ds-note { margin: 0 0 4px; font-size: 11px; }\n\n.ds-record .ds-row-actions { margin: 4px 0; }\n\n.ds-record .ds-link:not(.ds-danger) { color: var(--pc-ink) !important; }\n\n.ds-record details { margin: 8px 0; font-size: 12px; }\n\n.ds-record summary { cursor: pointer; color: var(--pc-muted); width: fit-content; }\n\n.ds-record summary:hover { color: var(--pc-ink); }\n\n.ds-record details p { margin: 6px 0; padding-left: 10px; border-left: 1px solid var(--pc-line-strong); color: var(--pc-muted); }\n\n.ds-record form .ds-field { margin-bottom: 6px; }\n.ds-messenger button,.ds-messenger input{font:inherit}.ds-messenger :focus-visible{outline:2px solid var(--pc-accent);outline-offset:3px}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Character Messenger",
+    "overview": "The popup is an anime game character messenger (角色通讯). The companion lends her face and image colour (印象色) to the interface: a bright gradient header, manga screentone, rounded dialogue bubbles and pill controls. Her rig portrait looks away while thinking and moves its mouth while replying.\n\nThis system governs the embedded chat and settings popup, not the hosted site or the pet’s speech bubble. It remains browser-only, with local system fonts and inline SVG artwork; no external font or portrait asset is required. Dark mode follows the device preference and uses character-tinted night surfaces.",
+    "keyCharacteristics": [
+      "Character identity comes from her rig and image colour.",
+      "A gradient, screentone dots and slanted stripes distinguish the header.",
+      "Companion bubbles use the input surface; user bubbles use the character fill and white text.",
+      "Round portraits, pill actions and four-point sparkles repeat across chat and settings."
+    ],
+    "rules": [
+      {
+        "name": "The Page and Character Colour Rule",
+        "body": "Prefer host theme tokens, matching theme-color metadata, then visible filled controls; use coloured backgrounds and styled links as secondary signals. Map to the seven contrast-tested gradient families. Ignore neutral or nearly transparent colours and default browser links. Resample on open, host theme changes and resize with bounded work, never on scroll. Without a usable page accent, use the character mapping, palette hue, then deterministic id fallback. Late portraits cannot override a page colour; artwork retains its original palette.",
+        "section": "colors"
+      },
+      {
+        "name": "The Fill and Accent Rule",
+        "body": "Use character colour for filled controls and user bubbles. Use the derived accent for links, focus and sparkles; dark mode takes the character’s light tone for that accent.",
+        "section": "colors"
+      },
+      {
+        "name": "The Local Font Rule",
+        "body": "Use only the implemented local font stacks. Rounded headings are a platform-constrained fallback, not a portable display-face recommendation for other surfaces.",
+        "section": "typography"
+      },
+      {
+        "name": "The Mobile Sixteen Rule",
+        "body": "At host viewport widths of 480px and below, text inputs and the composer use 16px text; icon and tab targets grow to at least 44px.",
+        "section": "typography"
+      }
+    ],
+    "dos": [
+      "Do carry character identity through portraits, gradient stops, bubble fills and active controls.",
+      "Do keep rig portraits decorative and retain textual names, model status and accessible control labels.",
+      "Do retain visible focus outlines and device-driven light, dark and reduced-motion behaviour.",
+      "Do use four-point CSS or SVG sparkles for the empty portrait surround, memory markers and decorative fallback."
+    ],
+    "donts": [
+      "Don't hash bundled characters to arbitrary colours; keep their hand-mapped image colours.",
+      "Don't load external fonts, portrait images or icon fonts into the embedded popup.",
+      "Don't replace the character’s face with invented raster artwork when her rig portrait is available."
+    ]
+  }
+}

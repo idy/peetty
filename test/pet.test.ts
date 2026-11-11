@@ -13,8 +13,11 @@ import { floor, limits, type Perch, type PerchOptions } from '../src/pet/perches
 import { planJump, weighted } from '../src/pet/physics.ts';
 import type { Overlay } from '../src/pet/ui.ts';
 import type { CompanionAction, PeettyModelOptions } from '../src/chat/types.ts';
+import { createChatPanel } from '../src/chat/panel.ts';
+import { BrowserProfileStore, type ProfileRecord } from '../src/chat/profiles.ts';
 import { languageOf, strings, type Language } from '../src/pet/i18n.ts';
 import { deferred, ElementStub, installPetDOM, pointer } from './helpers/pet-dom.ts';
+import { installChatIndexedDB } from './helpers/chat-storage.ts';
 import { stubGlobals } from './helpers/stubs.ts';
 
 /** Inspect controller state while driving its public methods, events and frame loop. */
@@ -129,6 +132,398 @@ async function petWithChatLoader(loadChatPanel: typeof import('../src/chat/load.
   runInThisContext(`(function(module, loadChatPanelForTest) { ${result.outputFiles[0]!.text}\n})`)(module, loadChatPanel);
   return module.exports.Peetty;
 }
+
+/** Keep the controller's deterministic frame loop while exercising its real lazy panel and storage. */
+async function mountProfileChatPet(t: Parameters<typeof installPetDOM>[0], options: ConstructorParameters<typeof Peetty>[0]) {
+  const IsolatedPeetty = await petWithChatLoader(async () => ({ createChatPanel }));
+  const dom = installPetDOM(t);
+  const window = new BrowserWindow({ url: 'https://host.example/', settings: { enableIframePageLoading: true } });
+  const restore = stubGlobals({ window, document: window.document, location: window.location, Element: window.Element, HTMLElement: window.HTMLElement, Node: window.Node, matchMedia: window.matchMedia.bind(window) });
+  const pet = new IsolatedPeetty({ greet: false, language: 'en', ...options });
+  dom.cleanup(() => { pet.destroy(); window.close(); restore(); });
+  const state = controller(pet);
+  mock.method(state, 'scan', () => []);
+  await pet.mount();
+  const root = () => {
+    const frame = state.overlay.host.shadowRoot!.querySelector<HTMLIFrameElement>('iframe');
+    assert.ok(frame, 'the public chat entry point installed a real panel');
+    const result = frame.contentDocument!.body.firstElementChild!.shadowRoot;
+    assert.ok(result); return result;
+  };
+  const query = <T extends HTMLElement>(selector: string): T => {
+    const result = root().querySelector<T>(selector); assert.ok(result, `${selector} exists`); return result;
+  };
+  const click = (text: string) => {
+    const result = [...root().querySelectorAll<HTMLButtonElement>('button')].find((node) => node.textContent === text);
+    assert.ok(result, `${text} button exists`); result.click();
+  };
+  const settle = async () => { for (let i = 0; i < 100; i++) await Promise.resolve(); };
+  const waitFor = async (condition: () => boolean) => {
+    for (let i = 0; i < 1_000 && !condition(); i++) {
+      await settle();
+      dom.frame(0); // Advance yielding backup work without advancing gesture/deadline clocks.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.ok(condition(), 'expected asynchronous panel work to finish');
+  };
+  return { dom, pet, state, window, root, query, click, settle, waitFor };
+}
+
+describe('Pet profile figure integration', () => {
+  for (const interruption of ['ready', 'superseded', 'destroyed', 'failed'] as const) {
+    it(`applies and settles a figure before stalled chat initialization is ${interruption}`, async (t) => {
+      const module = deferred<{ createChatPanel: typeof createChatPanel }>();
+      const entered = deferred<void>();
+      const updates: (string | object)[] = [];
+      const panel = { ...chatPanelStub(), async setFigure(figure: string | object) { updates.push(figure); } };
+      const IsolatedPeetty = await petWithChatLoader(() => { entered.resolve(); return module.promise; });
+      const dom = installPetDOM(t);
+      const pet = new IsolatedPeetty({ greet: false }); dom.cleanup(() => pet.destroy());
+      await pet.mount();
+      const opening = pet.openChat(); await entered.promise;
+      const changing = pet.setFigure('elsie');
+      for (let i = 0; i < 100 && controller(pet).figure.id !== 'elsie'; i++) await Promise.resolve();
+      assert.equal(controller(pet).figure.id, 'elsie', 'loaded artwork is independent of the stalled module');
+      const settled = await Promise.race([changing.then(() => true), new Promise<false>((resolve) => setImmediate(() => resolve(false)))]);
+      assert.equal(settled, true, 'setFigure must not retain a chat-loading wait');
+      if (interruption === 'superseded') await pet.setFigure('koharu');
+      if (interruption === 'destroyed') pet.destroy();
+      if (interruption === 'failed') module.reject(new Error('Synthetic chat module failure'));
+      else module.resolve({ createChatPanel: async () => panel });
+      await opening;
+      if (interruption === 'destroyed') {
+        assert.deepEqual(updates, []); assert.equal(pet.mounted, false);
+      } else if (interruption === 'failed') {
+        assert.deepEqual(updates, []); assert.equal(controller(pet).figure.id, 'elsie');
+      } else {
+        const expected = interruption === 'superseded' ? 'koharu' : 'elsie';
+        assert.equal(controller(pet).figure.id, expected);
+        assert.deepEqual(updates, [expected], 'only the newest selection reconciles into the panel');
+        assert.equal(panel.isOpen, true);
+      }
+    });
+  }
+  it('restores skipped saved artwork after an SDK request fails during panel construction', async (t) => {
+    installChatIndexedDB(t);
+    const namespace = 'sdk-figure-init-failed-restore';
+    const seed = new BrowserProfileStore(namespace); await seed.initialize({ name: 'Saved Elsie', figure: 'elsie' }); t.after(() => seed.close());
+    const savedId = seed.activeProfileId;
+    const mounted = await seed.create({ name: 'Mounted Miru', figure: 'miru' }); await seed.select(savedId);
+    const { pet, state, query, settle, window } = await mountProfileChatPet(t, { chat: { storageKey: namespace } });
+    assert.equal(state.view.renderer.figure.id, 'miru');
+    const entered = deferred<void>(); const release = deferred<void>(); const response = deferred<Response>();
+    const initialize = BrowserProfileStore.prototype.initialize;
+    mock.method(BrowserProfileStore.prototype, 'initialize', async function(this: BrowserProfileStore, ...args: Parameters<typeof initialize>) {
+      await initialize.apply(this, args); entered.resolve(); await release.promise;
+    });
+    mock.method(globalThis, 'fetch', () => response.promise);
+    const opening = pet.openChat(); await entered.promise;
+    const changing = pet.setFigure('/synthetic-failed-sdk.json');
+    const failed = assert.rejects(changing, /HTTP 503/);
+    release.resolve(); await opening; await settle();
+    assert.equal(query('.pc-name').textContent, 'Saved Elsie');
+    response.resolve(new Response('', { status: 503 })); await failed; await settle();
+    assert.equal(state.view.renderer.figure.id, 'elsie', 'the actual saved figure replaces the old mounted artwork');
+    assert.equal(query('.peetty-chat').dataset.color, 'blue');
+    assert.equal(seed.activeProfile.figure, 'elsie');
+    await pet.configure();
+    const selector = query<HTMLSelectElement>('.pc-profile-select'); selector.value = mounted.id;
+    selector.dispatchEvent(new window.Event('change') as unknown as Event);
+    for (let i = 0; i < 1_000 && selector.disabled; i++) await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(selector.disabled, false); await settle();
+    assert.equal(state.view.renderer.figure.id, 'miru', 'retry updates panel bookkeeping before a later profile switch');
+    assert.equal(query('.pc-name').textContent, 'Mounted Miru');
+  });
+
+  it('invalidates an SDK load when switching to another profile with the same current figure', async (t) => {
+    installChatIndexedDB(t);
+    const namespace = 'sdk-figure-initiating-owner';
+    const seed = new BrowserProfileStore(namespace); await seed.initialize({ name: 'First owner' }); t.after(() => seed.close());
+    const firstId = seed.activeProfileId;
+    const second = await seed.create({ name: 'Second owner', figure: 'miru' });
+    await seed.select(firstId);
+    const { pet, state, query, window, settle } = await mountProfileChatPet(t, { chat: { storageKey: namespace } });
+    await pet.openChat();
+    const delayed = deferred<Response>(); let signal: AbortSignal | null | undefined;
+    mock.method(globalThis, 'fetch', (_input: unknown, options?: RequestInit) => { signal = options?.signal; return delayed.promise; });
+    const changing = pet.setFigure('/synthetic-late-sdk.json'); await turns();
+    await pet.configure();
+    const selector = query<HTMLSelectElement>('.pc-profile-select'); selector.value = second.id;
+    selector.dispatchEvent(new window.Event('change') as unknown as Event); await settle();
+    assert.equal(query('.pc-name').textContent, 'Second owner');
+    assert.equal(signal?.aborted, true, 'switching ownership cancels the obsolete SDK request');
+    delayed.resolve(response(PRESETS.elsie)); await changing; await settle();
+    assert.equal(state.view.renderer.figure.id, 'miru');
+    const inspect = new BrowserProfileStore(namespace); await inspect.initialize(); t.after(() => inspect.close());
+    assert.equal(inspect.profileInfo(firstId)?.figure, 'miru');
+    assert.equal(inspect.profileInfo(second.id)?.figure, 'miru');
+  });
+
+  it('restores the destination artwork when switching while SDK figure persistence is pending', async (t) => {
+    installChatIndexedDB(t);
+    const namespace = 'sdk-figure-pending-persistence';
+    const seed = new BrowserProfileStore(namespace); await seed.initialize({ name: 'First owner' }); t.after(() => seed.close());
+    const firstId = seed.activeProfileId;
+    const second = await seed.create({ name: 'Second owner', figure: 'miru' }); await seed.select(firstId);
+    const { pet, state, query, window, settle } = await mountProfileChatPet(t, { chat: { storageKey: namespace } });
+    await pet.configure();
+    const entered = deferred<void>(); const release = deferred<void>();
+    const update = BrowserProfileStore.prototype.update;
+    mock.method(BrowserProfileStore.prototype, 'update', async function(this: BrowserProfileStore, ...args: Parameters<typeof update>) {
+      if (args[0] === firstId && args[1].figure === 'elsie') { entered.resolve(); await release.promise; }
+      return update.apply(this, args);
+    });
+    const changing = pet.setFigure('elsie'); await entered.promise;
+    assert.equal(state.view.renderer.figure.id, 'elsie');
+    const selector = query<HTMLSelectElement>('.pc-profile-select'); selector.value = second.id;
+    selector.dispatchEvent(new window.Event('change') as unknown as Event);
+    for (let i = 0; i < 1_000 && selector.disabled; i++) await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(selector.disabled, false); await settle();
+    assert.equal(state.view.renderer.figure.id, 'miru', 'the old panel figure cannot hide a changed SDK view');
+    release.resolve(); await changing;
+    assert.equal(state.view.renderer.figure.id, 'miru');
+    const inspect = new BrowserProfileStore(namespace); await inspect.initialize(); t.after(() => inspect.close());
+    assert.equal(inspect.activeProfileId, second.id);
+    assert.equal(inspect.profileInfo(second.id)?.figure, 'miru');
+  });
+
+  for (const failBeforeReady of [true, false]) {
+    it(`retains a successful pending SDK figure when its replacement fails ${failBeforeReady ? 'before' : 'after'} the panel is ready`, async (t) => {
+      installChatIndexedDB(t);
+      const namespace = `successful-pending-figure-${failBeforeReady}`;
+      const seeded = new BrowserProfileStore(namespace); await seeded.initialize({ figure: failBeforeReady ? 'riley' : 'miru' }); t.after(() => seeded.close());
+      const { pet, state, settle } = await mountProfileChatPet(t, { chat: { storageKey: namespace } });
+      const entered = deferred<void>(); const release = deferred<void>(); const failedResponse = deferred<Response>();
+      const initialize = BrowserProfileStore.prototype.initialize;
+      mock.method(BrowserProfileStore.prototype, 'initialize', async function(this: BrowserProfileStore, ...args: Parameters<typeof initialize>) {
+        await initialize.apply(this, args); entered.resolve(); await release.promise;
+      });
+      mock.method(globalThis, 'fetch', () => failedResponse.promise);
+      const opening = pet.openChat(); await entered.promise;
+      await pet.setFigure('elsie');
+      assert.equal(state.view.renderer.figure.id, 'elsie');
+      const replacing = pet.setFigure('/synthetic-failed-replacement.json');
+      const rejected = assert.rejects(replacing, /HTTP 503/);
+      if (failBeforeReady) { failedResponse.resolve(new Response('', { status: 503 })); await rejected; }
+      release.resolve(); await opening;
+      if (!failBeforeReady) { failedResponse.resolve(new Response('', { status: 503 })); await rejected; }
+      await settle();
+      const inspect = new BrowserProfileStore(namespace); await inspect.initialize(); t.after(() => inspect.close());
+      assert.equal(state.view.renderer.figure.id, 'elsie');
+      assert.equal(inspect.activeProfile.figure, 'elsie', 'the last successful artwork must reach its owning Profile');
+      await pet.configure();
+      assert.equal(state.view.renderer.figure.id, 'elsie');
+    });
+  }
+
+  it('protects a successful figure while its pending Profile write outlives a failed replacement', async (t) => {
+    installChatIndexedDB(t);
+    const namespace = 'sdk-figure-write-protected';
+    const seed = new BrowserProfileStore(namespace); await seed.initialize({ figure: 'riley' }); t.after(() => seed.close());
+    const { pet, state, settle } = await mountProfileChatPet(t, { chat: { storageKey: namespace } });
+    const initialized = deferred<void>(); const releaseInit = deferred<void>();
+    const writing = deferred<void>(); const releaseWrite = deferred<void>(); const failed = deferred<Response>();
+    const initialize = BrowserProfileStore.prototype.initialize;
+    mock.method(BrowserProfileStore.prototype, 'initialize', async function(this: BrowserProfileStore, ...args: Parameters<typeof initialize>) {
+      await initialize.apply(this, args); initialized.resolve(); await releaseInit.promise;
+    });
+    const update = BrowserProfileStore.prototype.update;
+    mock.method(BrowserProfileStore.prototype, 'update', async function(this: BrowserProfileStore, ...args: Parameters<typeof update>) {
+      if (args[1].figure === 'elsie') { writing.resolve(); await releaseWrite.promise; }
+      return update.apply(this, args);
+    });
+    mock.method(globalThis, 'fetch', () => failed.promise);
+    const opening = pet.openChat(); await initialized.promise;
+    await pet.setFigure('elsie');
+    const replacement = assert.rejects(pet.setFigure('/synthetic-write-race.json'), /HTTP 503/);
+    releaseInit.resolve(); await writing.promise;
+    assert.equal(state.view.renderer.figure.id, 'elsie');
+    failed.resolve(new Response('', { status: 503 })); await replacement; await settle();
+    assert.equal(state.view.renderer.figure.id, 'elsie', 'a failed newer request cannot retry the old saved figure before the write commits');
+    releaseWrite.resolve(); await opening; await settle();
+    const inspect = new BrowserProfileStore(namespace); await inspect.initialize(); t.after(() => inspect.close());
+    assert.equal(inspect.activeProfile.figure, 'elsie');
+    assert.equal(state.view.renderer.figure.id, 'elsie');
+    await pet.configure(); assert.equal(state.view.renderer.figure.id, 'elsie');
+  });
+
+  it('reconciles an SDK figure requested during panel construction into the initial owning profile', async (t) => {
+    installChatIndexedDB(t);
+    const namespace = 'sdk-figure-during-chat-loading';
+    const { pet, state, query, settle } = await mountProfileChatPet(t, { chat: { storageKey: namespace } });
+    const entered = deferred<void>(); const release = deferred<void>();
+    const initialize = BrowserProfileStore.prototype.initialize;
+    mock.method(BrowserProfileStore.prototype, 'initialize', async function(this: BrowserProfileStore, ...args: Parameters<typeof initialize>) {
+      await initialize.apply(this, args); entered.resolve(); await release.promise;
+    });
+    const opening = pet.openChat(); await entered.promise;
+    const changing = pet.setFigure('elsie'); await turns();
+    release.resolve(); await Promise.all([opening, changing]); await settle();
+    assert.equal(state.view.renderer.figure.id, 'elsie');
+    assert.equal(query<HTMLElement>('.peetty-chat').dataset.color, 'blue', 'the portrait follows the reconciled selection');
+    const inspect = new BrowserProfileStore(namespace); await inspect.initialize(); t.after(() => inspect.close());
+    assert.equal(inspect.activeProfile.figure, 'elsie');
+  });
+
+  it('shares remote artwork with its portrait and fetches a fresh response on a later selection', async (t) => {
+    installChatIndexedDB(t);
+    const namespace = 'single-profile-figure-resolution';
+    const url = 'https://figures.example.test/synthetic-variable.json';
+    const seed = new BrowserProfileStore(namespace); await seed.initialize({ name: 'Bundled owner' }); t.after(() => seed.close());
+    const firstId = seed.activeProfileId;
+    const remote = await seed.create({ name: 'Remote owner', figure: url }); await seed.select(firstId);
+    let requests = 0;
+    mock.method(globalThis, 'fetch', async () => response([PRESETS.elsie, PRESETS.amara, PRESETS.riley][requests++]!));
+    const { pet, state, query, window, settle } = await mountProfileChatPet(t, { chat: { storageKey: namespace } });
+    await pet.configure();
+    const select = async (id: string) => {
+      const selector = query<HTMLSelectElement>('.pc-profile-select'); selector.value = id;
+      selector.dispatchEvent(new window.Event('change') as unknown as Event);
+      for (let i = 0; i < 1_000 && selector.disabled; i++) await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(selector.disabled, false, 'the profile figure operation has completed');
+      await settle();
+    };
+    await select(remote.id);
+    assert.equal(requests, 1, 'pet and portrait consume the same resolved figure');
+    assert.equal(state.view.renderer.figure.id, 'elsie');
+    assert.equal(query<HTMLElement>('.peetty-chat').dataset.color, 'blue');
+    await select(firstId); await select(remote.id);
+    assert.equal(requests, 2, 'completed loads do not become a stale URL cache');
+    assert.equal(state.view.renderer.figure.id, 'amara');
+    assert.equal(query<HTMLElement>('.peetty-chat').dataset.color, 'teal');
+    await pet.setFigure(url); await settle();
+    assert.equal(requests, 3, 'an explicit refresh of the current URL also resolves fresh artwork');
+    assert.equal(state.view.renderer.figure.id, 'riley');
+    assert.equal(query<HTMLElement>('.peetty-chat').dataset.color, 'green', 'the portrait refreshes even when the persisted URL is unchanged');
+  });
+
+  it('restores saved Elsie through default SDK openChat after mounting Miru', async (t) => {
+    installChatIndexedDB(t);
+    const namespace = 'pet-saved-elsie';
+    const saved = new BrowserProfileStore(namespace); await saved.initialize({ name: 'Saved Elsie', figure: 'elsie' }); t.after(() => saved.close());
+    const network = mock.method(globalThis, 'fetch', async () => { throw new Error('unexpected network'); });
+    const { pet, state, query } = await mountProfileChatPet(t, { chat: { storageKey: namespace } });
+    assert.equal(state.view.renderer.figure.id, 'miru');
+    await pet.openChat();
+    assert.equal(state.view.renderer.figure.id, 'elsie', 'the saved profile changes the mounted companion');
+    assert.equal(query('.pc-name').textContent, 'Saved Elsie');
+    assert.equal(query<HTMLElement>('.peetty-chat').hidden, false); assert.equal(state.chatVisible, true);
+    assert.equal(network.mock.callCount(), 0);
+  });
+
+  for (const source of ['PRESETS.elsie', 'custom inline figure'] as const) {
+    it(`keeps ${source} through profile rename, memory toggle and full backup`, async (t) => {
+      installChatIndexedDB(t);
+      const figure = source === 'PRESETS.elsie' ? PRESETS.elsie : { ...structuredClone(PRESETS.koharu), id: 'inline-custom-pet', name: { en: 'Inline custom pet', zh: '内联角色' } };
+      const { pet, state, root, query, click, settle, waitFor, window } = await mountProfileChatPet(t, { figure, chat: { storageKey: `pet-inline-${source}` } });
+      await pet.openChat(); assert.deepEqual(state.view.renderer.figure, figure);
+      await pet.configure(); query<HTMLButtonElement>('[data-tab="profile"]').click();
+      const name = query<HTMLInputElement>('[aria-label="Profile name"]'); name.value = 'Renamed inline companion'; name.form!.requestSubmit(); await settle();
+      assert.deepEqual(state.view.renderer.figure, figure, 'saving unrelated settings keeps the inline artwork');
+      query<HTMLButtonElement>('[data-tab="memory"]').click();
+      const recall = query<HTMLInputElement>('[data-setting="useMemories"]'); recall.checked = false; recall.dispatchEvent(new window.Event('change') as unknown as Event); await settle();
+      assert.deepEqual(state.view.renderer.figure, figure, 'memory settings reload the same inline character');
+      let downloaded: Blob | undefined;
+      mock.method(URL, 'createObjectURL', (blob: Blob) => { downloaded = blob; return 'blob:pet-inline-backup'; }); mock.method(URL, 'revokeObjectURL', () => {});
+      root().addEventListener('click', (event) => { if ((event.target as Element).closest('a[download]')) event.preventDefault(); });
+      query<HTMLButtonElement>('[data-tab="data"]').click(); click('Download full backup'); await waitFor(() => downloaded !== undefined);
+      assert.ok(downloaded); const backup = JSON.parse(await downloaded.text()) as { activeProfileId: string; profiles: ProfileRecord[] };
+      const profile = backup.profiles.find((item) => item.id === backup.activeProfileId)!;
+      assert.equal(profile.name, 'Renamed inline companion'); assert.equal(profile.useMemories, false); assert.deepEqual(profile.figure, figure);
+    });
+  }
+
+  it('syncs a public setFigure inline replacement to profile reloads and backup', async (t) => {
+    installChatIndexedDB(t);
+    const { pet, state, root, query, click, settle, waitFor, window } = await mountProfileChatPet(t, { chat: { storageKey: 'pet-inline-replacement' } });
+    await pet.openChat();
+    const figure = { ...structuredClone(PRESETS.amara), id: 'replacement-inline-pet', name: 'Replacement inline pet' };
+    await pet.setFigure(figure); assert.deepEqual(state.view.renderer.figure, figure);
+    await pet.configure(); query<HTMLButtonElement>('[data-tab="profile"]').click();
+    const name = query<HTMLInputElement>('[aria-label="Profile name"]'); name.value = 'Replacement saved'; name.form!.requestSubmit(); await settle();
+    query<HTMLButtonElement>('[data-tab="memory"]').click();
+    const automatic = query<HTMLInputElement>('[data-setting="autoRemember"]'); automatic.checked = true; automatic.dispatchEvent(new window.Event('change') as unknown as Event); await settle();
+    assert.deepEqual(state.view.renderer.figure, figure, 'a profile reload cannot revert the SDK replacement');
+    let downloaded: Blob | undefined;
+    mock.method(URL, 'createObjectURL', (blob: Blob) => { downloaded = blob; return 'blob:pet-replacement-backup'; }); mock.method(URL, 'revokeObjectURL', () => {});
+    root().addEventListener('click', (event) => { if ((event.target as Element).closest('a[download]')) event.preventDefault(); });
+    query<HTMLButtonElement>('[data-tab="data"]').click(); click('Download full backup'); await waitFor(() => downloaded !== undefined);
+    assert.ok(downloaded); const backup = JSON.parse(await downloaded.text()) as { profiles: ProfileRecord[] };
+    assert.deepEqual(backup.profiles[0]!.figure, figure); assert.equal(backup.profiles[0]!.autoRemember, true);
+  });
+
+  it('mounts a supported CDN figure URL longer than 350 characters and opens the real chat', async (t) => {
+    installChatIndexedDB(t);
+    const url = `https://cdn.example.test/${'character-pack/'.repeat(30)}elsie.json?version=1234567890`;
+    assert.ok(url.length > 350);
+    const requests: string[] = [];
+    mock.method(globalThis, 'fetch', async (input: string | URL | Request) => { requests.push(String(input)); return response(PRESETS.elsie); });
+    const { pet, state, query, root, click, waitFor } = await mountProfileChatPet(t, { figure: url, chat: { storageKey: 'pet-long-cdn' } });
+    assert.equal(state.view.renderer.figure.id, 'elsie'); await pet.openChat();
+    assert.equal(state.chatVisible, true); assert.equal(query<HTMLElement>('.peetty-chat').hidden, false);
+    assert.equal(state.view.renderer.figure.id, 'elsie'); assert.deepEqual(requests, [url]);
+    await pet.configure(); query<HTMLButtonElement>('[data-tab="profile"]').click(); assert.equal(query<HTMLSelectElement>('[aria-label="Character"]').value, url);
+    let downloaded: Blob | undefined;
+    mock.method(URL, 'createObjectURL', (blob: Blob) => { downloaded = blob; return 'blob:pet-cdn-backup'; }); mock.method(URL, 'revokeObjectURL', () => {});
+    root().addEventListener('click', (event) => { if ((event.target as Element).closest('a[download]')) event.preventDefault(); });
+    query<HTMLButtonElement>('[data-tab="data"]').click(); click('Download full backup'); await waitFor(() => downloaded !== undefined);
+    assert.ok(downloaded); const backup = JSON.parse(await downloaded.text()) as { profiles: ProfileRecord[] };
+    assert.equal(backup.profiles[0]!.figure, url);
+  });
+
+  it('keeps the remounted selection when a deferred old panel initialization applies its saved figure', async (t) => {
+    const entered = deferred<void>(); const release = deferred<void>();
+    const oldPanel = chatPanelStub(); const freshPanel = chatPanelStub(); let created = 0; let accepted: void | boolean = undefined;
+    const oldDestroy = mock.method(oldPanel, 'destroy');
+    const create: typeof createChatPanel = async (options) => {
+      if (++created > 1) return freshPanel;
+      entered.resolve(); await release.promise; accepted = await options.onFigure?.('elsie'); return oldPanel;
+    };
+    const IsolatedPeetty = await petWithChatLoader(async () => ({ createChatPanel: create }));
+    const dom = installPetDOM(t); const pet = new IsolatedPeetty({ greet: false }); dom.cleanup(() => pet.destroy());
+    const opening = pet.openChat(); await entered.promise;
+    pet.destroy(); await pet.setFigure('riley'); await pet.mount(); await pet.openChat();
+    assert.equal(controller(pet).view.renderer.figure.id, 'riley'); assert.equal(freshPanel.isOpen, true);
+    release.resolve(); await opening;
+    assert.equal(accepted, false); assert.equal(controller(pet).view.renderer.figure.id, 'riley');
+    assert.equal(freshPanel.isOpen, true); assert.equal(oldPanel.isOpen, false); assert.equal(oldDestroy.mock.callCount(), 1);
+    assert.equal(dom.hosts.length, 1); assert.equal(dom.frames.size, 1);
+  });
+
+  it('rejects an in-flight profile figure operation after actual destroy and remount', async (t) => {
+    let callbacks: Parameters<typeof createChatPanel>[0] | undefined;
+    const freshUpdates: (string | object)[] = []; let created = 0;
+    const IsolatedPeetty = await petWithChatLoader(async () => ({ createChatPanel: async (options) => {
+      if (++created === 1) { callbacks = options; return chatPanelStub(); }
+      return { ...chatPanelStub(), async setFigure(figure: string | object) { freshUpdates.push(figure); } };
+    } }));
+    const dom = installPetDOM(t); const pet = new IsolatedPeetty({ greet: false }); dom.cleanup(() => pet.destroy());
+    await pet.openChat(); assert.ok(callbacks?.onFigure);
+    const loaded = deferred<Response>(); const requested: string[] = [];
+    mock.method(globalThis, 'fetch', (input: string | URL | Request) => { requested.push(String(input)); return loaded.promise; });
+    const applying = callbacks.onFigure('/late-profile-figure.json'); await turns(); assert.equal(requested.length, 1);
+    pet.destroy(); await pet.setFigure('elsie'); await pet.mount(); await pet.openChat();
+    loaded.resolve(response(PRESETS.riley)); assert.equal(await applying, false);
+    assert.equal(controller(pet).view.renderer.figure.id, 'elsie'); assert.deepEqual(freshUpdates, []);
+    assert.equal(dom.hosts.length, 1); assert.equal(dom.frames.size, 1); assert.equal(controller(pet).chatVisible, true);
+  });
+
+  it('accepts only the latest asynchronous profile figure request in the same mounted generation', async (t) => {
+    let callbacks: Parameters<typeof createChatPanel>[0] | undefined;
+    const updates: (string | object)[] = [];
+    const IsolatedPeetty = await petWithChatLoader(async () => ({ createChatPanel: async (options) => {
+      callbacks = options; return { ...chatPanelStub(), async setFigure(figure: string | object) { updates.push(figure); } };
+    } }));
+    const dom = installPetDOM(t); const pet = new IsolatedPeetty({ greet: false }); dom.cleanup(() => pet.destroy());
+    await pet.openChat(); assert.ok(callbacks?.onFigure);
+    const first = deferred<Response>(); const second = deferred<Response>();
+    mock.method(globalThis, 'fetch', (input: string | URL | Request) => String(input).includes('first') ? first.promise : second.promise);
+    const old = callbacks.onFigure('/first-profile.json'); const current = callbacks.onFigure('/second-profile.json');
+    second.resolve(response(PRESETS.amara)); assert.equal(await current, true);
+    first.resolve(response(PRESETS.elsie)); assert.equal(await old, false);
+    assert.equal(controller(pet).view.renderer.figure.id, 'amara'); assert.deepEqual(updates, [], 'profile application never feeds back into SDK persistence'); assert.equal(dom.hosts.length, 1);
+  });
+});
 
 describe('companion action sounds', () => {
   it('starts muted and toggles a localized, keyboard-accessible preview', async (t) => {

@@ -25,7 +25,7 @@ describe('browser distribution compatibility', () => {
       Object.defineProperty(window.document, 'currentScript', { value: script });
       const requests: string[] = [];
       const exports = runInNewContext(`${bundle.outputFiles![0]!.text}; Peetty;`, {
-        document: window.document, window, URL,
+        document: window.document, window, URL, AbortController, DOMException, setTimeout, clearTimeout,
         fetch: async (url: URL) => {
           requests.push(String(url));
           return new Response(JSON.stringify({ ...PRESETS.miru, id: 'shiori' }));

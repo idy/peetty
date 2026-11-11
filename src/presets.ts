@@ -26,13 +26,44 @@ export interface CatalogEntry {
   url: string;
 }
 
-async function fetchJson(input: string, base: string): Promise<{ data: unknown; url: string }> {
+export const FIGURE_LOAD_TIMEOUT = 20_000;
+
+function checkAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw signal.reason ?? new DOMException('Figure loading aborted.', 'AbortError');
+}
+
+async function fetchJson(input: string, base: string, signal?: AbortSignal): Promise<{ data: unknown; url: string }> {
   // The base itself may be relative, e.g. a self-hosted catalog at '/figures/'.
   const url = new URL(input, new URL(base, document.baseURI));
   if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error('Figure URLs must use https: or http:.');
-  const response = await fetch(url, { credentials: 'omit' });
-  if (!response.ok) throw new Error(`Could not load ${url.href}: HTTP ${response.status}`);
-  return { data: await response.json(), url: response.url || url.href };
+  const controller = new AbortController();
+  const abort = () => controller.abort(signal?.reason);
+  signal?.addEventListener('abort', abort, { once: true });
+  if (signal?.aborted) abort();
+  const timer = setTimeout(() => controller.abort(new DOMException('Figure loading timed out.', 'TimeoutError')), FIGURE_LOAD_TIMEOUT);
+  let interrupted!: () => void;
+  try {
+    return await Promise.race([
+      new Promise<never>((_, reject) => {
+        interrupted = () => reject(controller.signal.reason ?? new DOMException('Figure loading aborted.', 'AbortError'));
+        controller.signal.addEventListener('abort', interrupted, { once: true });
+        if (controller.signal.aborted) interrupted();
+      }),
+      (async () => {
+        checkAborted(controller.signal);
+        const response = await fetch(url, { credentials: 'omit', signal: controller.signal });
+        checkAborted(controller.signal);
+        if (!response.ok) throw new Error(`Could not load ${url.href}: HTTP ${response.status}`);
+        const data: unknown = await response.json();
+        checkAborted(controller.signal);
+        return { data, url: response.url || url.href };
+      })(),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', abort);
+    controller.signal.removeEventListener('abort', interrupted);
+  }
 }
 
 /**
@@ -43,10 +74,11 @@ async function fetchJson(input: string, base: string): Promise<{ data: unknown; 
  * - figure data.
  * Everything loaded is validated before use.
  */
-export async function resolveFigure(input: string | object = 'miru', catalog = FIGURE_CATALOG): Promise<Figure> {
+export async function resolveFigure(input: string | object = 'miru', catalog = FIGURE_CATALOG, signal?: AbortSignal): Promise<Figure> {
+  checkAborted(signal);
   if (typeof input === 'object') return resolveSoundSources(validateFigure(input), globalThis.document?.baseURI);
   if (Object.hasOwn(PRESETS, input)) return PRESETS[input as PresetId];
-  const loaded = FIGURE_ID.test(input) ? await fetchJson(`${input}.json`, catalog) : await fetchJson(input, document.baseURI);
+  const loaded = FIGURE_ID.test(input) ? await fetchJson(`${input}.json`, catalog, signal) : await fetchJson(input, document.baseURI, signal);
   return resolveSoundSources(validateFigure(loaded.data), loaded.url);
 }
 

@@ -92,7 +92,8 @@ export class RigRenderer {
   readonly figure: RigFigure;
   private readonly views: PartView[] = [];
   private readonly prefix = `peetty-${++instances}`;
-  private readonly palette: Record<string, string>;
+  /** Effective palette after validated overrides, shared with portrait colour selection. */
+  readonly palette: Readonly<Record<string, string>>;
   private readonly available = new Set<string>();
   private readonly slots = new Map<SlotName, string>();
   private look: [number, number] = [0, 0];
@@ -111,10 +112,11 @@ export class RigRenderer {
     this.figure = figure;
     this.world = this.worldMatrices({});
     this.unit = unitOf(figure.viewBox);
-    this.palette = { ...figure.palette };
+    const palette = { ...figure.palette };
     for (const [key, value] of Object.entries(options.palette ?? {})) {
-      if (Object.hasOwn(this.palette, key) && isColorLiteral(value)) this.palette[key] = value;
+      if (Object.hasOwn(palette, key) && isColorLiteral(value)) palette[key] = value;
     }
+    this.palette = palette;
 
     const [x, y, w, h] = figure.viewBox;
     this.svg = document.createElementNS(SVG, 'svg');

@@ -4,9 +4,14 @@ export type PeettyReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhi
 export interface PeettyModelOptions {
   id: string;
   baseUrl: string;
+  /** Optional display name for this provider connection. */
+  provider?: string;
   apiKey?: string;
   getApiKey?: () => string | Promise<string>;
   headers?: Record<string, string>;
+  /** Explicitly nonsecret header names that may persist without authentication consent.
+   * Names must exist in headers; authentication headers cannot be exempted. */
+  nonCredentialHeaders?: string[];
   /** Enable companion action tools. Defaults to true. */
   tools?: boolean;
   /** Explicit reasoning effort. Omit to leave the provider's default unchanged. */
@@ -20,7 +25,13 @@ export interface PeettyChatOptions {
   name?: string;
 }
 
-export type CompanionAction = 'wave' | 'sit' | 'lie' | 'sleep' | 'move' | 'idle';
+export interface SessionModel {
+  model: PeettyModelOptions;
+  rememberKey: boolean;
+}
+
+export const COMPANION_ACTIONS = ['wave', 'sit', 'lie', 'sleep', 'move', 'idle'] as const;
+export type CompanionAction = (typeof COMPANION_ACTIONS)[number];
 
 export interface ChatEntry {
   id: string;

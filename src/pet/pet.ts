@@ -1,4 +1,5 @@
 import { FigureView } from '../figure/view.ts';
+import { createPortrait } from '../figure/portrait.ts';
 import { AUTONOMOUS_ACTIONS, type AutonomousAction, type Figure, type SoundEvent, type StateName } from '../figure/types.ts';
 import { SoundPlayer, type PeettySoundOptions } from './sound.ts';
 import { isSoundGesture, SOUND_GESTURES } from './activation.ts';
@@ -47,6 +48,7 @@ interface FigureRequest {
   supersede: () => void;
   failed: boolean;
 }
+interface PanelFigureSelection { figure: string | object; request: FigureRequest; current: () => boolean }
 interface ActionCompletion {
   action: CompanionAction;
   actionVersion: number;
@@ -83,6 +85,14 @@ export class Peetty {
   private view: FigureView | null = null;
   private figure: Figure | null = null;
   private figureRequest: FigureRequest | null = null;
+  private sdkFigureRequest: FigureRequest | null = null;
+  private appliedSDKFigureRequest: FigureRequest | null = null;
+  private pendingPanelFigure: PanelFigureSelection | null = null;
+  private syncingPanelFigure: PanelFigureSelection | null = null;
+  private deferredProfileFigure: string | object | undefined;
+  private figureOwnership = 0;
+  /** Only pending work is shared; a later selection can fetch fresh data from the same URL. */
+  private figureLoads = new Map<string | object, { load: Promise<Figure>; abort: () => void }>();
   private mounting: Promise<void> | null = null;
   private generation = 0;
   private raf = 0;
@@ -193,7 +203,12 @@ export class Peetty {
     this.lastTap = null;
     this.generation++;
     this.figureRequest?.supersede();
-    this.figureRequest = null;
+    this.figureRequest = this.sdkFigureRequest = this.appliedSDKFigureRequest = null;
+    this.pendingPanelFigure = this.syncingPanelFigure = null;
+    this.deferredProfileFigure = undefined;
+    this.figureOwnership++;
+    for (const load of this.figureLoads.values()) load.abort();
+    this.figureLoads.clear();
     this.mounting = null;
     cancelAnimationFrame(this.raf);
     this.raf = 0;
@@ -222,9 +237,58 @@ export class Peetty {
   /** Switches to another figure without restarting her current action. */
   async setFigure(figure: string | object): Promise<void> {
     const generation = this.generation;
+    const ownership = this.figureOwnership;
+    const request = this.requestFigure(figure);
+    this.sdkFigureRequest = request;
+    // A new request does not erase the last artwork already applied successfully.
+    // Its pending Profile update stays owned until a newer load actually succeeds.
+    const current = () => generation === this.generation && ownership === this.figureOwnership && this.figureRequest === request;
+    try {
+      const loaded = await this.loadCurrent(request, generation);
+      if (!loaded || !current()) return;
+      this.applyLoadedFigure(figure, loaded);
+      this.appliedSDKFigureRequest = request;
+      this.deferredProfileFigure = undefined;
+      if (this.chatPanel) {
+        this.pendingPanelFigure = null;
+        await this.chatPanel.setFigure?.(figure, current);
+      }
+      else if (this.chatLoading) {
+        // Artwork is ready independently of chat. Keep only the latest selection
+        // for the initial owning Profile when the panel eventually becomes ready.
+        this.pendingPanelFigure = { figure, request,
+          current: () => generation === this.generation && ownership === this.figureOwnership && this.appliedSDKFigureRequest === request };
+      }
+    } finally {
+      if (this.pendingPanelFigure?.request !== request) await this.finishSDKFigure(request, current);
+    }
+  }
+
+  private async finishSDKFigure(request: FigureRequest, current: () => boolean): Promise<void> {
+    if (this.sdkFigureRequest !== request) return;
+    this.sdkFigureRequest = null;
+    await this.retryDeferredProfileFigure(current);
+  }
+
+  private async retryDeferredProfileFigure(current: () => boolean): Promise<void> {
+    if (this.sdkFigureRequest || this.pendingPanelFigure || this.syncingPanelFigure || !this.chatPanel || !current()) return;
+    const deferred = this.deferredProfileFigure;
+    this.deferredProfileFigure = undefined;
+    if (deferred !== undefined) await this.chatPanel.retryProfileFigure?.();
+  }
+
+  /** Profile restoration applies artwork without feeding it back into profile persistence. */
+  private async applyProfileFigure(figure: string | object): Promise<boolean> {
+    if (this.sdkFigureRequest || this.pendingPanelFigure || this.syncingPanelFigure) { this.deferredProfileFigure = figure; return false; }
+    const generation = this.generation;
     const request = this.requestFigure(figure);
     const loaded = await this.loadCurrent(request, generation);
-    if (!loaded) return;
+    if (!loaded) return false;
+    this.applyLoadedFigure(figure, loaded);
+    return true;
+  }
+
+  private applyLoadedFigure(figure: string | object, loaded: Figure): void {
     if (this.overlay && this.view) {
       // Prepare the replacement before disposing the working view.
       const previous = this.view;
@@ -325,6 +389,24 @@ export class Peetty {
         if (generation !== this.generation) return null;
         return createChatPanel({
           root, language: languageOf(this.options.language),
+          figure: this.options.figure ?? 'miru',
+          portrait: async (figure) => {
+            const loaded = this.figure && figure === (this.options.figure ?? 'miru') ? this.figure : await this.loadFigure(figure).load;
+            if (generation !== this.generation) return null;
+            return createPortrait(loaded, this.options.palette ? { palette: this.options.palette } : {});
+          },
+          onFigureOwnershipChange: () => {
+            if (generation !== this.generation) return;
+            this.figureOwnership++;
+            this.figureRequest?.supersede();
+            this.sdkFigureRequest = this.appliedSDKFigureRequest = null;
+            this.pendingPanelFigure = this.syncingPanelFigure = null;
+            this.deferredProfileFigure = undefined;
+          },
+          onFigure: async (figure) => {
+            if (generation !== this.generation) return false;
+            return this.applyProfileFigure(figure);
+          },
           ...(this.options.model ? { model: this.options.model } : {}),
           ...(this.options.chat ? { chat: this.options.chat } : {}),
           onAction: (action, signal) => {
@@ -354,13 +436,36 @@ export class Peetty {
           onGesture: () => { if (generation === this.generation) this.sounds.unlock(); },
           onClose: () => this.chatClosed(),
         });
-      }).then((panel) => {
+      }).then(async (panel) => {
         if (generation !== this.generation) { panel?.destroy(); return null; }
         panel?.setLanguage(languageOf(this.options.language));
         this.chatPanel = panel;
+        const selection = this.pendingPanelFigure;
+        if (selection) {
+          this.pendingPanelFigure = null;
+          this.syncingPanelFigure = selection;
+          try {
+            if (selection.current()) await panel?.setFigure?.(selection.figure, selection.current);
+          } catch {
+            if (selection.current()) this.say(this.text.chatFailed);
+          } finally {
+            if (this.syncingPanelFigure === selection) this.syncingPanelFigure = null;
+            await this.finishSDKFigure(selection.request, selection.current);
+            // A newer failed request may already have released sdkFigureRequest.
+            // Retry deferred saved artwork only after this Profile write settles.
+            await this.retryDeferredProfileFigure(selection.current);
+          }
+        } else await this.retryDeferredProfileFigure(() => generation === this.generation);
+        if (generation !== this.generation) return null;
         return panel;
       }).catch(() => {
-        if (generation === this.generation) { this.chatLoading = null; this.say(this.text.chatFailed); }
+        if (generation === this.generation) {
+          this.chatLoading = null;
+          if (this.pendingPanelFigure?.request === this.sdkFigureRequest) this.sdkFigureRequest = null;
+          this.pendingPanelFigure = this.syncingPanelFigure = null;
+          this.deferredProfileFigure = undefined;
+          this.say(this.text.chatFailed);
+        }
         return null;
       });
       this.chatLoading = pending;
@@ -487,12 +592,27 @@ export class Peetty {
 
   // ---------------------------------------------------------------- setup
 
+  private loadFigure(input: string | object = 'miru') {
+    const pending = this.figureLoads.get(input);
+    if (pending) return pending;
+    const controller = new AbortController();
+    const release = () => { if (this.figureLoads.get(input) === entry) this.figureLoads.delete(input); };
+    const entry = {
+      load: resolveFigure(input, undefined, controller.signal),
+      abort: () => { release(); controller.abort(); },
+    };
+    this.figureLoads.set(input, entry);
+    void entry.load.then(release, release);
+    return entry;
+  }
+
   private requestFigure(input: string | object | undefined): FigureRequest {
     this.figureRequest?.supersede();
+    const pending = this.loadFigure(input);
     let supersede!: () => void;
-    const superseded = new Promise<null>((resolve) => { supersede = () => resolve(null); });
+    const superseded = new Promise<null>((resolve) => { supersede = () => { resolve(null); pending.abort(); }; });
     const request: FigureRequest = {
-      load: resolveFigure(input).then(
+      load: pending.load.then(
         (figure) => ({ figure }),
         (error: unknown) => { request.failed = true; return { error }; },
       ),
