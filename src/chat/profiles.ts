@@ -45,8 +45,8 @@ type Defaults = { name?: string; figure?: string | object; personality?: string 
 type Settings = Pick<ProfileRecord, 'name' | 'figure' | 'personality' | 'useMemories' | 'autoRemember'>;
 type SettingsInput = Omit<Partial<Settings>, 'figure'> & { figure?: string | object };
 interface Directory { version: 1; ids: string[]; activeProfileId: string; bootstrapProfileId?: string }
-interface RecordState { profile: ProfileRecord; epoch: string; connectionEpoch?: string }
-interface CleanupDebt { credentials: readonly StoredConnection[]; unresolvedAuthentication: boolean }
+interface RecordState { profile: ProfileRecord; epoch: string; connectionEpoch?: string; unresolvedCleanup?: string }
+interface CleanupDebt { credentials: readonly StoredConnection[]; unresolvedAuthentication: boolean; intent?: string }
 interface State { directory: Directory; records: Map<string, RecordState> }
 interface LegacySnapshot { entries: unknown; connection: unknown; epoch: unknown; connectionEpoch: unknown }
 interface LegacyMigration extends StoredChat { used: boolean; retire?: LegacySnapshot }
@@ -199,10 +199,11 @@ function directoryFrom(value: unknown): Directory {
   return { version: 1, ids, activeProfileId, ...(directory.bootstrapProfileId !== undefined ? { bootstrapProfileId: id(directory.bootstrapProfileId) } : {}) };
 }
 function recordFrom(value: unknown, expectedId: string): RecordState {
-  const record = object(value, ['profile', 'epoch', 'connectionEpoch']);
+  const record = object(value, ['profile', 'epoch', 'connectionEpoch', 'unresolvedCleanup']);
   const profile = profileFrom(record.profile);
   check(profile.id === expectedId);
-  return { profile, epoch: id(record.epoch), ...(record.connectionEpoch !== undefined ? { connectionEpoch: id(record.connectionEpoch) } : {}) };
+  return { profile, epoch: id(record.epoch), ...(record.connectionEpoch !== undefined ? { connectionEpoch: id(record.connectionEpoch) } : {}),
+    ...(record.unresolvedCleanup !== undefined ? { unresolvedCleanup: id(record.unresolvedCleanup) } : {}) };
 }
 function checkFile(value: string, message = INVALID): void {
   check(value.length <= PROFILE_LIMITS.fileBytes && new TextEncoder().encode(value).length <= PROFILE_LIMITS.fileBytes, message);
@@ -413,6 +414,7 @@ export class BrowserProfileStore {
   private failed = false;
   private legacyProof: LegacyProof | undefined;
   private readonly cleanupDebt = new Map<string, CleanupDebt>();
+  private readonly connectionCommits = new Map<string, { revision: number; epoch: string }>();
   private connectionReadKnown = false;
   private reconcilingLegacy = false;
   private legacyReconciliation: Promise<void> | undefined;
@@ -542,6 +544,9 @@ export class BrowserProfileStore {
     return result;
   }
 
+  private connectionCommitted(profileId: string, epoch: string): void {
+    this.connectionCommits.set(profileId, { revision: (this.connectionCommits.get(profileId)?.revision ?? 0) + 1, epoch });
+  }
   private ready(): void { check(this.initialized, 'Initialize profile storage first.'); }
   private queued<T>(selection: readonly string[], write: boolean, action: (draft: Draft) => T, privacyMutation = false): Promise<T> {
     return this.enqueue(async () => {
@@ -737,6 +742,35 @@ export class BrowserProfileStore {
     } finally { db.close(); }
   }
 
+  private async clearDurableCleanup(): Promise<Map<string, string>> {
+    const db = await openStateDatabase(`${this.namespace}:profiles`, { isClosed: () => this.closed, onFailure: () => {} });
+    check(db, 'Could not remove legacy data. Try again.');
+    const epochs = new Map<string, string>();
+    try {
+      const ok = await stateTransaction(db, true, (store, abort) => {
+        const guard = (action: () => void) => { try { action(); } catch { abort(); } };
+        const directory = store.get('directory');
+        directory.onsuccess = () => guard(() => {
+          store.delete('legacyMigration');
+          for (const profileId of directoryFrom(directory.result).ids) {
+            const request = store.get(key(profileId));
+            request.onsuccess = () => guard(() => {
+              const record = recordFrom(request.result, profileId);
+              if (!record.unresolvedCleanup) return;
+              const epoch = freshId();
+              const updated = { ...request.result, connectionEpoch: epoch } as RecordState;
+              delete updated.unresolvedCleanup;
+              store.put(updated, key(profileId));
+              epochs.set(profileId, epoch);
+            });
+          }
+        });
+      });
+      check(ok, 'Could not remove legacy data. Try again.');
+      return epochs;
+    } finally { db.close(); }
+  }
+
   /** Destructive recovery for unprovable legacy duplicates. Hosts must obtain an
    * explicit user confirmation; automatic reconciliation never calls this method. */
   clearLegacyData(): Promise<void> {
@@ -761,7 +795,18 @@ export class BrowserProfileStore {
       // Keep provenance until the old records were successfully removed. Partial
       // cross-database failure is reported and a repeated explicit call is safe.
       await clear(`${this.namespace}:chat`, ['entries', 'connection', 'entriesEpoch']);
-      await clear(`${this.namespace}:profiles`, ['legacyMigration']);
+      const epochs = await this.clearDurableCleanup();
+      // Update only private intent metadata: sticky RAM histories and their
+      // warning must survive explicit recovery without a hidden disk reload.
+      for (const [profileId, epoch] of epochs) {
+        const cached = this.state.records.get(profileId);
+        if (cached) {
+          const updated = { ...cached, connectionEpoch: epoch };
+          delete updated.unresolvedCleanup;
+          this.state.records.set(profileId, updated);
+          this.connectionCommitted(profileId, epoch);
+        }
+      }
       this.legacyProof = undefined;
       this.cleanupDebt.clear();
       this.legacyEmpty = true;
@@ -856,16 +901,18 @@ export class BrowserProfileStore {
       const source = await this.run([profileId], false, (draft) => {
         const record = getRecord(draft, profileId);
         check(draft.directory.ids.length > 1, 'Cannot remove the last profile.');
-        return record.profile.connection;
+        return { connection: record.profile.connection, unresolvedCleanup: record.unresolvedCleanup };
       });
       if (this.persist && this.failed) throw new ChatStorageError('profile-delete', 'Could not delete this profile. Restore browser storage and try again.');
       const pending = this.cleanupDebt.get(profileId);
-      const credentials = [...pending?.credentials ?? [], ...(source ? [source] : [])];
-      await this.reconcileLegacy(true, 'profile', credentials, pending?.unresolvedAuthentication ?? false);
+      const credentials = [...pending?.credentials ?? [], ...(source.connection ? [source.connection] : [])];
+      const unresolvedAuthentication = !!source.unresolvedCleanup && pending?.intent !== source.unresolvedCleanup || pending?.unresolvedAuthentication === true;
+      await this.reconcileLegacy(true, 'profile', credentials, unresolvedAuthentication);
       let committed: State | undefined;
       const session = this.sessions.get(profileId);
       await this.run([profileId], true, (draft) => {
-        getRecord(draft, profileId);
+        const current = getRecord(draft, profileId);
+        if (current.unresolvedCleanup !== source.unresolvedCleanup) throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
         check(draft.directory.ids.length > 1, 'Cannot remove the last profile.');
         committed = { directory: { ...draft.directory, ids: [...draft.directory.ids] }, records: new Map(draft.records) };
         useBootstrap(draft, profileId);
@@ -881,6 +928,7 @@ export class BrowserProfileStore {
         throw new ChatStorageError('profile-delete', 'Could not delete this profile. Restore browser storage and try again.');
       }
       this.cleanupDebt.delete(profileId);
+      this.connectionCommits.delete(profileId);
       this.sessions.delete(profileId);
     });
   }
@@ -922,6 +970,10 @@ export class BrowserProfileStore {
         if (closing) return;
         const copy = connectionFrom(connection, false);
         const supplied = options?.credentialsToForget?.map((source) => connectionFrom(source, false)) ?? [];
+        // Submission owns this authorization snapshot, even while initialize or
+        // another manager operation is ahead of it in the queue.
+        const requestEpoch = this.state.records.get(profileId)?.connectionEpoch ?? '';
+        const requestRevision = this.connectionCommits.get(profileId)?.revision ?? 0;
         return this.enqueue(async () => {
           this.ready();
           const pending = this.cleanupDebt.get(profileId);
@@ -929,10 +981,14 @@ export class BrowserProfileStore {
           // contain unsaved turns. Credential retry must never reload over that
           // archive or clear its warning; require a fresh manager after recovery.
           let previous: StoredConnection | undefined;
-          let connectionEpoch = '';
+          const ownCommit = this.connectionCommits.get(profileId);
+          let connectionEpoch = ownCommit && ownCommit.revision > requestRevision ? ownCommit.epoch : requestEpoch;
+          let unresolvedCleanup: string | undefined;
+          let observedEpoch = '';
           try { previous = await this.run([profileId], false, (draft) => {
             const record = getRecord(draft, profileId);
-            connectionEpoch = record.connectionEpoch ?? '';
+            observedEpoch = record.connectionEpoch ?? '';
+            unresolvedCleanup = record.unresolvedCleanup;
             return record.profile.connection;
           }); }
           catch (error) {
@@ -941,38 +997,70 @@ export class BrowserProfileStore {
           }
           this.connectionReadKnown = !this.persist || !this.failed;
           const sources = [...pending?.credentials ?? [], ...supplied, ...(previous ? [previous] : []), ...(options?.rememberCredentials === false ? [copy] : [])];
-          const unresolvedAuthentication = pending?.unresolvedAuthentication === true || options?.unresolvedAuthentication === true;
+          const unresolvedAuthentication = !!unresolvedCleanup && pending?.intent !== unresolvedCleanup
+            || pending?.unresolvedAuthentication === true || options?.unresolvedAuthentication === true;
           // No credential in a failed read's RAM snapshot is not evidence that
           // disk is empty. Session-only setModel remains available during outage.
           if (!this.connectionReadKnown) {
-            this.cleanupDebt.set(profileId, { credentials: sources, unresolvedAuthentication });
+            this.cleanupDebt.set(profileId, { credentials: sources, unresolvedAuthentication, ...(unresolvedCleanup ? { intent: unresolvedCleanup } : {}) });
             throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
           }
-          const forget = !!pending || options?.rememberCredentials === false && (options.authenticationIntent || sources.some(hasStoredCredentials))
-            || previous && hasStoredCredentials(previous) && connectionIdentity(previous) !== connectionIdentity(copy);
-          if (forget && this.persist) this.cleanupDebt.set(profileId, { credentials: sources, unresolvedAuthentication });
+          if (observedEpoch !== connectionEpoch) throw new ChatStorageError('stale-connection', 'Connection settings changed. Reload before saving again.');
+          const forget = !!pending || unresolvedAuthentication || options?.rememberCredentials === false && (options.authenticationIntent || sources.some(hasStoredCredentials))
+            || previous && hasStoredCredentials(previous) && !sameSavedAuthentication(previous, copy);
+          if (forget && this.persist) this.cleanupDebt.set(profileId, { credentials: sources, unresolvedAuthentication, ...(unresolvedCleanup ? { intent: unresolvedCleanup } : {}) });
+          const newIntent = options?.authenticationIntent === true || options?.unresolvedAuthentication === true || supplied.length > 0
+            || options?.rememberCredentials === false && hasStoredCredentials(copy);
+          if (this.persist && forget && (!unresolvedCleanup || newIntent)) {
+            // Commit only opaque intent before any fencing/legacy cleanup. Lost
+            // RAM sources after reload make even a known-source debt unresolved.
+            const intent = freshId(); const epoch = freshId();
+            const checkpointed = await this.run([profileId], true, (draft) => {
+              const record = getRecord(draft, profileId);
+              if ((record.connectionEpoch ?? '') !== connectionEpoch) return false;
+              draft.records.set(profileId, { ...record, connectionEpoch: epoch, unresolvedCleanup: intent });
+              draft.dirty.add(profileId);
+              useBootstrap(draft, profileId);
+              return true;
+            });
+            if (this.failed) throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
+            if (!checkpointed) throw new ChatStorageError('stale-connection', 'Connection settings changed. Reload before saving again.');
+            unresolvedCleanup = intent; connectionEpoch = epoch;
+            this.cleanupDebt.set(profileId, { credentials: sources, unresolvedAuthentication, intent });
+            this.connectionCommitted(profileId, epoch);
+          }
           await this.reconcileLegacy(true, forget ? 'credentials' : 'automatic', sources, unresolvedAuthentication);
           let baseline = previous;
-          const saved = await this.run([profileId], true, (draft) => {
+          const result = await this.run([profileId], true, (draft) => {
             const current = getRecord(draft, profileId);
-            if ((current.connectionEpoch ?? '') !== connectionEpoch) throw new ChatStorageError('stale-connection', 'Connection settings changed. Reload before saving again.');
+            if ((current.connectionEpoch ?? '') !== connectionEpoch || current.unresolvedCleanup !== unresolvedCleanup) return { stale: true as const };
             baseline = current.profile.connection;
             const known = this.sessions.get(profileId)?.at(-1)?.connection ?? baseline;
             const saved = prepareSavedConnection(copy, known, options?.rememberCredentials);
             const record = touch(draft, profileId);
             record.profile.connection = saved;
-            if (options?.rememberCredentials === false || !sameSavedAuthentication(baseline, saved)) record.connectionEpoch = freshId();
-            return clone(saved);
+            if (options?.rememberCredentials === false || unresolvedCleanup || !sameSavedAuthentication(baseline, saved)) record.connectionEpoch = freshId();
+            delete record.unresolvedCleanup;
+            return { stale: false as const, saved: clone(saved) };
           });
+          // Even rejection adopts the authoritative read for a fresh explicit
+          // retry; the rejected request itself is never replayed or reauthorized.
+          if (result.stale) throw new ChatStorageError('stale-connection', 'Connection settings changed. Reload before saving again.');
+          const saved = result.saved;
           if (forget && this.persist && this.failed) {
             const record = this.state.records.get(profileId);
             if (record) {
               record.profile = { ...record.profile };
               if (baseline) record.profile.connection = clone(baseline);
               else delete record.profile.connection;
+              if (unresolvedCleanup) record.unresolvedCleanup = unresolvedCleanup;
+              else delete record.unresolvedCleanup;
+              if (connectionEpoch) record.connectionEpoch = connectionEpoch;
+              else delete record.connectionEpoch;
             }
             throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
           }
+          if (!this.persist || !this.failed) this.connectionCommitted(profileId, this.state.records.get(profileId)?.connectionEpoch ?? '');
           this.cleanupDebt.delete(profileId);
           this.sessions.delete(profileId);
           return saved;

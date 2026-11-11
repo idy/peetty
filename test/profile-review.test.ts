@@ -1661,6 +1661,7 @@ describe('profile authentication generation and complete cleanup debt', () => {
         if (oldRecord) {
           const raw = idb.databases.get(`${namespace}:profiles`)!.get(`profile:${id}`) as { connectionEpoch?: string };
           delete raw.connectionEpoch;
+          await first.storage(id).load();
         }
         const peer = await store(t, namespace);
         const paused = latch(); const release = latch(); t.after(() => release.resolve());
@@ -1674,6 +1675,7 @@ describe('profile authentication generation and complete cleanup debt', () => {
         const rejected = assert.rejects(saving, { code: 'stale-connection' });
         await paused.promise;
         const peerChoice = { ...connection, ...(endpointChanged ? { baseUrl: 'https://peer-choice.example/v1' } : {}) };
+        await peer.storage(id).load();
         await peer.storage(id).saveConnection(peerChoice, { rememberCredentials: false });
         const committed = peer.storedConnection(id);
         release.resolve(); await rejected;
@@ -1683,6 +1685,13 @@ describe('profile authentication generation and complete cleanup debt', () => {
         assert.deepEqual(reopened.storedConnection(id), committed);
         assert.equal(reopened.storedConnection(id)!.baseUrl, peerChoice.baseUrl);
         assert.equal(reopened.storedConnection(id)!.apiKey, undefined);
+        assert.deepEqual(first.storedConnection(id), committed, 'rejection must refresh the cache for one fresh explicit retry');
+        const debt = first as unknown as { cleanupDebt: Map<string, unknown> };
+        assert.equal(debt.cleanupDebt.has(id), true, 'stale rejection must not discard pending cleanup');
+        const retry = { ...stale, apiKey: 'fresh-reconfirmed-key' };
+        await first.storage(id).saveConnection(retry, { rememberCredentials: true });
+        assert.deepEqual(first.storedConnection(id), retry);
+        assert.equal(debt.cleanupDebt.has(id), false);
       });
     }
   }
@@ -1809,6 +1818,245 @@ describe('profile authentication generation and complete cleanup debt', () => {
     assert.equal(manager.profileInfo(id), undefined);
     assert.equal((legacy.get('connection') as StoredConnection | undefined)?.apiKey, undefined);
     assert.equal((legacy.get('connection') as StoredConnection).id, 'independent-legacy-metadata');
+  });
+});
+
+describe('request-time saves and durable unresolved intent', () => {
+  function latch() {
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => { resolve = done; });
+    return { promise, resolve: () => resolve() };
+  }
+
+  for (const queuedBehind of ['update', 'initialize'] as const) {
+    for (const differentEndpoint of [false, true]) {
+      it(`rejects an old key submitted behind ${queuedBehind} when a peer opts out at a different endpoint ${differentEndpoint}`, async (t) => {
+        installChatIndexedDB(t);
+        const namespace = `request-queue-${queuedBehind}-${differentEndpoint}`;
+        const seeded = await store(t, namespace); const id = seeded.activeProfileId;
+        await seeded.storage(id).saveConnection(connection, { rememberCredentials: true });
+        const first = queuedBehind === 'update' ? seeded : new BrowserProfileStore(namespace);
+        if (first !== seeded) t.after(() => first.close());
+        const peer = await store(t, namespace);
+        const blocked = latch(); const release = latch(); t.after(() => release.resolve());
+        const seam = first as unknown as { open: () => Promise<IDBDatabase | undefined> };
+        const open = seam.open.bind(first); let once = true;
+        t.mock.method(seam, 'open', async () => {
+          if (once) { once = false; blocked.resolve(); await release.promise; }
+          return open();
+        });
+        const earlier = queuedBehind === 'update' ? first.update(id, { name: 'Queued metadata' }) : first.initialize();
+        await blocked.promise;
+        const stale = { ...connection, id: 'submitted-old-key' };
+        const saving = first.storage(id).saveConnection(stale, { rememberCredentials: true });
+        const rejected = assert.rejects(saving, { code: 'stale-connection' });
+        const alsoQueued = first.storage(id).saveConnection({ ...stale, id: 'another-old-submission' }, { rememberCredentials: true });
+        const alsoRejected = assert.rejects(alsoQueued, { code: 'stale-connection' });
+        const peerChoice = { ...connection, ...(differentEndpoint ? { baseUrl: 'https://peer-changed.example/v1' } : {}) };
+        await peer.storage(id).saveConnection(peerChoice, { rememberCredentials: false });
+        const committed = peer.storedConnection(id);
+        release.resolve(); await earlier; await Promise.all([rejected, alsoRejected]);
+        assert.deepEqual(first.storedConnection(id), committed);
+        assert.equal(first.storedConnection(id)!.apiKey, undefined);
+        assert.equal(first.persistenceWarning, false);
+        // A new user submission may reconfirm once, without a reload and without
+        // ever automatically replaying the already-rejected old request.
+        const retry = { ...connection, id: 'fresh-confirmation', apiKey: 'newly-confirmed-key' };
+        await first.storage(id).saveConnection(retry, { rememberCredentials: true });
+        assert.deepEqual(first.storedConnection(id), retry);
+      });
+    }
+  }
+
+  it('preserves metadata independence while a connection save waits behind another manager operation', async (t) => {
+    installChatIndexedDB(t);
+    const namespace = 'request-queue-metadata';
+    const first = await store(t, namespace); const id = first.activeProfileId;
+    await first.storage(id).saveConnection(connection);
+    const peer = await store(t, namespace);
+    const blocked = latch(); const release = latch(); t.after(() => release.resolve());
+    const seam = first as unknown as { open: () => Promise<IDBDatabase | undefined> };
+    const open = seam.open.bind(first); let once = true;
+    t.mock.method(seam, 'open', async () => { if (once) { once = false; blocked.resolve(); await release.promise; } return open(); });
+    const earlier = first.update(id, { name: 'Queued name' }); await blocked.promise;
+    const desired = { ...connection, id: 'new-model-metadata' };
+    const saving = first.storage(id).saveConnection(desired, { rememberCredentials: true });
+    await peer.update(id, { personality: 'Peer personality' });
+    await peer.storage(id).saveEntries([entry('peer-history')]);
+    await peer.storage(id).saveConnection({ ...connection, effort: 'high' }, { rememberCredentials: true });
+    release.resolve(); await earlier; await saving;
+    assert.deepEqual(first.storedConnection(id), desired);
+    assert.equal(first.profileInfo(id)!.name, 'Queued name');
+    assert.equal(first.profileInfo(id)!.personality, 'Peer personality');
+    assert.deepEqual(first.historyPage(id, '', 10).entries, [entry('peer-history')]);
+  });
+
+  it('allows a deliberate new save queued after this manager own committed opt-out', async (t) => {
+    installChatIndexedDB(t);
+    const manager = await store(t, 'request-own-write'); const id = manager.activeProfileId;
+    await manager.storage(id).saveConnection(connection);
+    const forgetting = manager.storage(id).saveConnection(connection, { rememberCredentials: false });
+    const fresh = { ...connection, apiKey: 'new-user-confirmed-key' };
+    const saving = manager.storage(id).saveConnection(fresh, { rememberCredentials: true });
+    await Promise.all([forgetting, saving]);
+    assert.deepEqual(manager.storedConnection(id), fresh);
+  });
+
+  for (const recovery of ['explicit', 'identified'] as const) {
+    it(`preserves unresolved callback intent across reopen, unrelated retry and deletion until ${recovery} recovery`, async (t) => {
+      const idb = installChatIndexedDB(t);
+      const namespace = `durable-intent-${recovery}`;
+      const creator = await store(t, namespace); const id = creator.activeProfileId;
+      const known = { ...connection, apiKey: 'known-C' };
+      await creator.storage(id).saveConnection(known);
+      await creator.create({ name: 'Keep' });
+      const preloaded = await store(t, namespace);
+      const legacy = idb.databases.get(`${namespace}:chat`)!;
+      legacy.set('connection', { ...connection, id: 'unknown-legacy-model', apiKey: 'unresolved-K' });
+      const keyless = { id: connection.id, baseUrl: connection.baseUrl };
+      await assert.rejects(creator.storage(id).saveConnection(keyless, {
+        rememberCredentials: false, credentialsToForget: [known], authenticationIntent: true, unresolvedAuthentication: true,
+      }), { code: 'legacy-cleanup' });
+      const raw = idb.databases.get(`${namespace}:profiles`)!.get(`profile:${id}`) as { profile: ProfileRecord; unresolvedCleanup?: string; connectionEpoch?: string };
+      const marker = raw.unresolvedCleanup;
+      assert.equal(typeof marker, 'string');
+      assert.equal(raw.profile.connection!.apiKey, 'known-C');
+      assert.equal(JSON.stringify([...idb.databases.get(`${namespace}:profiles`)!]).includes('unresolved-K'), false);
+      assert.equal(JSON.stringify({ unresolvedCleanup: marker, connectionEpoch: raw.connectionEpoch }).includes('known-C'), false);
+      // An already-open manager first gets a stale rejection, then sees durable
+      // intent on a fresh request instead of downgrading it to known C alone.
+      await assert.rejects(preloaded.storage(id).saveConnection(keyless, { rememberCredentials: false }), { code: 'stale-connection' });
+      await assert.rejects(preloaded.storage(id).saveConnection(keyless, { rememberCredentials: false }), { code: 'legacy-cleanup' });
+      creator.close();
+      const reopened = await store(t, namespace);
+      const before = reopened.profiles;
+      await assert.rejects(reopened.storage(id).saveConnection(keyless, { rememberCredentials: false, credentialsToForget: [known] }), { code: 'legacy-cleanup' });
+      await assert.rejects(reopened.storage(id).saveConnection(known, { rememberCredentials: true }), { code: 'legacy-cleanup' });
+      await assert.rejects(reopened.remove(id), { code: 'legacy-cleanup' });
+      assert.deepEqual(reopened.profiles, before);
+      assert.equal((legacy.get('connection') as StoredConnection).apiKey, 'unresolved-K');
+      const currentIntent = (idb.databases.get(`${namespace}:profiles`)!.get(`profile:${id}`) as { unresolvedCleanup?: string }).unresolvedCleanup;
+      assert.equal(typeof currentIntent, 'string', 'new submissions may rotate intent, never erase the unresolved obligation');
+      const currentDebt = reopened as unknown as { cleanupDebt: Map<string, { intent?: string; unresolvedAuthentication: boolean }> };
+      assert.equal(currentDebt.cleanupDebt.get(id)!.intent, currentIntent);
+      assert.equal(currentDebt.cleanupDebt.get(id)!.unresolvedAuthentication, true);
+      if (recovery === 'explicit') {
+        await reopened.clearLegacyData();
+        assert.equal((idb.databases.get(`${namespace}:profiles`)!.get(`profile:${id}`) as { unresolvedCleanup?: string }).unresolvedCleanup, undefined);
+        await reopened.remove(id);
+        assert.equal((await store(t, namespace)).profileInfo(id), undefined);
+      } else {
+        await reopened.storage(id).saveConnection(keyless, { rememberCredentials: false, credentialsToForget: [{ ...connection, apiKey: 'unresolved-K' }] });
+        const committed = idb.databases.get(`${namespace}:profiles`)!.get(`profile:${id}`) as { profile: ProfileRecord; unresolvedCleanup?: string };
+        assert.equal(committed.unresolvedCleanup, undefined);
+        assert.equal(committed.profile.connection!.apiKey, undefined);
+        assert.equal((legacy.get('connection') as StoredConnection).apiKey, undefined);
+        const verified = await store(t, namespace);
+        await verified.remove(id);
+        assert.equal(verified.profileInfo(id), undefined);
+      }
+    });
+  }
+
+  it('preserves a lost known-source cleanup obligation after reopen instead of accepting unrelated D', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const namespace = 'durable-known-source';
+    const creator = await store(t, namespace); const id = creator.activeProfileId;
+    const known = { ...connection, apiKey: 'stored-C' };
+    await creator.storage(id).saveConnection(known); await creator.create({ name: 'Keep' });
+    const legacy = idb.databases.get(`${namespace}:chat`)!;
+    legacy.set('connection', { ...connection, id: 'old-session-model', apiKey: 'session-K' });
+    const seam = creator as unknown as { reconcileLegacy: (...args: unknown[]) => Promise<void> };
+    const reconcile = seam.reconcileLegacy.bind(creator); let fail = true;
+    t.mock.method(seam, 'reconcileLegacy', async (...args: unknown[]) => {
+      if (fail && args[1] === 'credentials') { fail = false; throw new ChatStorageError('legacy-cleanup', 'Fixed cleanup failure.'); }
+      return reconcile(...args);
+    });
+    const keyless = { id: connection.id, baseUrl: connection.baseUrl };
+    await assert.rejects(creator.storage(id).saveConnection(keyless, {
+      rememberCredentials: false, credentialsToForget: [{ ...connection, apiKey: 'session-K' }], authenticationIntent: true,
+    }), { code: 'legacy-cleanup' });
+    const raw = idb.databases.get(`${namespace}:profiles`)!.get(`profile:${id}`) as { unresolvedCleanup?: string };
+    assert.equal(typeof raw.unresolvedCleanup, 'string');
+    assert.equal(JSON.stringify([...idb.databases.get(`${namespace}:profiles`)!]).includes('session-K'), false);
+    creator.close();
+    const reopened = await store(t, namespace);
+    await assert.rejects(reopened.storage(id).saveConnection({ ...connection, apiKey: 'unrelated-D' }, { rememberCredentials: false }), { code: 'legacy-cleanup' });
+    assert.equal((legacy.get('connection') as StoredConnection).apiKey, 'session-K');
+    assert.equal(reopened.storedConnection(id)!.apiKey, 'stored-C');
+    await assert.rejects(reopened.remove(id), { code: 'legacy-cleanup' });
+    const again = await store(t, namespace);
+    await assert.rejects(again.storage(id).saveConnection(keyless, { rememberCredentials: false }), { code: 'legacy-cleanup' });
+    await again.clearLegacyData(); await again.remove(id);
+    assert.equal(again.profileInfo(id), undefined);
+    assert.equal(legacy.has('connection'), false);
+  });
+
+  it('keeps same-manager known sources tied to their durable intent without blocking independent legacy J', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const namespace = 'durable-known-owner';
+    const manager = await store(t, namespace); const id = manager.activeProfileId;
+    await manager.storage(id).saveConnection({ ...connection, apiKey: 'stored-C' });
+    const legacy = idb.databases.get(`${namespace}:chat`)!;
+    legacy.set('connection', { ...connection, id: 'old-session-model', apiKey: 'session-K', headers: { 'x-other-auth': 'independent-J' } });
+    const seam = manager as unknown as { reconcileLegacy: (...args: unknown[]) => Promise<void> };
+    const reconcile = seam.reconcileLegacy.bind(manager); let fail = true;
+    t.mock.method(seam, 'reconcileLegacy', async (...args: unknown[]) => {
+      if (fail && args[1] === 'credentials') { fail = false; throw new ChatStorageError('legacy-cleanup', 'Fixed cleanup failure.'); }
+      return reconcile(...args);
+    });
+    const keyless = { id: connection.id, baseUrl: connection.baseUrl };
+    await assert.rejects(manager.storage(id).saveConnection(keyless, {
+      rememberCredentials: false, credentialsToForget: [{ ...connection, apiKey: 'session-K' }], authenticationIntent: true,
+    }), { code: 'legacy-cleanup' });
+    const raw = idb.databases.get(`${namespace}:profiles`)!.get(`profile:${id}`) as { unresolvedCleanup?: string };
+    const debt = manager as unknown as { cleanupDebt: Map<string, { intent?: string; unresolvedAuthentication: boolean }> };
+    assert.equal(debt.cleanupDebt.get(id)!.intent, raw.unresolvedCleanup);
+    assert.equal(debt.cleanupDebt.get(id)!.unresolvedAuthentication, false);
+    await manager.storage(id).saveConnection(keyless, { rememberCredentials: false });
+    assert.equal((legacy.get('connection') as StoredConnection).apiKey, undefined);
+    assert.equal((legacy.get('connection') as StoredConnection).headers!['x-other-auth'], 'independent-J');
+    assert.equal((idb.databases.get(`${namespace}:profiles`)!.get(`profile:${id}`) as { unresolvedCleanup?: string }).unresolvedCleanup, undefined);
+    assert.equal(manager.storedConnection(id)!.apiKey, undefined);
+  });
+
+  it('does not begin unsafe cleanup if its durable unresolved intent cannot commit', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const namespace = 'durable-intent-abort';
+    const manager = await store(t, namespace); const id = manager.activeProfileId;
+    await manager.storage(id).saveConnection(connection);
+    const legacy = idb.databases.get(`${namespace}:chat`)!;
+    legacy.set('connection', { ...connection, apiKey: 'unresolved-K' });
+    const seam = manager as unknown as { fenceLegacyAuthentication: () => Promise<void> };
+    const fencing = t.mock.method(seam, 'fenceLegacyAuthentication');
+    idb.fail('commit');
+    await assert.rejects(manager.storage(id).saveConnection({ id: connection.id, baseUrl: connection.baseUrl }, {
+      rememberCredentials: false, authenticationIntent: true, unresolvedAuthentication: true,
+    }), { code: 'legacy-cleanup' });
+    assert.equal(fencing.mock.callCount(), 0);
+    assert.equal((idb.databases.get(`${namespace}:profiles`)!.get(`profile:${id}`) as { unresolvedCleanup?: string }).unresolvedCleanup, undefined);
+    assert.equal((legacy.get('connection') as StoredConnection).apiKey, 'unresolved-K');
+    assert.equal(manager.persistenceWarning, true);
+  });
+
+  it('keeps explicit recovery compatible with absent directories and rejects malformed existing directories', async (t) => {
+    const idb = installChatIndexedDB(t);
+    for (const malformed of [false, true]) {
+      const namespace = `recovery-directory-${malformed}`;
+      const legacy = new Map<string, unknown>([['connection', connection]]);
+      idb.databases.set(`${namespace}:chat`, legacy);
+      const records = new Map<string, unknown>([['unrelated', 'keep']]);
+      if (malformed) records.set('directory', { version: 99, ids: [] });
+      idb.databases.set(`${namespace}:profiles`, records);
+      const manager = await store(t, namespace, false); const id = manager.activeProfileId;
+      await manager.storage(id).saveEntries([entry('ram-only')]);
+      if (malformed) await assert.rejects(manager.clearLegacyData(), /Could not remove legacy data/u);
+      else await manager.clearLegacyData();
+      assert.deepEqual(manager.historyPage(id, '', 10).entries, [entry('ram-only')]);
+      assert.equal(records.get('unrelated'), 'keep');
+      assert.equal(manager.persistenceWarning, false);
+      assert.equal(legacy.has('connection'), false);
+    }
   });
 });
 

@@ -94,7 +94,7 @@ describe('explicit nonsecret header classification', () => {
   });
 
   it('accepts explicitly declared numeric token-count metadata without exempting credentials', () => {
-    for (const name of ['X-MaxTokens', 'X-InputTokens', 'X-Output-Tokens', 'X-TotalTokens', 'X-PromptTokens', 'X-Completion-Tokens-Limit', 'X-ContextTokens', 'X-RemainingTokens', 'X-UsedTokens', 'X-GenerationTokens', 'X-Token-Count', 'X-Custom-Context-Token-Budget', 'X-Paid-Tokens', 'X-PaidTokens', 'X-Unpaid-Tokens', 'X-RapidTokens', 'X-CapitalizeTokens', 'X-CompatibilityTokens', 'X-Author-Tokens']) {
+    for (const name of ['X-MaxTokens', 'X-InputTokens', 'X-Output-Tokens', 'X-TotalTokens', 'X-PromptTokens', 'X-Completion-Tokens-Limit', 'X-ContextTokens', 'X-RemainingTokens', 'X-UsedTokens', 'X-GenerationTokens', 'X-Token-Count', 'X-Custom-Context-Token-Budget', 'X-Paid-Tokens', 'X-PaidTokens', 'X-Unpaid-Tokens', 'X-RapidTokens', 'X-CapitalizeTokens', 'X-CompatibilityTokens', 'X-Author-Tokens', 'X-AuthorKeyTokens', 'X-SecretariatTokens', 'X-MonkeyTokens']) {
       for (const value of ['0', '42', '4096']) {
         const model = normalizeModelOptions({ ...base, headers: { [name]: value }, nonCredentialHeaders: [name] });
         assert.equal(isCredentialHeader(name), true, 'undeclared values remain sensitive');
@@ -110,6 +110,23 @@ describe('explicit nonsecret header classification', () => {
     }
     for (const name of ['X-ClientToken', 'X-AuthToken', 'X-Token', 'X-InputTokensSecret', 'X-AccessTokens', 'X-Refresh-Tokens', 'X-ClientTokensCount', 'X-AuthTokensLimit', 'X-SecretTokensBudget', 'X-API-Tokens', 'X-ApiTokens', 'API-Tokens', 'X-Subscription-Tokens', 'X-SasTokens', 'X-PAT-Tokens', 'X-ID-Tokens', 'X-SSO-Tokens', 'X-Tokens', 'X-Authorization-Custom-Tokens', 'X-Authentication-RemainingTokens', 'X-Auth-Custom-Tokens', 'X-Custom-ID-Tokens', 'X-Custom-API-Tokens', 'X-Secret-Custom-Tokens', 'X-Custom-ClientTokens', 'x_authorization_custom_tokens', 'X-ClientSecret-Custom-Tokens', 'X-SessionSecretKey-Tokens', 'X-GatewayPassword-CountTokens', 'X-InputTokensSecret-Tokens']) {
       assert.throws(() => normalizeModelOptions({ ...base, headers: { [name]: '42' }, nonCredentialHeaders: [name] }));
+    }
+  });
+
+  it('rejects compound authentication counters through normalization and direct persistence classification', () => {
+    for (const prefix of ['Api', 'Auth', 'Authentication', 'Authorization', 'Access', 'Subscription', 'Client', 'Session', 'Gateway', 'Private', 'Refresh', 'ID']) {
+      for (const credential of ['Key', 'Keys', 'Secret', 'SecretKey', 'Token', 'Credential', 'Password', 'Cookie']) {
+        for (const counter of ['-Tokens', 'Tokens', '_Token_Count', '-CountTokens']) {
+          const name = `X-${prefix}${credential}${counter}`;
+          const headers = { [name]: '42' };
+          assert.throws(() => normalizeModelOptions({ ...base, headers, nonCredentialHeaders: [name] }), Error, name);
+          assert.equal(isCredentialHeader(name, [name]), true, name);
+          const connection = { ...base, headers, nonCredentialHeaders: [name] };
+          assert.throws(() => prepareSavedConnection(connection, connection, false), Error, name);
+          assert.equal(prepareSavedConnection({ ...base, headers }, { ...base, headers }, false).headers, undefined, name);
+          assert.equal(hasStoredCredentials(connection), true, name);
+        }
+      }
     }
   });
 
