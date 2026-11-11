@@ -303,18 +303,10 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
     final rounding = 1e-9 * size.width;
     if (size.width - figureWidth < -rounding) return null;
     if (screen == null) {
-      if (size.height < anchor.dy) return null;
-      // No screen to check against, but an overhang past the host is still measured
-      // in pixels, where the transform cannot magnify the rounding allowance.
-      if (figureWidth > size.width) {
-        for (final y in [0.0, size.height]) {
-          final m = transform.storage;
-          if (m[3] * figureWidth + m[7] * y + m[15] <= 0 || m[3] * size.width + m[7] * y + m[15] <= 0) return null;
-          final over = MatrixUtils.transformPoint(transform, Offset(figureWidth, y));
-          final edge = MatrixUtils.transformPoint(transform, Offset(size.width, y));
-          if ((over - edge).distance > 1e-6) return null;
-        }
-      }
+      // No screen to check against (a View always provides one, so this is a
+      // fallback): she must fit inside the host outright, with no allowance a
+      // transform could magnify.
+      if (figureWidth > size.width || size.height < anchor.dy) return null;
       return box(0, size.width, 0, size.height);
     }
     // A host point (x, y) lands on screen at (X/W, Y/W), each of X, Y and W linear
