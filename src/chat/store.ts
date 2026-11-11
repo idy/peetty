@@ -1,7 +1,7 @@
 import { COMPANION_ACTIONS, type ChatEntry, type PeettyReasoningEffort } from './types.ts';
-import { normalizeModelOptions, prepareSavedConnection } from './connections.ts';
+import { hasStoredCredentials, normalizeModelOptions, prepareSavedConnection } from './connections.ts';
 import { applyEntryChanges, entryChanges } from './history.ts';
-import { openStateDatabase, stateTransaction } from './idb.ts';
+import { fenceLegacyDatabase, openStateDatabase, stateTransaction } from './idb.ts';
 
 /** Setup saves only opted-in keys. Explicit complete backups may also restore provider headers. */
 export interface StoredConnection {
@@ -29,8 +29,8 @@ export interface StoredChat {
 
 /** Domain failures must not be mistaken for unavailable browser persistence. */
 export class ChatStorageError extends Error {
-  readonly code: 'missing-profile' | 'capacity' | 'stale-connection';
-  constructor(code: 'missing-profile' | 'capacity' | 'stale-connection', message: string) { super(message); this.code = code; this.name = 'ChatStorageError'; }
+  readonly code: 'missing-profile' | 'capacity' | 'stale-connection' | 'legacy-cleanup';
+  constructor(code: 'missing-profile' | 'capacity' | 'stale-connection' | 'legacy-cleanup', message: string) { super(message); this.code = code; this.name = 'ChatStorageError'; }
 }
 
 export interface HistoryProjection {
@@ -131,7 +131,8 @@ export class BrowserChatStore implements ChatStorage {
       isClosed: () => this.closed,
       onFailure: () => this.fail(),
       onReady: (db) => { this.db = db; },
-    });
+      onVersionChange: () => { this.db = undefined; this.opening = undefined; },
+    }, 'latest');
     return this.opening;
   }
 
@@ -182,10 +183,24 @@ export class BrowserChatStore implements ChatStorage {
   saveConnection(connection: StoredConnection, options?: { rememberCredentials: boolean }): Promise<StoredConnection | void> {
     const copy = connectionFrom(connection);
     if (!copy || this.closing) return Promise.resolve();
-    // Capture when requested, not when a delayed queue resumes. An uninitialized
-    // writer may save only before any invalidation; load() explicitly refreshes it.
-    const expectedEpoch = this.connectionEpoch ?? '';
     return this.enqueue(async () => {
+      // Observe our own earlier load/opt-out before comparing against a peer's
+      // transactional barrier. A rejected peer write never adopts that barrier.
+      const expectedEpoch = this.connectionEpoch ?? '';
+      let forget = this.persist && options?.rememberCredentials === false && hasStoredCredentials(this.state.connection);
+      if (this.persist && options?.rememberCredentials === false && this.connectionEpoch === undefined && !this.failed) {
+        // A first setup save may be uninitialized. Inspect existing credentials
+        // without adopting its barrier or mistaking a fresh RAM setup for opt-out.
+        await this.transact(false, (store) => {
+          const request = store.get('connection');
+          request.onsuccess = () => { forget = hasStoredCredentials(connectionFrom(request.result)); };
+        });
+      }
+      if (forget) {
+        const fenced = await fenceLegacyDatabase(`${this.namespace}:chat`, () => this.closed);
+        if (!fenced) throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
+        fenced.close();
+      }
       const retained = (known?: StoredConnection) => prepareSavedConnection(copy, known, options?.rememberCredentials);
       let saved: StoredConnection | undefined = retained(this.state.connection);
       let stale = false; let committedEpoch = expectedEpoch;
@@ -211,6 +226,7 @@ export class BrowserChatStore implements ChatStorage {
       });
       if (saved) this.state.connection = saved;
       else delete this.state.connection;
+      if (!ok && forget) throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
       if (ok && stale) throw new ChatStorageError('stale-connection', 'Connection settings changed. Reload before saving again.');
       if (ok) this.connectionEpoch = committedEpoch;
       return saved ? structuredClone(saved) : undefined;

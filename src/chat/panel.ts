@@ -1,6 +1,7 @@
 import { abortable, ChatRuntime, fetchModelList, normalizeBaseUrl } from './runtime.ts';
 import { isCredentialHeader, LOCAL_MAGPIE, localMagpieConnection, normalizeModelOptions, toStoredConnection } from './connections.ts';
 import { SecretRegistry } from './secrets.ts';
+import { ChatStorageError } from './store.ts';
 import { PROFILE_LIMITS } from './limits.ts';
 import type { ChatEntry, CompanionAction, PeettyChatOptions, PeettyModelOptions, PeettyReasoningEffort, SessionModel } from './types.ts';
 import type { Language } from '../pet/i18n.ts';
@@ -759,7 +760,9 @@ export async function createChatPanel({
           if (disposed || revision !== configuration || runtime !== owner || currentProfileId !== ownerId) return;
           cacheSession();
           showError(); setSettings(false);
-        } catch { if (!disposed && revision === configuration) showError(() => t.invalid); }
+        } catch (error) {
+          if (!disposed && revision === configuration) showError(() => error instanceof ChatStorageError && error.code === 'legacy-cleanup' ? t.legacyBlocked : t.invalid);
+        }
       })();
     });
     function send() {

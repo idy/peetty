@@ -3,7 +3,7 @@ import { describe, it, type TestContext } from 'node:test';
 import { Window } from 'happy-dom';
 import { createChatPanel, type ChatPanel } from '../src/chat/panel.ts';
 import type { PeettyChatOptions, PeettyModelOptions } from '../src/chat/types.ts';
-import { BrowserChatStore, type StoredConnection } from '../src/chat/store.ts';
+import { BrowserChatStore, ChatStorageError, type StoredConnection } from '../src/chat/store.ts';
 import { ChatRuntime } from '../src/chat/runtime.ts';
 import { BrowserProfileStore, type ProfileRecord } from '../src/chat/profiles.ts';
 import type { Portrait } from '../src/figure/portrait.ts';
@@ -576,6 +576,19 @@ describe('chat frame sound activation', () => {
 });
 
 describe('chat panel credential ownership', () => {
+  it('keeps setup open and explains blocked legacy credential cleanup in both languages', async (t) => {
+    const { panel, query } = await mountPanel(t, MODEL);
+    t.mock.method(ChatRuntime.prototype, 'configure', async () => {
+      throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
+    });
+    query<HTMLFormElement>('.pc-setup').requestSubmit();
+    await eventually(() => !query('.pc-error').hidden);
+    assert.equal(query('.pc-setup').hidden, false);
+    assert.match(query('.pc-error').textContent!, /Close other Peetty tabs/);
+    assert.doesNotMatch(query('.pc-error').textContent!, /API URL and a model ID/);
+    panel.setLanguage('zh');
+    assert.match(query('.pc-error').textContent!, /关闭其他 Peetty 标签页/);
+  });
   for (const consent of [false, true]) {
     it(`${consent ? 'remembers' : 'does not remember'} an injected key ${consent ? 'after explicit opt-in' : 'when saving another setting'}`, async (t) => {
       const storage = installChatIndexedDB(t);
@@ -586,7 +599,7 @@ describe('chat panel credential ownership', () => {
       query<HTMLInputElement>('[name="model"]').value = 'another-model';
       if (consent) remember.click();
       query<HTMLFormElement>('.pc-setup').requestSubmit();
-      await flush();
+      await eventually(() => query('.pc-setup').hidden === true);
       assert.equal(query('.pc-setup').hidden, true);
       const saved = savedConnection(storage, 'injected-consent')!;
       assert.equal(saved.id, 'another-model');
@@ -663,14 +676,16 @@ describe('effort and formatted replies', () => {
       input.value = 'hello'; input.dispatchEvent(new window.Event('input', { bubbles: true }) as unknown as Event);
       query<HTMLFormElement>('.pc-composer').requestSubmit();
     };
-    query<HTMLFormElement>('.pc-setup').requestSubmit(); await flush();
+    query<HTMLFormElement>('.pc-setup').requestSubmit();
+    await eventually(() => query('.pc-setup').hidden === true);
     const saved = () => savedConnection(storage, 'effort-panel')!;
     assert.equal(saved().effort, 'max');
     send(); await replies[0]!.promise;
     panel.open(true);
     assert.equal(effort.value, 'max');
     effort.value = '';
-    query<HTMLFormElement>('.pc-setup').requestSubmit(); await flush();
+    query<HTMLFormElement>('.pc-setup').requestSubmit();
+    await eventually(() => query('.pc-setup').hidden === true);
     assert.equal(saved().effort, undefined);
     send(); await replies[1]!.promise;
     assert.deepEqual(sent, ['max', undefined]);
@@ -830,7 +845,8 @@ describe('setup drafts and credential replacement', () => {
     const tools = query<HTMLInputElement>('[name="tools"]');
     assert.equal(tools.checked, true);
     tools.click();
-    query<HTMLFormElement>('.pc-setup').requestSubmit(); await flush();
+    query<HTMLFormElement>('.pc-setup').requestSubmit();
+    await eventually(() => query('.pc-setup').hidden === true);
     const connection = savedConnection(storage, 'plain-text-panel')!;
     assert.equal(connection.tools, false);
     t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1048,7 +1064,7 @@ describe('chat panel live language changes', () => {
       const remember = query<HTMLInputElement>('[name="remember"]');
       remember.checked = false;
       query<HTMLFormElement>('.pc-setup').requestSubmit();
-      await flush();
+      await eventually(() => query('.pc-setup').hidden === true);
       assert.equal(query('.pc-setup').hidden, true);
       assert.equal(saves.mock.callCount(), 1);
       assert.equal(query('.pc-storage').hidden, available);

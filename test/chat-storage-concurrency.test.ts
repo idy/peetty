@@ -3,6 +3,9 @@ import { describe, it } from 'node:test';
 import { BrowserChatStore, ChatStorageError } from '../src/chat/store.ts';
 import type { StoredConnection } from '../src/chat/store.ts';
 import { BrowserProfileStore } from '../src/chat/profiles.ts';
+import { ChatRuntime } from '../src/chat/runtime.ts';
+import { jsonFingerprint } from '../src/chat/bounded-json.ts';
+import { fenceLegacyDatabase, IDB_OPEN_TIMEOUT_MS, openStateDatabase, stateTransaction } from '../src/chat/idb.ts';
 import type { ChatEntry } from '../src/chat/types.ts';
 import { installChatIndexedDB } from './helpers/chat-storage.ts';
 
@@ -246,6 +249,44 @@ describe('independent legacy credential invalidation', () => {
     assert.equal((legacy.get('connection') as StoredConnection).apiKey, 'new-same-writer-key');
   });
 
+  it('honors a preceding queued load before saving on the same client', async (t) => {
+    const idb = installChatIndexedDB(t);
+    idb.databases.set('ordered-load:chat', new Map<string, unknown>([['connectionEpoch', 'current']]));
+    const store = new BrowserChatStore('ordered-load'); t.after(() => store.close());
+    const loading = store.load();
+    const saving = store.saveConnection(connection);
+    await Promise.all([loading, saving]);
+    assert.deepEqual(idb.databases.get('ordered-load:chat')!.get('connection'), connection);
+  });
+
+  it('honors a queued opt-out before a later deliberate save on the same client', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const store = new BrowserChatStore('ordered-opt-out'); t.after(() => store.close());
+    await store.saveConnection(connection);
+    const forgetting = store.saveConnection(connection, { rememberCredentials: false });
+    const replacement = { ...connection, apiKey: 'new-authorized-queued-key' };
+    const saving = store.saveConnection(replacement);
+    await Promise.all([forgetting, saving]);
+    assert.deepEqual(idb.databases.get('ordered-opt-out:chat')!.get('connection'), replacement);
+    assert.equal(idb.versions.get('ordered-opt-out:chat'), 2);
+  });
+
+  it('keeps initial nonremembering setup available during an IndexedDB outage without fencing', async (t) => {
+    const idb = installChatIndexedDB(t);
+    idb.fail('open');
+    const legacy = new BrowserChatStore('initial-ram-legacy'); t.after(() => legacy.close());
+    await legacy.saveConnection(connection, { rememberCredentials: false });
+    assert.equal((await legacy.load()).connection!.apiKey, undefined);
+    assert.equal(legacy.persistenceWarning, true);
+    const profiles = new BrowserProfileStore('initial-ram-profiles'); t.after(() => profiles.close());
+    await profiles.initialize();
+    await profiles.storage(profiles.activeProfileId).saveConnection(connection, { rememberCredentials: false });
+    assert.equal(profiles.activeProfile.connection!.id, connection.id);
+    assert.equal(profiles.activeProfile.connection!.apiKey, undefined);
+    assert.equal(profiles.persistenceWarning, true);
+    assert.equal(idb.versions.size, 0, 'fresh RAM setup must not attempt a destructive upgrade');
+  });
+
   it('keeps nonpersistent and failed-IDB setup saves in memory', async (t) => {
     const idb = installChatIndexedDB(t);
     const memory = new BrowserChatStore('memory-credentials', false); t.after(() => memory.close());
@@ -260,5 +301,139 @@ describe('independent legacy credential invalidation', () => {
     assert.deepEqual((await persisted.load()).connection, connection);
     assert.equal(persisted.persistenceWarning, true);
     assert.equal(idb.databases.get('fallback-credentials:chat')!.has('connection'), false);
+  });
+});
+
+describe('version fencing of deployed legacy v1 writers', () => {
+  const connection: StoredConnection = { id: 'old-model', baseUrl: 'https://old.example/v1', apiKey: 'old-compiled-fixture-key' };
+  // Deliberately mirrors the deployed v1 policy: unconditional credential puts,
+  // fixed version-one opens, close+RAM fallback on versionchange, no epoch reads.
+  async function oldV1(namespace: string, cooperative = true) {
+    let failed = false;
+    const db = await openStateDatabase(`${namespace}:chat`, { isClosed: () => false, onFailure: () => { failed = true; } });
+    assert.ok(db);
+    if (!cooperative) db.onversionchange = () => {};
+    return { db, get failed() { return failed; }, close: () => db.close(),
+      async save(value: StoredConnection) {
+        if (failed) return false;
+        const ok = await stateTransaction(db, true, (store) => { store.put(value, 'connection'); });
+        if (!ok) failed = true;
+        return ok;
+      },
+    };
+  }
+
+  for (const cleanup of ['opt-out', 'explicit', 'legacy-opt-out'] as const) {
+    it(`fences an actual old-v1-style writer before ${cleanup} succeeds and preserves unknown data`, async (t) => {
+      const idb = installChatIndexedDB(t);
+      const namespace = `old-v1-${cleanup}`;
+      const manager = new BrowserProfileStore(namespace); t.after(() => manager.close());
+      await manager.initialize();
+      await manager.storage(manager.activeProfileId).saveConnection(connection);
+      const legacy = idb.databases.get(`${namespace}:chat`)!;
+      legacy.set('connection', connection);
+      legacy.set('entries', [entry('unknown', 'Not copied to current profiles')]);
+      legacy.set('unrelated', 'keep');
+      const old = await oldV1(namespace); t.after(() => old.close());
+      const pending = old.save(connection); // Its already-enqueued v1 transaction must drain first.
+      if (cleanup === 'opt-out') await manager.storage(manager.activeProfileId).saveConnection(connection, { rememberCredentials: false });
+      else if (cleanup === 'explicit') await manager.clearLegacyData();
+      else {
+        const updated = new BrowserChatStore(namespace); t.after(() => updated.close());
+        await updated.load();
+        await updated.saveConnection(connection, { rememberCredentials: false });
+      }
+      assert.equal(await pending, true);
+      assert.equal(old.failed, true, 'old compiled adapter must be fenced through its existing versionchange handler');
+      assert.equal(idb.versions.get(`${namespace}:chat`), 2);
+      assert.equal(idb.versions.get(`${namespace}:profiles`), 1);
+      const saved = legacy.get('connection') as StoredConnection | undefined;
+      assert.equal(saved?.apiKey, undefined);
+      assert.equal(await old.save(connection), false);
+      assert.equal((legacy.get('connection') as StoredConnection | undefined)?.apiKey, undefined);
+      if (cleanup !== 'explicit') assert.deepEqual(legacy.get('entries'), [entry('unknown', 'Not copied to current profiles')]);
+      assert.equal(legacy.get('unrelated'), 'keep');
+      let errorName = '';
+      const obsolete = await openStateDatabase(`${namespace}:chat`, { isClosed: () => false, onFailure: () => {}, onOpenError: (error) => { errorName = error?.name ?? ''; } });
+      assert.equal(obsolete, undefined);
+      assert.equal(errorName, 'VersionError', 'future fixed-v1 opens cannot restart the erased credential writer');
+      const current = new BrowserChatStore(namespace); t.after(() => current.close());
+      await current.load();
+      await current.saveConnection({ ...connection, apiKey: 'new-updated-client-key' });
+      assert.equal(idb.versions.get(`${namespace}:chat`), 2, 'normal operations must not repeatedly upgrade');
+    });
+  }
+
+  it('rejects a real runtime opt-out blocked by an uncooperative v1 connection without late cleanup', async (t) => {
+    const idb = installChatIndexedDB(t);
+    const namespace = 'blocked-old-v1';
+    const manager = new BrowserProfileStore(namespace); t.after(() => manager.close());
+    await manager.initialize();
+    await manager.storage(manager.activeProfileId).saveConnection(connection);
+    const legacy = idb.databases.get(`${namespace}:chat`)!;
+    legacy.set('connection', connection); legacy.set('entries', [entry('uncopied')]);
+    const proof = { version: 1, entries: [], connections: [jsonFingerprint(connection)] };
+    idb.databases.get(`${namespace}:profiles`)!.set('legacyMigration', proof);
+    const blocker = await oldV1(namespace, false); t.after(() => blocker.close());
+    const runtime = new ChatRuntime({ storage: manager.storage(manager.activeProfileId) }); t.after(() => runtime.destroy());
+    await runtime.initialize();
+    const before = manager.profiles;
+    await assert.rejects(runtime.configure(runtime.model!, false), (error: unknown) => error instanceof ChatStorageError && error.code === 'legacy-cleanup');
+    assert.deepEqual(manager.profiles, before);
+    assert.deepEqual(legacy.get('connection'), connection);
+    assert.deepEqual(idb.databases.get(`${namespace}:profiles`)!.get('legacyMigration'), proof);
+    assert.equal(runtime.persistenceWarning, false, 'a blocked destructive operation is not a successful RAM save');
+    assert.equal(idb.versions.get(`${namespace}:chat`), 1);
+    blocker.close();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(idb.versions.get(`${namespace}:chat`), 1, 'the rejected upgrade must abort if it becomes unblocked later');
+    assert.deepEqual(legacy.get('connection'), connection);
+    assert.deepEqual(idb.databases.get(`${namespace}:profiles`)!.get('legacyMigration'), proof);
+    await runtime.configure(runtime.model!, false);
+    assert.equal(idb.versions.get(`${namespace}:chat`), 2);
+    assert.equal(manager.activeProfile.connection!.apiKey, undefined);
+    assert.equal(legacy.has('connection'), false);
+    assert.deepEqual(legacy.get('entries'), [entry('uncopied')]);
+  });
+
+  it('aborts a late timed-out upgrade transaction and closes its late result', async (t) => {
+    installChatIndexedDB(t);
+    const open = globalThis.indexedDB.open.bind(globalThis.indexedDB);
+    let started!: () => void;
+    const waiting = new Promise<void>((resolve) => { started = resolve; });
+    let aborts = 0; let closes = 0;
+    const database = { version: 2, objectStoreNames: { contains: () => true }, close() { closes++; } } as unknown as IDBDatabase;
+    const request = { result: database, transaction: { abort() { aborts++; } } } as unknown as IDBOpenDBRequest;
+    t.mock.method(globalThis.indexedDB, 'open', (name: string, version?: number) => {
+      if (version !== 2) return open(name, version);
+      started(); return request;
+    });
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const fence = fenceLegacyDatabase('late-upgrade:chat', () => false);
+    await waiting;
+    t.mock.timers.tick(IDB_OPEN_TIMEOUT_MS);
+    assert.equal(await fence, undefined);
+    request.onupgradeneeded?.call(request, new Event('upgradeneeded') as IDBVersionChangeEvent);
+    assert.equal(aborts, 1);
+    request.onsuccess?.call(request, new Event('success'));
+    assert.ok(closes >= 1);
+  });
+
+  it('rediscovers the latest version when a racing fence overtakes the requested upgrade', async (t) => {
+    const idb = installChatIndexedDB(t);
+    idb.databases.set('race-fence:chat', new Map());
+    const open = globalThis.indexedDB.open.bind(globalThis.indexedDB);
+    let raced = false;
+    t.mock.method(globalThis.indexedDB, 'open', (name: string, version?: number) => {
+      if (version !== 2 || raced) return open(name, version);
+      raced = true;
+      const request = { error: new DOMException('Version changed', 'VersionError') } as IDBOpenDBRequest;
+      const other = open(name, 3);
+      other.onsuccess = () => { other.result.close(); request.onerror?.call(request, new Event('error')); };
+      return request;
+    });
+    const fenced = await fenceLegacyDatabase('race-fence:chat', () => false);
+    assert.equal(fenced?.version, 3);
+    fenced?.close();
   });
 });

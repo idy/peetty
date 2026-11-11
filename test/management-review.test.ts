@@ -210,6 +210,7 @@ describe('explicit previous-format cleanup', () => {
     ui.tab('data'); ui.click('Delete previous-format copies'); ui.click('Permanently delete old chat and key copies'); await flush();
     assert.equal(cleanup.mock.callCount(), 1); assert.deepEqual(ui.store.activeProfile, before);
     assert.equal(ui.query('.pc-manage-status').hasAttribute('data-error'), true);
+    assert.match(ui.query('.pc-manage-status').textContent!, /Close other Peetty tabs/);
     assert.equal(ui.query('[data-focus-key="confirm-legacy"]').parentElement!.hidden, false);
     assert.equal(ui.query<HTMLButtonElement>('[data-focus-key="confirm-legacy"]').disabled, false);
     ui.click('Cancel'); assert.equal(cleanup.mock.callCount(), 1);

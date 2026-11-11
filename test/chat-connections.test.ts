@@ -93,6 +93,26 @@ describe('explicit nonsecret header classification', () => {
     }
   });
 
+  it('accepts explicitly declared numeric token-count metadata without exempting credentials', () => {
+    for (const name of ['X-MaxTokens', 'X-InputTokens', 'X-Output-Tokens', 'X-TotalTokens', 'X-PromptTokens', 'X-Completion-Tokens-Limit']) {
+      for (const value of ['0', '42', '4096']) {
+        const model = normalizeModelOptions({ ...base, headers: { [name]: value }, nonCredentialHeaders: [name] });
+        assert.equal(isCredentialHeader(name), true, 'undeclared values remain sensitive');
+        assert.equal(isCredentialHeader(name, model.nonCredentialHeaders), false);
+        const saved = prepareSavedConnection(model, undefined, false);
+        assert.deepEqual(saved.headers, { [name.toLowerCase()]: value });
+        assert.equal(saved.apiKey, undefined);
+        assert.equal(hasStoredCredentials(saved), false);
+      }
+      for (const value of ['synthetic-secret', 'NaN', 'Infinity', '-1', '1.5', '9007199254740993']) {
+        assert.throws(() => normalizeModelOptions({ ...base, headers: { [name]: value }, nonCredentialHeaders: [name] }));
+      }
+    }
+    for (const name of ['X-ClientToken', 'X-AuthToken', 'X-Token', 'X-InputTokensSecret']) {
+      assert.throws(() => normalizeModelOptions({ ...base, headers: { [name]: '42' }, nonCredentialHeaders: [name] }));
+    }
+  });
+
   it('never permits authentication names to be exempted', () => {
     for (const name of ['Authorization', 'Proxy-Authorization', 'Api-Key', 'X-Api-Key', 'X-Auth', 'X-Access-Key', 'X-Token', 'X-Secret', 'Cookie', 'Set-Cookie', 'Ocp-Apim-Subscription-Key', 'X-Key', 'Gateway-Credential', 'X-Password', 'X-Authentication', 'X-AccessToken', 'X-AuthToken', 'x-AUTHTOKEN', 'X-Auth-Token', 'X-SecretKey', 'x-secretkey', 'X-Secret-Key', 'X-APIKEY', 'X-SubscriptionKey', 'X-Subscription-Token']) {
       assert.throws(() => normalizeModelOptions({ ...base, headers: { [name]: 'fixture-sensitive' }, nonCredentialHeaders: [name] }));

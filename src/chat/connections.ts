@@ -61,6 +61,11 @@ const NONCREDENTIAL_HEADERS = new Set([
 ]);
 // Authentication names remain sensitive even if a caller attempts to classify them otherwise.
 const AUTHENTICATION_HEADER = /(?:^|[-_])(?:auth(?:entication|orization)?(?:[-_]?(?:key|token|secret|password|credential))?|[a-z0-9]*(?:tokens?|secrets?|passwords?|credentials?|cookies?)(?:[-_]?(?:key|token|secret))?|(?:api|access|subscription)[-_]?(?:key|token))(?:$|[-_])|^(?:x[-_])?key$/i;
+// Token budgets are metadata only when explicitly declared with a finite integer value.
+const TOKEN_COUNT_HEADER = /^(?:x[-_])?(?:max|input|output|total|prompt|completion|cached)[-_]?tokens?(?:[-_]?(?:count|limit))?$/i;
+function isTokenCount(name: string, value: string | undefined): boolean {
+  return TOKEN_COUNT_HEADER.test(name) && typeof value === 'string' && /^\d+$/.test(value) && Number.isSafeInteger(Number(value));
+}
 
 function normalizeNonCredentialHeaders(value: unknown, headers?: Record<string, string>): string[] | undefined {
   if (value === undefined) return;
@@ -70,7 +75,10 @@ function normalizeNonCredentialHeaders(value: unknown, headers?: Record<string, 
     if (typeof name !== 'string') throw new Error();
     // Headers validates HTTP token syntax and canonicalizes case without accepting whitespace.
     const normalized = [...new Headers([[name, '']]).keys()][0]!;
-    if (!Object.hasOwn(headers ?? {}, normalized) || AUTHENTICATION_HEADER.test(normalized)) throw new Error();
+    if (!Object.hasOwn(headers ?? {}, normalized)) throw new Error();
+    if (TOKEN_COUNT_HEADER.test(normalized)) {
+      if (!isTokenCount(normalized, headers?.[normalized])) throw new Error();
+    } else if (AUTHENTICATION_HEADER.test(normalized)) throw new Error();
     names.add(normalized);
   }
   return [...names].sort();
@@ -78,7 +86,7 @@ function normalizeNonCredentialHeaders(value: unknown, headers?: Record<string, 
 
 export function isCredentialHeader(name: string, nonCredentialHeaders: readonly string[] = []): boolean {
   const normalized = name.trim().toLowerCase();
-  return AUTHENTICATION_HEADER.test(normalized) ||
+  return AUTHENTICATION_HEADER.test(normalized) && !TOKEN_COUNT_HEADER.test(normalized) ||
     !NONCREDENTIAL_HEADERS.has(normalized) && !nonCredentialHeaders.some(value => value.toLowerCase() === normalized);
 }
 

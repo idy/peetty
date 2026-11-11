@@ -3,9 +3,9 @@ import { validateFigure } from '../figure/validate.ts';
 import { COMPANION_ACTIONS, type ChatEntry } from './types.ts';
 import type { ChatStorage, StoredChat, StoredConnection, StoredSessionConnection } from './store.ts';
 import { boundedEntries, ChatStorageError } from './store.ts';
-import { connectionIdentity, normalizeModelOptions, prepareSavedConnection } from './connections.ts';
+import { connectionIdentity, hasStoredCredentials, normalizeModelOptions, prepareSavedConnection } from './connections.ts';
 import { applyEntryChanges, entryChanges, sanitizeEntries } from './history.ts';
-import { openStateDatabase, stateTransaction } from './idb.ts';
+import { fenceLegacyDatabase, openStateDatabase, stateTransaction } from './idb.ts';
 import { PROFILE_LIMITS } from './limits.ts';
 import { jsonChunks, jsonFingerprint, parseJSONChunks } from './bounded-json.ts';
 
@@ -50,6 +50,7 @@ interface State { directory: Directory; records: Map<string, RecordState> }
 interface LegacySnapshot { entries: unknown; connection: unknown; epoch: unknown; connectionEpoch: unknown }
 interface LegacyMigration extends StoredChat { used: boolean; retire?: LegacySnapshot }
 interface LegacyProof { version: 1; entries: string[]; connections: string[] }
+type LegacyPrivacy = 'automatic' | 'history' | 'credentials' | 'profile';
 function legacyProofFrom(value: unknown): LegacyProof | undefined {
   if (value === undefined) return;
   const proof = object(value, ['version', 'entries', 'connections']);
@@ -534,7 +535,7 @@ export class BrowserProfileStore {
   private queued<T>(selection: readonly string[], write: boolean, action: (draft: Draft) => T, privacyMutation = false): Promise<T> {
     return this.enqueue(async () => {
       this.ready();
-      if (privacyMutation) await this.reconcileLegacy(true);
+      if (privacyMutation) await this.reconcileLegacy(true, 'history');
       return this.run(selection, write, action);
     });
   }
@@ -544,7 +545,7 @@ export class BrowserProfileStore {
     if (!this.persist || this.failed || this.closed) return { entries: [], used: false };
     // Migration is optional and owns its connection. Its failure must not close
     // healthy profile storage or bypass the authoritative initialization recheck.
-    const db = await openStateDatabase(`${this.namespace}:chat`, { isClosed: () => this.closed, onFailure: () => {} });
+    const db = await openStateDatabase(`${this.namespace}:chat`, { isClosed: () => this.closed, onFailure: () => {} }, 'latest');
     // Unreadable legacy data is not evidence of an unused bootstrap profile.
     if (!db) return { entries: [], used: true };
     try {
@@ -597,21 +598,26 @@ export class BrowserProfileStore {
 
   /** Retire only the exact records copied by our successful authoritative write.
    * Read/compare/delete share a legacy transaction, so a concurrent old client wins. */
-  private async retireLegacy(snapshot: LegacySnapshot, proof: LegacyProof): Promise<void> {
+  private async retireLegacy(snapshot: LegacySnapshot, proof: LegacyProof, mode: LegacyPrivacy = 'automatic'): Promise<void> {
     if (!this.persist || this.failed || this.closed) return;
     const knownEntries = new Set(proof.entries); const knownConnections = new Set(proof.connections);
     const original = snapshot.entries === undefined ? undefined : array(snapshot.entries, PROFILE_LIMITS.entries, entryFrom);
     const remainingEntries = original?.filter((entry) => !knownEntries.has(jsonFingerprint(entry)));
-    // A partial retirement cannot distinguish unproven history from an active
-    // old-tab turn. Keep the complete original history and its epoch until all
-    // entries are proven copied, or the user explicitly requests legacy deletion.
-    const changedEntries = original !== undefined && remainingEntries!.length === 0;
+    // Background retirement cannot distinguish an unproven active turn. Explicit
+    // history/profile deletion instead removes proven copies, preserving all
+    // uncopied entries, and deliberately invalidates the old history snapshot.
+    const explicitHistory = mode === 'history' || mode === 'profile';
+    const changedEntries = original !== undefined && (remainingEntries!.length === 0 || explicitHistory && remainingEntries!.length < original.length);
     const removeConnection = snapshot.connection !== undefined && knownConnections.has(jsonFingerprint(connectionFrom(snapshot.connection)));
     if (!changedEntries && !removeConnection) return;
-    const db = await openStateDatabase(`${this.namespace}:chat`, { isClosed: () => this.closed, onFailure: () => {} });
-    if (!db) return;
+    const db = await openStateDatabase(`${this.namespace}:chat`, { isClosed: () => this.closed, onFailure: () => {} }, 'latest');
+    if (!db) {
+      if (mode === 'credentials' || mode === 'profile') throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
+      return;
+    }
     try {
-      await stateTransaction(db, true, (store, abort) => {
+      let matched = false;
+      const ok = await stateTransaction(db, true, (store, abort) => {
         const fields = [['entries', 'entries'], ['connection', 'connection'], ['entriesEpoch', 'epoch'], ['connectionEpoch', 'connectionEpoch']] as const;
         const current = {} as LegacySnapshot;
         let remaining = fields.length;
@@ -621,7 +627,11 @@ export class BrowserProfileStore {
             try {
               current[field] = request.result;
               if (--remaining || !sameLegacyValue(current, snapshot)) return;
-              if (changedEntries) store.delete('entries');
+              matched = true;
+              if (changedEntries) {
+                if (remainingEntries!.length) store.put(remainingEntries, 'entries');
+                else store.delete('entries');
+              }
               if (removeConnection) store.delete('connection');
               // A retired history also invalidates a pending first setup save,
               // even when the old client had not stored its connection yet.
@@ -633,27 +643,35 @@ export class BrowserProfileStore {
           };
         }
       });
+      if ((!ok || !matched) && (mode === 'credentials' || mode === 'profile')) throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
     } finally { db.close(); }
   }
 
   /** Establish proof from actual authoritative correspondence before user deletion,
    * then retry CAS cleanup. Previously copied digests survive clear/key opt-out. */
-  private reconcileLegacy(force = false): Promise<void> {
-    if (this.legacyReconciliation) return this.legacyReconciliation;
+  private reconcileLegacy(force = false, mode: LegacyPrivacy = 'automatic'): Promise<void> {
+    if (this.legacyReconciliation) return mode === 'automatic' ? this.legacyReconciliation : this.legacyReconciliation.then(() => this.reconcileLegacy(force, mode));
     if (!force && this.legacyEmpty && this.legacyCheckedRevision === this.legacyRevision) return Promise.resolve();
-    const operation = this.reconcileLegacyNow();
+    const operation = this.reconcileLegacyNow(mode);
     this.legacyReconciliation = operation;
     return operation.finally(() => { if (this.legacyReconciliation === operation) this.legacyReconciliation = undefined; });
   }
 
-  private async reconcileLegacyNow(): Promise<void> {
-    if (!this.persist || this.failed || this.closed || this.reconcilingLegacy) return;
+  private async reconcileLegacyNow(mode: LegacyPrivacy): Promise<void> {
+    if (!this.persist || this.closed || this.reconcilingLegacy) return;
     this.reconcilingLegacy = true;
     try {
+      if (mode === 'credentials' || mode === 'profile') {
+        await this.fenceLegacyAuthentication();
+        if (this.failed) throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
+      } else if (this.failed) return;
       const legacy = await this.legacy();
       this.legacyEmpty = !legacy.used;
       this.legacyCheckedRevision = this.legacyRevision;
-      if (!legacy.retire) return;
+      if (!legacy.retire) {
+        if (legacy.used && (mode === 'credentials' || mode === 'profile')) throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
+        return;
+      }
       const candidates = legacy.entries.map((entry) => ({ entry, digest: jsonFingerprint(entry) }));
       const connectionDigest = legacy.connection ? jsonFingerprint(legacy.connection) : undefined;
       const proof = await this.run('all', true, (draft) => {
@@ -674,8 +692,19 @@ export class BrowserProfileStore {
         }
         return draft.legacyProof;
       });
-      if (!this.failed && proof) await this.retireLegacy(legacy.retire, proof);
+      if (this.failed && (mode === 'credentials' || mode === 'profile')) throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
+      if (!this.failed && proof) await this.retireLegacy(legacy.retire, proof, mode);
     } finally { this.reconcilingLegacy = false; }
+  }
+
+  private async fenceLegacyAuthentication(): Promise<void> {
+    const db = await fenceLegacyDatabase(`${this.namespace}:chat`, () => this.closed);
+    if (!db) throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
+    try {
+      const epoch = freshId();
+      const ok = await stateTransaction(db, true, (store) => { store.put(epoch, 'connectionEpoch'); });
+      if (!ok) throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
+    } finally { db.close(); }
   }
 
   /** Destructive recovery for unprovable legacy duplicates. Hosts must obtain an
@@ -683,8 +712,9 @@ export class BrowserProfileStore {
   clearLegacyData(): Promise<void> {
     return this.enqueue(async () => {
       this.ready();
+      await this.fenceLegacyAuthentication();
       const clear = async (database: string, keys: readonly string[]) => {
-        const db = await openStateDatabase(database, { isClosed: () => this.closed, onFailure: () => {} });
+        const db = await openStateDatabase(database, { isClosed: () => this.closed, onFailure: () => {} }, database === `${this.namespace}:chat` ? 'latest' : 1);
         check(db, 'Could not remove legacy data. Try again.');
         try {
           const barrier = freshId();
@@ -792,7 +822,7 @@ export class BrowserProfileStore {
   remove(profileId: string): Promise<void> {
     return this.enqueue(async () => {
       this.ready();
-      await this.reconcileLegacy(true);
+      await this.reconcileLegacy(true, 'profile');
       await this.run([profileId], true, (draft) => {
         getRecord(draft, profileId);
         check(draft.directory.ids.length > 1, 'Cannot remove the last profile.');
@@ -845,8 +875,11 @@ export class BrowserProfileStore {
         const copy = connectionFrom(connection, false);
         return this.enqueue(async () => {
           this.ready();
-          // Replacing a connection can forget old credentials just like opt-out.
-          await this.reconcileLegacy(true);
+          // Credential removal must fence obsolete v1 writers before reporting
+          // success. Metadata-only/initial saves leave active legacy work alone.
+          const previous = await this.run([profileId], false, (draft) => getRecord(draft, profileId).profile.connection);
+          const forget = previous && hasStoredCredentials(previous) && (options?.rememberCredentials === false || connectionIdentity(previous) !== connectionIdentity(copy));
+          await this.reconcileLegacy(true, forget ? 'credentials' : 'automatic');
           const saved = await this.run([profileId], true, (draft) => {
             const known = this.sessions.get(profileId)?.at(-1)?.connection ?? getRecord(draft, profileId).profile.connection;
             const saved = prepareSavedConnection(copy, known, options?.rememberCredentials);
@@ -886,7 +919,7 @@ export class BrowserProfileStore {
         if (closing) return;
         await this.enqueue(async () => {
           this.ready();
-          await this.reconcileLegacy(true);
+          await this.reconcileLegacy(true, 'history');
           await this.run([profileId], true, (draft) => {
             const record = touchMemories(draft, profileId);
             detachSources(record.profile, record.profile.entries);

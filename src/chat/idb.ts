@@ -33,10 +33,14 @@ interface DatabaseOwner {
   onFailure: () => void;
   /** Some owners publish their cache before the open promise resolves. */
   onReady?: (database: IDBDatabase) => void;
+  /** Updated legacy adapters reopen the latest version without degrading to RAM. */
+  onVersionChange?: () => void;
+  onOpenError?: (error: DOMException | null) => void;
 }
 
-/** One uncached handshake for the version-one browser state databases. */
-export function openStateDatabase(name: string, owner: DatabaseOwner): Promise<IDBDatabase | undefined> {
+/** Profile databases stay at v1. Legacy adapters can discover the current
+ * version, and destructive credential cleanup can fence obsolete v1 adapters. */
+export function openStateDatabase(name: string, owner: DatabaseOwner, version: number | 'latest' = 1, timeoutMs = IDB_OPEN_TIMEOUT_MS): Promise<IDBDatabase | undefined> {
   return new Promise((resolve) => {
     let settled = false;
     const finish = (database?: IDBDatabase) => {
@@ -48,18 +52,47 @@ export function openStateDatabase(name: string, owner: DatabaseOwner): Promise<I
       else owner.onFailure();
       resolve(database);
     };
-    const timer = setTimeout(() => finish(), IDB_OPEN_TIMEOUT_MS);
+    const timer = setTimeout(() => finish(), timeoutMs);
     try {
-      const request = globalThis.indexedDB.open(name, 1);
+      const request = version === 'latest' ? globalThis.indexedDB.open(name) : globalThis.indexedDB.open(name, version);
       request.onupgradeneeded = () => {
+        if (settled || owner.isClosed()) {
+          try { request.transaction?.abort(); } catch { /* Already aborted. */ }
+          request.result.close();
+          return;
+        }
         if (!request.result.objectStoreNames.contains('state')) request.result.createObjectStore('state');
       };
       request.onsuccess = () => {
         const database = request.result;
-        database.onversionchange = () => { database.close(); owner.onFailure(); };
+        database.onversionchange = () => { database.close(); (owner.onVersionChange ?? owner.onFailure)(); };
         finish(database);
       };
-      request.onerror = request.onblocked = () => finish();
+      request.onerror = () => { if (!settled) owner.onOpenError?.(request.error ?? null); finish(); };
+      request.onblocked = () => finish();
     } catch { finish(); }
   });
+}
+
+/** Fence deployed v1 adapters once, without deleting any records. Upgrade success
+ * means old connections closed and all their queued transactions drained. A late
+ * upgrade after blocked/timeout rejection is aborted by openStateDatabase. */
+export async function fenceLegacyDatabase(name: string, isClosed: () => boolean): Promise<IDBDatabase | undefined> {
+  const deadline = Date.now() + IDB_OPEN_TIMEOUT_MS;
+  let versionRace = false;
+  const open = (version: number | 'latest') => openStateDatabase(name, {
+    isClosed, onFailure: () => {}, onOpenError: (error) => { versionRace = error?.name === 'VersionError'; },
+  }, version, Math.max(1, deadline - Date.now()));
+  const current = await open('latest');
+  if (!current) return;
+  if (current.version >= 2) return current;
+  current.close();
+  const upgraded = await open(2);
+  if (upgraded || !versionRace || isClosed() || Date.now() >= deadline) return upgraded;
+  // Another fence may have upgraded beyond the requested version while our
+  // versioned open was queued. Discover it once within the same finite deadline.
+  const latest = await open('latest');
+  if (latest && latest.version >= 2) return latest;
+  latest?.close();
+  return undefined;
 }

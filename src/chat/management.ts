@@ -47,6 +47,7 @@ const COPY = {
     cancelDownload: 'Cancel remaining downloads', downloadCanceled: 'Backup download canceled. Previously downloaded parts are incomplete; start a new full backup to restore it.',
     legacyTitle: 'Previous-format data', legacyHint: 'Close tabs still running previous Peetty releases first. Delete leftover previous-format chat and API key copies on this device. Your current profiles, conversations and connections are kept.',
     clearLegacy: 'Delete previous-format copies', confirmLegacy: 'Permanently delete old chat and key copies', legacyCleared: 'Previous-format copies deleted. Current profiles are kept.',
+    legacyFailed: 'Could not complete cleanup. Close other Peetty tabs, check browser storage, and try again.',
     restore: 'Restore backup', restoreHint: 'Restore creates independent profiles and keeps your existing data. Select the backup file, or all files of a multipart backup together. Connections are used only after you start chatting.',
     memoryTitle: 'Import and export memory', memoryHint: 'Only the selected profile’s memories. Source messages, conversation history and API keys are omitted.',
     exportMemory: 'Download memory JSON', exportMarkdown: 'Download memory Markdown', importMemory: 'Import memory JSON',
@@ -74,6 +75,7 @@ const COPY = {
     cancelDownload: '取消剩余下载', downloadCanceled: '备份下载已取消。此前下载的分卷不完整，请重新下载完整备份后再恢复。',
     legacyTitle: '旧格式数据', legacyHint: '请先关闭仍运行旧版 Peetty 的标签页，再删除此设备上旧格式聊天和 API Key 的残留副本。当前档案、聊天与模型连接都会保留。',
     clearLegacy: '删除旧格式副本', confirmLegacy: '永久删除旧聊天与密钥副本', legacyCleared: '旧格式副本已删除，当前档案已保留。',
+    legacyFailed: '暂时无法完成清理。请关闭其他 Peetty 标签页，并确认浏览器存储可用后重试。',
     restore: '恢复备份', restoreHint: '恢复为独立的新档案，保留现有数据。请选择备份文件，分卷备份需一次选中全部文件。只有你开始聊天后才会使用恢复的连接。',
     memoryTitle: '导入与导出记忆', memoryHint: '只包含当前档案的记忆，不包含来源消息、聊天历史或 API Key。',
     exportMemory: '下载记忆 JSON', exportMarkdown: '下载记忆 Markdown', importMemory: '导入记忆 JSON',
@@ -343,14 +345,14 @@ export function createManagement(options: Options) {
     locked.clear();
     options.onBusy?.(false);
   }
-  async function run(id: string, origin: HTMLElement, action: () => Promise<void>, success: CopyKey | (() => CopyKey) = 'saved') {
+  async function run(id: string, origin: HTMLElement, action: () => Promise<void>, success: CopyKey | (() => CopyKey) = 'saved', failure: CopyKey = 'failed') {
     if (busy || !owns(id, origin)) return;
     busy = true;
     options.onBusy?.(true);
     const focus = captureFocus();
     captureDrafts(); say('working'); lockControls();
     try { await action(); if (!destroyed) say(typeof success === 'function' ? success() : success); }
-    catch { if (!destroyed) say('failed', true); }
+    catch { if (!destroyed) say(failure, true); }
     finally {
       try {
         // Authoritative exports can discover that a peer deleted the selected profile.
@@ -773,7 +775,7 @@ export function createManagement(options: Options) {
       void run(profileId, confirmLegacy, async () => {
         await store.clearLegacyData();
         legacyConfirmation.hidden = true; clearLegacy.hidden = false; clearLegacy.focus();
-      }, 'legacyCleared');
+      }, 'legacyCleared', 'legacyFailed');
     });
     legacyConfirmation.append(confirmLegacy, cancelLegacy); page.append(clearLegacy, legacyConfirmation);
   }

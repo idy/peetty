@@ -992,7 +992,7 @@ describe('bounded JSON compatibility and retryable migration', () => {
     assert.deepEqual(reopened.activeProfile.entries, [entry('copied')]);
     await reopened.storage(id).clearEntries();
     await reopened.storage(id).saveConnection(connection, { rememberCredentials: false });
-    assert.deepEqual(legacy.get('entries'), [entry('copied'), entry('uncopied')]);
+    assert.deepEqual(legacy.get('entries'), [entry('uncopied')]);
     assert.equal(legacy.has('connection'), false);
   });
 
@@ -1010,7 +1010,7 @@ describe('bounded JSON compatibility and retryable migration', () => {
     const id = first.activeProfileId;
     assert.ok(legacy.has('entries'));
     await first.storage(id).clearEntries();
-    await first.storage(id).saveConnection(connection, { rememberCredentials: false });
+    await assert.rejects(first.storage(id).saveConnection(connection, { rememberCredentials: false }), { code: 'legacy-cleanup' });
     assert.equal(first.persistenceWarning, false);
     const persistedProof = JSON.stringify(idb.databases.get('retry-cleanup:profiles')!.get('legacyMigration'));
     assert.equal(persistedProof.includes('Raw private history'), false);
@@ -1019,6 +1019,8 @@ describe('bounded JSON compatibility and retryable migration', () => {
     const reopened = await store(t, 'retry-cleanup');
     assertLegacyRetired(legacy);
     assert.deepEqual(reopened.activeProfile.entries, []);
+    assert.equal(reopened.activeProfile.connection!.apiKey, connection.apiKey, 'failed opt-out cannot report a forgotten key');
+    await reopened.storage(id).saveConnection(connection, { rememberCredentials: false });
     assert.equal(reopened.activeProfile.connection!.apiKey, undefined);
   });
 
@@ -1034,7 +1036,7 @@ describe('bounded JSON compatibility and retryable migration', () => {
     const manager = await store(t, 'retry-concurrent');
     assert.deepEqual(legacy.get('entries'), [entry('copied'), entry('new-legacy')]);
     await manager.storage(manager.activeProfileId).clearEntries();
-    assert.deepEqual(legacy.get('entries'), [entry('copied'), entry('new-legacy')]);
+    assert.deepEqual(legacy.get('entries'), [entry('new-legacy')]);
     await manager.storage(manager.activeProfileId).saveEntries([entry('new-legacy')]);
     await manager.storage(manager.activeProfileId).clearEntries();
     assertLegacyRetired(legacy);
@@ -1184,7 +1186,7 @@ describe('lazy downloads, explicit recovery, and bounded escaped strings', () =>
       const legacy = new Map<string, unknown>([['entries', [entry('unknown')]], ['connection', connection]]);
       idb.databases.set(`${namespace}:chat`, legacy);
       idb.fail(failure);
-      await assert.rejects(manager.clearLegacyData(), { message: 'Could not remove legacy data. Try again.' });
+      await assert.rejects(manager.clearLegacyData(), { code: 'legacy-cleanup' });
       assert.deepEqual(legacy.get('entries'), [entry('unknown')]);
       assert.deepEqual(manager.profiles, before);
       assert.equal(manager.persistenceWarning, false);
@@ -1408,6 +1410,36 @@ describe('legacy active-work and empty-sentinel lifecycle', () => {
     assertLegacyRetired(legacy);
     assert.equal(JSON.stringify([...idb.databases.get('sentinel-bootstrap:profiles')!]).includes(connection.apiKey!), false);
   });
+});
+
+describe('explicit privacy cleanup of partially migrated history', () => {
+  for (const operation of ['clear', 'delete-entry', 'delete-profile'] as const) {
+    it(`removes proven legacy copies during explicit ${operation} while preserving uncopied history`, async (t) => {
+      const idb = installChatIndexedDB(t);
+      const namespace = `mixed-privacy-${operation}`;
+      const first = await store(t, namespace);
+      const id = first.activeProfileId;
+      const copied = entry('copied', 'A copied message the user will remove');
+      const uncopied = entry('uncopied', 'An independent old-tab message');
+      await first.storage(id).saveEntries([copied]);
+      const legacy = idb.databases.get(`${namespace}:chat`)!;
+      legacy.set('entries', [copied, uncopied]); legacy.set('entriesEpoch', 'active-history');
+      const old = new BrowserChatStore(namespace); t.after(() => old.close());
+      const snapshot = (await old.load()).entries;
+      const manager = await store(t, namespace);
+      assert.deepEqual(legacy.get('entries'), [copied, uncopied]);
+      assert.equal(legacy.get('entriesEpoch'), 'active-history');
+      assert.equal(idb.versions.get(`${namespace}:chat`), 1, 'automatic partial migration must not fence active legacy work');
+      const reply = { ...entry('reply', 'The old tab completed its pending reply'), role: 'assistant' as const };
+      await old.saveEntries([...snapshot, reply]);
+      if (operation === 'clear') await manager.storage(id).clearEntries();
+      else if (operation === 'delete-entry') await manager.removeEntry(id, copied.id);
+      else { await manager.create({ name: 'Keep' }); await manager.remove(id); }
+      assert.deepEqual(legacy.get('entries'), [uncopied, reply]);
+      assert.notEqual(legacy.get('entriesEpoch'), 'active-history');
+      assert.equal(JSON.stringify([...legacy]).includes(copied.text), false);
+    });
+  }
 });
 
 describe('safe legacy retirement after authoritative migration', () => {
