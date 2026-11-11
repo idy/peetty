@@ -230,6 +230,10 @@ class Rig {
   static bool _onStroke(FigureShape shape, Offset p, double h) {
     final tolerance = math.max(1e-3, math.min(0.1, h * 0.05));
     for (final contour in shape.outline) {
+      if (contour.ellipse case final ellipse?) {
+        if (_ellipseDistance(ellipse, p) <= h) return true;
+        continue;
+      }
       final segments = contour.segments;
       if (segments.isEmpty) continue;
       for (final segment in segments) {
@@ -271,14 +275,70 @@ class Rig {
     if (!bounds.contains(p)) return false;
     final chord = p3 - p0;
     final length = chord.distance;
-    double off(Offset q) => length > 1e-12 ? _cross(chord / length, q - p0).abs() : (q - p0).distance;
-    if (depth >= 24 || (off(p1) <= tolerance && off(p2) <= tolerance)) {
+    // Flat only when the controls lie on the chord itself, not merely on its line:
+    // a collinear curve can double back beyond its endpoints.
+    bool near(Offset q) {
+      if (length <= 1e-12) return (q - p0).distance <= tolerance;
+      final u = chord / length;
+      final t = _dot(q - p0, u);
+      return _cross(u, q - p0).abs() <= tolerance && t >= -tolerance && t <= length + tolerance;
+    }
+    if (depth >= 24 || (near(p1) && near(p2))) {
       return _inBand(p0, p3, p, h, roundStart: !start, roundEnd: !end);
     }
     // de Casteljau split at the middle.
     final a = (p0 + p1) / 2, b = (p1 + p2) / 2, c = (p2 + p3) / 2;
     final d = (a + b) / 2, e = (b + c) / 2, m = (d + e) / 2;
     return _onCubic(p0, a, d, m, p, h, tolerance, depth + 1, start, false) || _onCubic(m, e, c, p3, p, h, tolerance, depth + 1, false, end);
+  }
+
+  /// Distance from [p] to the ellipse's outline, solved exactly (Eberly's method)
+  /// in the ellipse's own frame, where the canvas draws it as exact conics.
+  static double _ellipseDistance(Ellipse e, Offset p) {
+    final d = p - e.center;
+    final cos = math.cos(e.angle), sin = math.sin(e.angle);
+    var x = (d.dx * cos + d.dy * sin).abs();
+    var y = (-d.dx * sin + d.dy * cos).abs();
+    var e0 = e.rx, e1 = e.ry;
+    if (e0 < e1) {
+      (e0, e1) = (e1, e0);
+      (x, y) = (y, x);
+    }
+    // A flat ellipse is a line segment along its long axis.
+    if (e1 <= 0) return x <= e0 ? y : Offset(x - e0, y).distance;
+    if (y > 0) {
+      if (x > 0) {
+        final z0 = x / e0, z1 = y / e1;
+        final g = z0 * z0 + z1 * z1 - 1;
+        if (g == 0) return 0;
+        final r0 = (e0 / e1) * (e0 / e1);
+        final n0 = r0 * z0;
+        var s0 = z1 - 1;
+        var s1 = g < 0 ? 0.0 : Offset(n0, z1).distance - 1;
+        var root = 0.0;
+        for (var i = 0; i < 200; i++) {
+          root = (s0 + s1) / 2;
+          if (root == s0 || root == s1) break;
+          final ratio0 = n0 / (root + r0), ratio1 = z1 / (root + 1);
+          final value = ratio0 * ratio0 + ratio1 * ratio1 - 1;
+          if (value > 0) {
+            s0 = root;
+          } else if (value < 0) {
+            s1 = root;
+          } else {
+            break;
+          }
+        }
+        return Offset(r0 * x / (root + r0) - x, y / (root + 1) - y).distance;
+      }
+      return (y - e1).abs();
+    }
+    final numer = e0 * x, denom = e0 * e0 - e1 * e1;
+    if (numer < denom) {
+      final ratio = numer / denom;
+      return Offset(e0 * ratio - x, e1 * math.sqrt(1 - ratio * ratio)).distance;
+    }
+    return (x - e0).abs();
   }
 
   /// The cap beyond an open end at [end], pointing along [outward].

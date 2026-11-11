@@ -126,6 +126,27 @@ void main() {
     expect(rig.hitTest(at(1000.3)), isTrue);
     expect(rig.hitTest(at(999.7)), isTrue);
     expect(rig.hitTest(at(1000.7)), isFalse);
+    final vast = Rig(Figure.fromJson(_tiny(shape: {'type': 'ellipse', 'cx': 0, 'cy': 0, 'rx': 1e6, 'ry': 1e6, 'stroke': 'ink', 'strokeWidth': 1})));
+    expect(vast.hitTest(at(1e6 + 0.3)), isTrue);
+    expect(vast.hitTest(at(1e6 + 0.7)), isFalse);
+    // A turned, flattened ellipse: offset along the outline's normal at parameter t.
+    final turned = Rig(Figure.fromJson(_tiny(shape: {'type': 'ellipse', 'cx': 10, 'cy': 20, 'rx': 1000, 'ry': 300, 'rotate': 30, 'stroke': 'ink', 'strokeWidth': 1})));
+    Offset normalAt(double t, double offset) {
+      final r = math.pi / 6;
+      final local = Offset(1000 * math.cos(t), 300 * math.sin(t));
+      final n = Offset(300 * math.cos(t), 1000 * math.sin(t));
+      final shifted = local + n / n.distance * offset;
+      return Offset(10 + shifted.dx * math.cos(r) - shifted.dy * math.sin(r), 20 + shifted.dx * math.sin(r) + shifted.dy * math.cos(r));
+    }
+    for (final t in [0.3, 1.2, 2.5, 4.0]) {
+      expect(turned.hitTest(normalAt(t, 0.4)), isTrue, reason: 'outside at $t');
+      expect(turned.hitTest(normalAt(t, -0.4)), isTrue, reason: 'inside at $t');
+      expect(turned.hitTest(normalAt(t, 0.8)), isFalse, reason: 'beyond at $t');
+    }
+    // A collinear curve that doubles back past its end still paints its whole run.
+    final back = Rig(Figure.fromJson(_tiny(shape: {'type': 'path', 'd': 'M0 50 C100 50 100 50 10 50', 'stroke': 'ink', 'strokeWidth': 2})));
+    expect(back.hitTest(const Offset(50, 50)), isTrue);
+    expect(back.hitTest(const Offset(90, 50)), isFalse);
     final arc = Rig(Figure.fromJson(_tiny(shape: {'type': 'path', 'd': 'M0 0 C0 -2000 2000 -2000 2000 0', 'stroke': 'ink', 'strokeWidth': 1})));
     // The curve's top is at y = -1500 halfway along.
     expect(arc.hitTest(const Offset(1000, -1500.3)), isTrue);
@@ -135,7 +156,9 @@ void main() {
   test('extreme coordinates never escape as non-format errors', () {
     expect(() => Figure.fromJson(_tiny(shape: {'type': 'path', 'd': 'M0 0 L1e999 0', 'stroke': 'ink'})), throwsA(isA<FigureFormatException>()));
     expect(() => Figure.fromJson(_tiny(shape: {'type': 'path', 'd': 'M0 0 C1e200 0 0 0 0 0', 'stroke': 'ink'})), throwsA(isA<FigureFormatException>()));
-    final huge = Rig(Figure.fromJson(_tiny(shape: {'type': 'path', 'd': 'M0 0 C3e37 0 0 0 0 0', 'stroke': 'ink', 'strokeWidth': 2})));
+    expect(() => Figure.fromJson(_tiny(shape: {'type': 'path', 'd': 'M0 0 L2e9 0', 'stroke': 'ink'})), throwsA(isA<FigureFormatException>()));
+    expect(() => Figure.fromJson(_tiny(shape: {'type': 'ellipse', 'cx': 0, 'cy': 0, 'rx': 2e9, 'ry': 1, 'stroke': 'ink'})), throwsA(isA<FigureFormatException>()));
+    final huge = Rig(Figure.fromJson(_tiny(shape: {'type': 'path', 'd': 'M0 0 C1e9 0 0 0 0 0', 'stroke': 'ink', 'strokeWidth': 2})));
     expect(huge.hitTest(const Offset(10, 0)), isTrue);
     expect(huge.hitTest(const Offset(10, 50)), isFalse);
   });
@@ -277,6 +300,39 @@ void main() {
     final state = _state(tester);
     expect(await _until(tester, () => state.action != FigureState.fall && state.position != null), isTrue);
     expect(state.position!.dy, 150);
+  });
+
+  testWidgets('safe-area insets apply to an upside-down host', (tester) async {
+    // 400x600 turned 180° about its origin at screen (400, 600): its first rows meet the bottom inset.
+    await tester.pumpWidget(MediaQuery(
+      data: const MediaQueryData(size: Size(800, 600), padding: EdgeInsets.only(bottom: 34)),
+      child: Directionality(
+        textDirection: TextDirection.ltr,
+        child: Stack(children: [
+          Positioned(
+            left: 400,
+            top: 600,
+            width: 400,
+            height: 600,
+            child: Transform.rotate(
+              angle: math.pi,
+              alignment: Alignment.topLeft,
+              child: Peetty(
+                figureData: _miru,
+                random: _seeded(),
+                child: const Stack(children: [
+                  Positioned(left: 100, top: 140, width: 200, height: 40, child: PeettyPerch(child: SizedBox.expand())),
+                ]),
+              ),
+            ),
+          ),
+        ]),
+      ),
+    ));
+    final state = _state(tester);
+    expect(await _until(tester, () => state.action != FigureState.fall && state.position != null), isTrue);
+    // With the 34-unit inset, a perch at row 140 leaves her head inside it, so she uses the floor.
+    expect(state.position!.dy, 600);
   });
 
   testWidgets('pointer events reach the host over children that do not hit-test', (tester) async {

@@ -69,6 +69,10 @@ const maxGeometry = 2000000;
 
 /// Each shape costs at least this much of [maxGeometry], so many tiny shapes add up too.
 const _shapeCost = 32;
+
+/// Largest coordinate magnitude accepted in path data and ellipses. Far beyond any
+/// drawing, and small enough that squared distances stay finite in hit testing.
+const maxCoordinate = 1e9;
 const maxGradientStops = 16;
 final _pathData = RegExp(r'^[MmLlHhVvCcSsQqTtAaZz0-9eE.,\s+-]*$');
 
@@ -128,9 +132,23 @@ class Segment {
 
 /// One subpath as the exact lines and curves it was drawn with, for stroke hit testing.
 class Contour {
-  const Contour(this.segments, this.closed);
+  const Contour(this.segments, this.closed) : ellipse = null;
+
+  /// An exact ellipse, hit-tested by its true distance rather than by segments.
+  const Contour.ellipse(Ellipse this.ellipse)
+      : segments = const [],
+        closed = true;
+
   final List<Segment> segments;
   final bool closed;
+  final Ellipse? ellipse;
+}
+
+/// An ellipse centered at [center] with radii [rx] and [ry], turned by [angle] radians.
+class Ellipse {
+  const Ellipse(this.center, this.rx, this.ry, this.angle);
+  final Offset center;
+  final double rx, ry, angle;
 }
 
 /// One drawn shape with its paint; the geometry is parsed once.
@@ -391,28 +409,14 @@ FigureShape _shape(Map<String, Object?> s, String at, _Budget budget) {
       return (writer.path, writer.finish());
     case 'ellipse':
       budget.charge(_shapeCost, at);
-      final cx = _number(s['cx'], '$at.cx');
-      final cy = _number(s['cy'], '$at.cy');
-      final rx = _number(s['rx'], '$at.rx'), ry = _number(s['ry'], '$at.ry');
+      final cx = _coordinate(s['cx'], '$at.cx');
+      final cy = _coordinate(s['cy'], '$at.cy');
+      final rx = _coordinate(s['rx'], '$at.rx'), ry = _coordinate(s['ry'], '$at.ry');
       final oval = Path()..addOval(Rect.fromCenter(center: Offset(cx, cy), width: rx * 2, height: ry * 2));
       final rotate = _optionalNumber(s['rotate']) ?? 0;
       final r = rotate * math.pi / 180;
       final cos = math.cos(r), sin = math.sin(r);
-      // Eight 45° cubic arcs: the curve stays within a few millionths of the radius.
-      Offset onEllipse(double x, double y) => Offset(cx + rx * x * cos - ry * y * sin, cy + rx * x * sin + ry * y * cos);
-      const k = 0.26521648983954104; // 4/3 · tan(45°/4)
-      final outline = [
-        Contour([
-          for (var i = 0; i < 8; i++)
-            if ((i * math.pi / 4, (i + 1) * math.pi / 4) case (final t0, final t1))
-              Segment.cubic(
-                onEllipse(math.cos(t0), math.sin(t0)),
-                onEllipse(math.cos(t0) - k * math.sin(t0), math.sin(t0) + k * math.cos(t0)),
-                onEllipse(math.cos(t1) + k * math.sin(t1), math.sin(t1) - k * math.cos(t1)),
-                onEllipse(math.cos(t1), math.sin(t1)),
-              ),
-        ], true),
-      ];
+      final outline = [Contour.ellipse(Ellipse(Offset(cx, cy), rx.abs(), ry.abs(), r))];
       if (rotate == 0) return (oval, outline);
       // rotate(deg cx cy) as a column-major 4x4 matrix.
       return (
@@ -479,7 +483,9 @@ class _PathWriter extends PathProxy {
   Offset _pen = Offset.zero;
 
   Offset _point(double x, double y) {
-    if (!x.isFinite || !y.isFinite) throw FigureFormatException('$at.d has a coordinate that is not a finite number');
+    if (!(x.abs() <= maxCoordinate && y.abs() <= maxCoordinate)) {
+      throw FigureFormatException('$at.d has a coordinate beyond ±$maxCoordinate');
+    }
     return Offset(x, y);
   }
 
@@ -573,6 +579,12 @@ List<double> _numbers(Object? v, String at, int length) {
   final list = _list(v, at);
   if (list.length != length) throw FigureFormatException('$at must have $length numbers');
   return [for (var i = 0; i < length; i++) _number(list[i], '$at[$i]')];
+}
+
+double _coordinate(Object? v, String at) {
+  final n = _number(v, at);
+  if (n.abs() > maxCoordinate) throw FigureFormatException('$at must be within ±$maxCoordinate');
+  return n;
 }
 
 Offset _point(Object? v, String at) {
