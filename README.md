@@ -152,6 +152,10 @@ The generated `cdn/` directory is checked into Git so jsDelivr can read a versio
 
 Both CDN and npm distributions include `THIRD_PARTY_NOTICES.txt` with licenses and notices for the dependencies present in their bundle graph. Per-file license comments are retained. Website assembly uses the CDN browser entries and retains portable catalog URLs by default, so development and mirrors resolve figures on their own origin. The official Pages workflow passes `--catalog-base https://peetty.idy.dev/figures/` to preserve absolute URLs for SDK 0.3.0 clients at its historical endpoint. Other deployments can pass their own catalog base. The repository's CDN index remains relative.
 
+## Use in Flutter (prototype)
+
+The `flutter/` directory holds a Flutter package with the same figures and movement: wrap your app in `Peetty`, mark cards and buttons with `PeettyPerch`, and she walks and jumps between them. Chat is not ported yet. See [flutter/README.md](flutter/README.md).
+
 ## Install from GitHub Packages (optional)
 
 The package is named `@idy/peetty` and is published to GitHub Packages. GitHub Packages requires authentication, including for public packages. Route only the `@idy` scope there so Pi, OpenAI and other dependencies continue to resolve from the default npm registry. Configure the scope and authenticate with a GitHub account that can read the package, using a personal access token (classic) with `read:packages`:
@@ -190,7 +194,7 @@ npm test
 npm run check
 ```
 
-`npm run dev` serves the figure sheet at `http://127.0.0.1:4180/dev/figures.html` and the website at `http://127.0.0.1:4180/site/`, rebuilding on each change. `npm run build` writes `dist/index.js` (ESM), `dist/peetty.global.js` (a `Peetty` global for script tags), and the checked-in `cdn/` browser distribution without source maps. `npm run build:cdn` regenerates only the CDN files. `npm run build:site` assembles website assets from `cdn/` with portable catalogs; add `-- --catalog-base https://your-host.example/figures/` when an absolute legacy catalog is needed. `npm run figures` regenerates the preset JSON from its sources; `npm run check` type-checks and verifies that generated figure JSON and the checked-in CDN build are current.
+`npm run dev` serves the figure sheet at `http://127.0.0.1:4180/dev/figures.html` and the website at `http://127.0.0.1:4180/site/`, rebuilding on each change. `npm run build` writes `dist/index.js` (ESM), `dist/peetty.global.js` (a `Peetty` global for script tags), and the checked-in `cdn/` browser distribution without source maps. `npm run build:cdn` regenerates only the CDN files. `npm run build:site` assembles website assets from `cdn/` with portable catalogs; add `-- --catalog-base https://your-host.example/figures/` when an absolute legacy catalog is needed. `npm run figures` regenerates the preset JSON from its sources and mirrors the catalog into `flutter/assets/figures/`; `npm run check` type-checks and verifies that generated figure JSON and the checked-in CDN build are current.
 
 | Path | Purpose |
 | --- | --- |
@@ -202,6 +206,7 @@ npm run check
 | `src/figure/sources.ts` | Audio asset bases kept outside the validated figure JSON |
 | `figures/src/` | Preset sources and the drawing kit |
 | `figures/*.json` | Generated preset figure packs |
+| `flutter/` | Flutter package and example app; see its README |
 | `schema/figure-v1.json` | JSON Schema for editors |
 | `src/pet/` | The companion: perch finding, jump physics, behaviour, dragging, hover menu, bubble and action sounds |
 | `src/global.ts` | npm classic entry with automatic mounting and a public catalog fallback |
