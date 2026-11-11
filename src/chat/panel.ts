@@ -86,6 +86,7 @@ textarea.pc-input { line-height: 1.65; }
 .pc-primary { display: inline-flex; justify-content: center; align-items: center; gap: 8px; width: 100%; padding: 12px 16px; min-height: 44px; border: 0; border-radius: 24px; color: #fff !important; background: var(--pc-color); font-weight: 650 !important; transition: background-color .15s; }
 .pc-primary:hover:not(:disabled) { background: var(--pc-accent); }
 .pc-primary svg { width: 17px; height: 17px; }
+.pc-visit-only { width: 100%; margin-top: 10px; }
 .pc-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 290px; height: 100%; padding: 28px; text-align: center; }
 .pc-hero { position: relative; width: 112px; height: 112px; margin-bottom: 22px; border-radius: 50%; background: var(--pc-soft); color: var(--pc-accent); }
 .pc-hero::before, .pc-hero::after { content: ''; position: absolute; width: 18px; height: 18px; background: var(--pc-accent); clip-path: polygon(50% 0, 62% 38%, 100% 50%, 62% 62%, 50% 100%, 38% 62%, 0 50%, 38% 38%); }
@@ -246,6 +247,8 @@ export async function createChatPanel({
     const view = buildChatView(panel, () => t);
     const find = <T extends HTMLElement>(selector: string) => panel.querySelector<T>(selector)!;
     const setup = find<HTMLFormElement>('.pc-setup');
+    const visitOnly = find<HTMLButtonElement>('.pc-visit-only');
+    let blockedSetupProfileId: string | undefined;
     const composer = find<HTMLFormElement>('.pc-composer');
     const url = find<HTMLInputElement>('[name="url"]');
     const key = find<HTMLInputElement>('[name="key"]');
@@ -632,6 +635,8 @@ export async function createChatPanel({
       messages.hidden = settingsOpen || !runtime.entries.length;
       find('.pc-empty').hidden = settingsOpen || !!runtime.entries.length;
       find('.pc-storage').hidden = !runtime.persistenceWarning && !profiles.persistenceWarning;
+      visitOnly.hidden = !runtime.persistenceWarning && !profiles.persistenceWarning && blockedSetupProfileId !== currentProfileId;
+      find('.pc-visit-note').hidden = visitOnly.hidden;
       panel.dataset.mode = settingsOpen ? 'settings' : 'chat';
       find('.pc-status').textContent = settingsOpen ? t.settings : runtime.model?.id ?? t.connectFirst;
       find('.pc-status').title = runtime.model?.baseUrl ?? '';
@@ -746,6 +751,7 @@ export async function createChatPanel({
       if (!ownsConnectionForm()) return;
       const owner = runtime;
       const ownerId = currentProfileId;
+      const useForVisit = (event as SubmitEvent).submitter === visitOnly;
       const revision = ++configuration;
       formOwner = revision;
       void (async () => {
@@ -756,12 +762,20 @@ export async function createChatPanel({
           const { typedKey, headers, nonCredentialHeaders, getApiKey } = connectionAuth(baseUrl);
           cancelDiscovery();
           canceledTurn = true;
-          await owner.configure({ baseUrl, id, provider: find<HTMLInputElement>('[name="provider"]').value, tools: tools.checked, ...(effort.value ? { effort: effort.value as PeettyReasoningEffort } : {}), ...(typedKey ? { apiKey: typedKey } : {}), ...(getApiKey ? { getApiKey } : {}), ...(headers ? { headers } : {}), ...(nonCredentialHeaders ? { nonCredentialHeaders } : {}) }, remember.checked);
+          const chosen = { baseUrl, id, provider: find<HTMLInputElement>('[name="provider"]').value, tools: tools.checked, ...(effort.value ? { effort: effort.value as PeettyReasoningEffort } : {}), ...(typedKey ? { apiKey: typedKey } : {}), ...(getApiKey ? { getApiKey } : {}), ...(headers ? { headers } : {}), ...(nonCredentialHeaders ? { nonCredentialHeaders } : {}) };
+          if (useForVisit) await owner.setModel(chosen);
+          else await owner.configure(chosen, remember.checked);
           if (disposed || revision !== configuration || runtime !== owner || currentProfileId !== ownerId) return;
+          if (useForVisit) remember.checked = false;
+          else blockedSetupProfileId = undefined;
           cacheSession();
           showError(); setSettings(false);
         } catch (error) {
-          if (!disposed && revision === configuration) showError(() => error instanceof ChatStorageError && error.code === 'legacy-cleanup' ? t.legacyBlocked : t.invalid);
+          if (!disposed && revision === configuration && runtime === owner && currentProfileId === ownerId) {
+            if (error instanceof ChatStorageError && (error.code === 'legacy-cleanup' || error.code === 'stale-connection')) blockedSetupProfileId = ownerId;
+            showError(() => error instanceof ChatStorageError ? error.code === 'legacy-cleanup' ? t.legacyBlocked : error.code === 'stale-connection' ? t.connectionChanged : t.invalid : t.invalid);
+            render();
+          }
         }
       })();
     });

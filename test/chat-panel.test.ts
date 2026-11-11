@@ -611,9 +611,43 @@ describe('chat panel clear recovery', () => {
 });
 
 describe('chat panel credential ownership', () => {
+  for (const apiKey of [undefined, 'fixture-visit-only-key']) {
+    it(`connects a fresh ${apiKey ? 'keyed' : 'keyless'} model explicitly for the visit during a storage outage`, async (t) => {
+      t.after(stubGlobals({ indexedDB: undefined }));
+      const saves = t.mock.method(ChatRuntime.prototype, 'configure');
+      const { panel, query, window } = await mountPanel(t, undefined, { chat: { storageKey: 'visit-only-outage', persist: true } });
+      const visit = query<HTMLButtonElement>('.pc-visit-only');
+      assert.equal(visit.hidden, false);
+      assert.match(query('.pc-visit-note').textContent!, /Saved authentication is unchanged/);
+      query<HTMLInputElement>('[name="url"]').value = MODEL.baseUrl;
+      query<HTMLInputElement>('[name="model"]').value = MODEL.id;
+      query<HTMLInputElement>('[name="key"]').value = apiKey ?? '';
+      query<HTMLInputElement>('[name="remember"]').checked = true;
+      panel.setLanguage('zh');
+      assert.equal(visit.textContent, '仅本次使用此连接');
+      assert.match(query('.pc-visit-note').textContent!, /不会修改已保存的认证信息/);
+      visit.click();
+      await eventually(() => query('.pc-setup').hidden === true);
+      assert.equal(saves.mock.callCount(), 0, 'visit-only setup must never attempt a persistent save or forget');
+      assert.equal(query('.pc-storage').hidden, false);
+      const requests: Request[] = [];
+      t.mock.method(globalThis, 'fetch', async (url: RequestInfo | URL, init?: RequestInit) => {
+        requests.push(new Request(url, init));
+        return new Response('data: [DONE]\n\n', { headers: { 'Content-Type': 'text/event-stream' } });
+      });
+      const input = query<HTMLTextAreaElement>('[name="message"]');
+      input.value = 'Hello'; input.dispatchEvent(new window.Event('input') as unknown as Event);
+      input.form!.requestSubmit();
+      await eventually(() => requests.length === 1);
+      assert.equal(requests[0]!.url, `${MODEL.baseUrl}/chat/completions`);
+      assert.equal(requests[0]!.headers.get('authorization'), apiKey ? `Bearer ${apiKey}` : null);
+      panel.open(true);
+      assert.equal(query<HTMLInputElement>('[name="remember"]').checked, false);
+    });
+  }
   it('keeps setup open and explains blocked legacy credential cleanup in both languages', async (t) => {
     const { panel, query } = await mountPanel(t, MODEL);
-    t.mock.method(ChatRuntime.prototype, 'configure', async () => {
+    const saves = t.mock.method(ChatRuntime.prototype, 'configure', async () => {
       throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
     });
     query<HTMLFormElement>('.pc-setup').requestSubmit();
@@ -625,6 +659,24 @@ describe('chat panel credential ownership', () => {
     assert.match(query('.pc-setup').textContent!, /reloading an old pinned version will not restore saving/);
     panel.setLanguage('zh');
     assert.match(query('.pc-error').textContent!, /关闭其他 Peetty 标签页/);
+    assert.equal(query<HTMLButtonElement>('.pc-visit-only').hidden, false);
+    query<HTMLInputElement>('[name="model"]').value = 'visit-after-blocked-cleanup';
+    query<HTMLButtonElement>('.pc-visit-only').click();
+    await eventually(() => query('.pc-setup').hidden === true);
+    assert.equal(saves.mock.callCount(), 1, 'using the session does not retry or report successful cleanup');
+    assert.equal(query<HTMLInputElement>('[name="remember"]').checked, false);
+  });
+  it('explains a peer connection change and offers a visit-only choice', async (t) => {
+    const { panel, query } = await mountPanel(t, MODEL, { chat: { persist: false } });
+    t.mock.method(ChatRuntime.prototype, 'configure', async () => { throw new ChatStorageError('stale-connection', 'Connection changed.'); });
+    assert.equal(query<HTMLButtonElement>('.pc-visit-only').hidden, true);
+    query<HTMLFormElement>('.pc-setup').requestSubmit();
+    await eventually(() => !query('.pc-error').hidden);
+    assert.equal(query('.pc-setup').hidden, false);
+    assert.match(query('.pc-error').textContent!, /Saved authentication changed in another tab/);
+    assert.equal(query<HTMLButtonElement>('.pc-visit-only').hidden, false);
+    panel.setLanguage('zh');
+    assert.match(query('.pc-error').textContent!, /其他标签页已更改保存的认证信息/);
   });
   for (const consent of [false, true]) {
     it(`${consent ? 'remembers' : 'does not remember'} an injected key ${consent ? 'after explicit opt-in' : 'when saving another setting'}`, async (t) => {

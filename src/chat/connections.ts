@@ -63,12 +63,15 @@ const NONCREDENTIAL_HEADERS = new Set([
 const AUTHENTICATION_HEADER = /(?:^|[-_])(?:auth(?:entication|orization)?(?:[-_]?(?:key|token|secret|password|credential))?|[a-z0-9]*(?:tokens?|secrets?|passwords?|credentials?|cookies?)(?:[-_]?(?:key|token|secret))?|(?:api|access|subscription)[-_]?(?:key|token))(?:$|[-_])|^(?:x[-_])?key$/i;
 // Token budgets are metadata only when explicitly declared with a finite integer value.
 const TOKEN_COUNT_HEADER = /^(?:x[-_])?(?:(?:max|min|input|output|total|prompt|completion|cached|context|remaining|used|budget)[-_]?tokens?|[a-z0-9][a-z0-9_-]*tokens|(?:[a-z0-9][a-z0-9_-]*)?tokens?[-_]?(?:count|limit|budget))$/i;
-const AUTHENTICATION_TOKEN_COUNT = /(?:auth(?:entication|orization)?|api|subscription|access|refresh|client|session|bearer|private|secret|password|credential|oauth|gateway|service|jwt|identity|security|sas|pat|id|sso)tokens?(?:count|limit|budget)?$/i;
+// Keep the original header-name boundaries: credential words anywhere in a
+// counter name override the numeric exception, but "Paid" does not contain an
+// ID credential term. Compact forms such as ApiTokens remain reserved too.
+const AUTHENTICATION_TOKEN_TERM = /(?:^|[-_])(?:x?(?:auth(?:entication|orization)?|api|subscription|access|refresh|client|session|bearer|private|secrets?|passwords?|credentials?|cookies?|oauth|gateway|service|jwt|identity|security|sas|pat|id|sso)(?:tokens?(?:count|limit|budget)?)?|[a-z0-9]*(?:secrets?|passwords?|credentials?|cookies?)(?:key|token)?)(?:$|[-_])/i;
 function isAuthenticationHeaderName(name: string): boolean {
-  return AUTHENTICATION_HEADER.test(name) || AUTHENTICATION_TOKEN_COUNT.test(name.replace(/[-_]/g, ''));
+  return AUTHENTICATION_HEADER.test(name) || TOKEN_COUNT_HEADER.test(name.replace(/^x[-_]/i, '')) && AUTHENTICATION_TOKEN_TERM.test(name);
 }
 function isTokenCountName(name: string): boolean {
-  return TOKEN_COUNT_HEADER.test(name) && !AUTHENTICATION_TOKEN_COUNT.test(name.replace(/[-_]/g, ''));
+  return TOKEN_COUNT_HEADER.test(name.replace(/^x[-_]/i, '')) && !AUTHENTICATION_TOKEN_TERM.test(name);
 }
 function isTokenCount(name: string, value: string | undefined): boolean {
   return isTokenCountName(name) && typeof value === 'string' && /^\d+$/.test(value) && Number.isSafeInteger(Number(value));

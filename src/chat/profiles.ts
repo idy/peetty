@@ -3,7 +3,7 @@ import { validateFigure } from '../figure/validate.ts';
 import { COMPANION_ACTIONS, type ChatEntry } from './types.ts';
 import type { ChatStorage, StoredChat, StoredConnection, StoredSessionConnection } from './store.ts';
 import { boundedEntries, ChatStorageError, forgetConnectionCredentials } from './store.ts';
-import { connectionIdentity, hasStoredCredentials, normalizeModelOptions, prepareSavedConnection } from './connections.ts';
+import { connectionIdentity, hasStoredCredentials, isCredentialHeader, normalizeModelOptions, prepareSavedConnection } from './connections.ts';
 import { applyEntryChanges, entryChanges, sanitizeEntries } from './history.ts';
 import { fenceLegacyDatabase, openStateDatabase, stateTransaction } from './idb.ts';
 import { PROFILE_LIMITS } from './limits.ts';
@@ -45,7 +45,8 @@ type Defaults = { name?: string; figure?: string | object; personality?: string 
 type Settings = Pick<ProfileRecord, 'name' | 'figure' | 'personality' | 'useMemories' | 'autoRemember'>;
 type SettingsInput = Omit<Partial<Settings>, 'figure'> & { figure?: string | object };
 interface Directory { version: 1; ids: string[]; activeProfileId: string; bootstrapProfileId?: string }
-interface RecordState { profile: ProfileRecord; epoch: string }
+interface RecordState { profile: ProfileRecord; epoch: string; connectionEpoch?: string }
+interface CleanupDebt { credentials: readonly StoredConnection[]; unresolvedAuthentication: boolean }
 interface State { directory: Directory; records: Map<string, RecordState> }
 interface LegacySnapshot { entries: unknown; connection: unknown; epoch: unknown; connectionEpoch: unknown }
 interface LegacyMigration extends StoredChat { used: boolean; retire?: LegacySnapshot }
@@ -168,6 +169,14 @@ function connectionFrom(value: unknown, strict = true): StoredConnection {
     return normalized;
   } catch { throw new Error(INVALID); }
 }
+function sameSavedAuthentication(a: StoredConnection | undefined, b: StoredConnection): boolean {
+  if (!a || a.baseUrl !== b.baseUrl || (a.apiKey ?? '') !== (b.apiKey ?? '')) return false;
+  const credentials = (connection: StoredConnection) => Object.entries(connection.headers ?? {})
+    .filter(([name]) => isCredentialHeader(name, connection.nonCredentialHeaders)).sort(([a], [b]) => a.localeCompare(b));
+  const first = credentials(a); const second = credentials(b);
+  return first.length === second.length && first.every(([name, value], i) => name === second[i]![0] && value === second[i]![1]);
+}
+
 function profileFrom(value: unknown): ProfileRecord {
   const profile = object(value, ['id', 'name', 'figure', 'personality', 'useMemories', 'autoRemember', 'memories', 'entries', 'connection', 'createdAt', 'updatedAt']);
   return {
@@ -190,10 +199,10 @@ function directoryFrom(value: unknown): Directory {
   return { version: 1, ids, activeProfileId, ...(directory.bootstrapProfileId !== undefined ? { bootstrapProfileId: id(directory.bootstrapProfileId) } : {}) };
 }
 function recordFrom(value: unknown, expectedId: string): RecordState {
-  const record = object(value, ['profile', 'epoch']);
+  const record = object(value, ['profile', 'epoch', 'connectionEpoch']);
   const profile = profileFrom(record.profile);
   check(profile.id === expectedId);
-  return { profile, epoch: id(record.epoch) };
+  return { profile, epoch: id(record.epoch), ...(record.connectionEpoch !== undefined ? { connectionEpoch: id(record.connectionEpoch) } : {}) };
 }
 function checkFile(value: string, message = INVALID): void {
   check(value.length <= PROFILE_LIMITS.fileBytes && new TextEncoder().encode(value).length <= PROFILE_LIMITS.fileBytes, message);
@@ -403,7 +412,7 @@ export class BrowserProfileStore {
   private closed = false;
   private failed = false;
   private legacyProof: LegacyProof | undefined;
-  private readonly cleanupDebt = new Map<string, readonly StoredConnection[]>();
+  private readonly cleanupDebt = new Map<string, CleanupDebt>();
   private connectionReadKnown = false;
   private reconcilingLegacy = false;
   private legacyReconciliation: Promise<void> | undefined;
@@ -684,7 +693,7 @@ export class BrowserProfileStore {
         if (legacy.used && mode !== 'automatic') throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
         return;
       }
-      if (mode === 'credentials' && legacy.connection && hasStoredCredentials(legacy.connection)
+      if ((mode === 'credentials' || mode === 'profile' && unresolvedAuthentication) && legacy.connection && hasStoredCredentials(legacy.connection)
         && (!credentials.some(hasStoredCredentials) || unresolvedAuthentication && hasStoredCredentials(forgetConnectionCredentials(legacy.connection, credentials)))) {
         // Callback-only authentication must not be resolved during setup. If an
         // unknown key already reached disk, require explicit recovery instead of
@@ -712,7 +721,9 @@ export class BrowserProfileStore {
         return draft.legacyProof;
       });
       if (this.failed && mode !== 'automatic') throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
-      if (!this.failed && (proof || mode === 'credentials')) await this.retireLegacy(legacy.retire, proof ?? { version: 1, entries: [], connections: [] }, mode, credentials);
+      if (!this.failed && (proof || mode === 'credentials' || mode === 'profile' && credentials.some(hasStoredCredentials))) {
+        await this.retireLegacy(legacy.retire, proof ?? { version: 1, entries: [], connections: [] }, mode, credentials);
+      }
     } finally { this.reconcilingLegacy = false; }
   }
 
@@ -752,6 +763,7 @@ export class BrowserProfileStore {
       await clear(`${this.namespace}:chat`, ['entries', 'connection', 'entriesEpoch']);
       await clear(`${this.namespace}:profiles`, ['legacyMigration']);
       this.legacyProof = undefined;
+      this.cleanupDebt.clear();
       this.legacyEmpty = true;
       this.legacyCheckedRevision = this.legacyRevision;
     });
@@ -847,7 +859,9 @@ export class BrowserProfileStore {
         return record.profile.connection;
       });
       if (this.persist && this.failed) throw new ChatStorageError('profile-delete', 'Could not delete this profile. Restore browser storage and try again.');
-      await this.reconcileLegacy(true, 'profile', source ? [source] : []);
+      const pending = this.cleanupDebt.get(profileId);
+      const credentials = [...pending?.credentials ?? [], ...(source ? [source] : [])];
+      await this.reconcileLegacy(true, 'profile', credentials, pending?.unresolvedAuthentication ?? false);
       let committed: State | undefined;
       const session = this.sessions.get(profileId);
       await this.run([profileId], true, (draft) => {
@@ -915,29 +929,39 @@ export class BrowserProfileStore {
           // contain unsaved turns. Credential retry must never reload over that
           // archive or clear its warning; require a fresh manager after recovery.
           let previous: StoredConnection | undefined;
-          try { previous = await this.run([profileId], false, (draft) => getRecord(draft, profileId).profile.connection); }
+          let connectionEpoch = '';
+          try { previous = await this.run([profileId], false, (draft) => {
+            const record = getRecord(draft, profileId);
+            connectionEpoch = record.connectionEpoch ?? '';
+            return record.profile.connection;
+          }); }
           catch (error) {
             if (pending && error instanceof ChatStorageError && error.code === 'missing-profile') throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
             throw error;
           }
           this.connectionReadKnown = !this.persist || !this.failed;
-          const sources = [...pending ?? [], ...supplied, ...(previous ? [previous] : []), ...(options?.rememberCredentials === false ? [copy] : [])];
+          const sources = [...pending?.credentials ?? [], ...supplied, ...(previous ? [previous] : []), ...(options?.rememberCredentials === false ? [copy] : [])];
+          const unresolvedAuthentication = pending?.unresolvedAuthentication === true || options?.unresolvedAuthentication === true;
           // No credential in a failed read's RAM snapshot is not evidence that
           // disk is empty. Session-only setModel remains available during outage.
           if (!this.connectionReadKnown) {
-            this.cleanupDebt.set(profileId, sources);
+            this.cleanupDebt.set(profileId, { credentials: sources, unresolvedAuthentication });
             throw new ChatStorageError('legacy-cleanup', 'Could not forget legacy authentication. Close other tabs and try again.');
           }
           const forget = !!pending || options?.rememberCredentials === false && (options.authenticationIntent || sources.some(hasStoredCredentials))
             || previous && hasStoredCredentials(previous) && connectionIdentity(previous) !== connectionIdentity(copy);
-          if (forget && this.persist) this.cleanupDebt.set(profileId, sources);
-          await this.reconcileLegacy(true, forget ? 'credentials' : 'automatic', sources, options?.unresolvedAuthentication);
+          if (forget && this.persist) this.cleanupDebt.set(profileId, { credentials: sources, unresolvedAuthentication });
+          await this.reconcileLegacy(true, forget ? 'credentials' : 'automatic', sources, unresolvedAuthentication);
           let baseline = previous;
           const saved = await this.run([profileId], true, (draft) => {
-            baseline = getRecord(draft, profileId).profile.connection;
+            const current = getRecord(draft, profileId);
+            if ((current.connectionEpoch ?? '') !== connectionEpoch) throw new ChatStorageError('stale-connection', 'Connection settings changed. Reload before saving again.');
+            baseline = current.profile.connection;
             const known = this.sessions.get(profileId)?.at(-1)?.connection ?? baseline;
             const saved = prepareSavedConnection(copy, known, options?.rememberCredentials);
-            touch(draft, profileId).profile.connection = saved;
+            const record = touch(draft, profileId);
+            record.profile.connection = saved;
+            if (options?.rememberCredentials === false || !sameSavedAuthentication(baseline, saved)) record.connectionEpoch = freshId();
             return clone(saved);
           });
           if (forget && this.persist && this.failed) {

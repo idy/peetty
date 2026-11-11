@@ -110,6 +110,8 @@ export function buildChatView(panel: HTMLElement, copy: () => ChatCopy): { trans
     el('label', 'pc-check', {}, el('input', '', { name: 'remember', type: 'checkbox', checked: true }), el('span', '', {}, text('remember'))),
     el('p', 'pc-note', {}, text('keyNote')),
     el('button', 'pc-primary', { type: 'submit' }, text('connect'), icon('send', document)),
+    el('button', 'pc-small pc-visit-only', { type: 'submit', hidden: true, 'aria-describedby': 'pc-visit-note' }, text('visitOnly')),
+    el('p', 'pc-note pc-visit-note', { id: 'pc-visit-note', hidden: true }, text('visitOnlyNote')),
     privacy,
   );
   const input = attr(labelled(el('textarea', '', { name: 'message', rows: 1, maxlength: 8000 }), 'placeholder'), 'placeholder', 'placeholder');

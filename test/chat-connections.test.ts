@@ -94,7 +94,7 @@ describe('explicit nonsecret header classification', () => {
   });
 
   it('accepts explicitly declared numeric token-count metadata without exempting credentials', () => {
-    for (const name of ['X-MaxTokens', 'X-InputTokens', 'X-Output-Tokens', 'X-TotalTokens', 'X-PromptTokens', 'X-Completion-Tokens-Limit', 'X-ContextTokens', 'X-RemainingTokens', 'X-UsedTokens', 'X-GenerationTokens', 'X-Token-Count', 'X-Custom-Context-Token-Budget']) {
+    for (const name of ['X-MaxTokens', 'X-InputTokens', 'X-Output-Tokens', 'X-TotalTokens', 'X-PromptTokens', 'X-Completion-Tokens-Limit', 'X-ContextTokens', 'X-RemainingTokens', 'X-UsedTokens', 'X-GenerationTokens', 'X-Token-Count', 'X-Custom-Context-Token-Budget', 'X-Paid-Tokens', 'X-PaidTokens', 'X-Unpaid-Tokens', 'X-RapidTokens', 'X-CapitalizeTokens', 'X-CompatibilityTokens', 'X-Author-Tokens']) {
       for (const value of ['0', '42', '4096']) {
         const model = normalizeModelOptions({ ...base, headers: { [name]: value }, nonCredentialHeaders: [name] });
         assert.equal(isCredentialHeader(name), true, 'undeclared values remain sensitive');
@@ -108,7 +108,7 @@ describe('explicit nonsecret header classification', () => {
         assert.throws(() => normalizeModelOptions({ ...base, headers: { [name]: value }, nonCredentialHeaders: [name] }));
       }
     }
-    for (const name of ['X-ClientToken', 'X-AuthToken', 'X-Token', 'X-InputTokensSecret', 'X-AccessTokens', 'X-Refresh-Tokens', 'X-ClientTokensCount', 'X-AuthTokensLimit', 'X-SecretTokensBudget', 'X-API-Tokens', 'X-ApiTokens', 'API-Tokens', 'X-Subscription-Tokens', 'X-SasTokens', 'X-PAT-Tokens', 'X-ID-Tokens', 'X-SSO-Tokens']) {
+    for (const name of ['X-ClientToken', 'X-AuthToken', 'X-Token', 'X-InputTokensSecret', 'X-AccessTokens', 'X-Refresh-Tokens', 'X-ClientTokensCount', 'X-AuthTokensLimit', 'X-SecretTokensBudget', 'X-API-Tokens', 'X-ApiTokens', 'API-Tokens', 'X-Subscription-Tokens', 'X-SasTokens', 'X-PAT-Tokens', 'X-ID-Tokens', 'X-SSO-Tokens', 'X-Tokens', 'X-Authorization-Custom-Tokens', 'X-Authentication-RemainingTokens', 'X-Auth-Custom-Tokens', 'X-Custom-ID-Tokens', 'X-Custom-API-Tokens', 'X-Secret-Custom-Tokens', 'X-Custom-ClientTokens', 'x_authorization_custom_tokens', 'X-ClientSecret-Custom-Tokens', 'X-SessionSecretKey-Tokens', 'X-GatewayPassword-CountTokens', 'X-InputTokensSecret-Tokens']) {
       assert.throws(() => normalizeModelOptions({ ...base, headers: { [name]: '42' }, nonCredentialHeaders: [name] }));
     }
   });
