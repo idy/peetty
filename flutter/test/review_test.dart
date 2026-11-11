@@ -201,6 +201,19 @@ void main() {
       expect(rows.$2, closeTo(90, 0.01));
     });
 
+    test('rows a hair past the horizon are judged without cancellation', () {
+      // X = 100·x, Y = y, W = y − 1000: at y = 1000.0000000000002 a 1.4e-14 overhang shows as ~6 pixels.
+      final transform = Matrix4.identity()
+        ..setEntry(0, 0, 100)
+        ..setEntry(3, 1, 1)
+        ..setEntry(3, 3, -1000);
+      final rows = overhangRows(transform, 100, 100.00000000000001 - 100, 2000, 1)!;
+      // The overhang shrinks to 1e-6 px only about 1.4e-6 rows past the horizon.
+      expect(rows.$1, greaterThan(1000.000001));
+      expect(rows.$1, lessThan(1000.000002));
+      expect(rows.$2, 2000);
+    });
+
     test('only the rows where the overhang stays invisible are used', () {
       // W = 1 − (1 − 1e-9)·x + y: near y = 0 the overhang is magnified, lower down it is not.
       final transform = Matrix4.identity()

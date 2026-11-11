@@ -14,10 +14,13 @@ import 'physics.dart';
 /// millionth of a pixel past it, in front of the viewer; null when there is none.
 ///
 /// Along a row the projection `(X/W, Y/W)` moves from the edge by exactly
-/// `overhang · |(xx·W − wx·X, yx·W − wx·Y)| / (W(edge)·W(edge + overhang))`, whose
-/// numerators and denominators are linear in the row. So the admissible rows are
-/// where a quartic is non-negative and both W are positive: every boundary is a
-/// root of one of those polynomials, found exactly, and no run can be missed.
+/// `overhang · |(xx·Wa − wx·Xa, yx·Wa − wx·Ya)| / (Wa·Wb)`, with `Wa`, `Xa`, `Ya`
+/// taken at the edge and `Wb = Wa + wx·overhang`. Near the horizon `Wa` is a tiny
+/// difference of large terms, so rows are measured by `t = Wa` itself whenever
+/// `Wa` varies by row: every factor is then linear in `t` with coefficients free
+/// of that cancellation. Admissibility is tested on the factored form, and its
+/// boundaries are roots of the squared inequality (a quartic in `t`) or of the
+/// weights, isolated between the roots of its derivatives and bisected.
 @visibleForTesting
 (double, double)? overhangRows(Matrix4 transform, double edge, double overhang, double height, double need) {
   final m = transform.storage;
@@ -25,23 +28,54 @@ import 'physics.dart';
   final (yx, yy, yc) = (m[1], m[5], m[13]);
   final (wx, wy, wc) = (m[3], m[7], m[15]);
   const tolerance = 1e-6;
-  // Polynomials in the row y, as coefficient lists from the constant term up.
-  final wa = [wx * edge + wc, wy];
-  final wb = [wx * (edge + overhang) + wc, wy];
-  final nx = [xx * wc - wx * xc, xx * wy - wx * xy];
-  final ny = [yx * wc - wx * yc, yx * wy - wx * yy];
+  final delta = wx * overhang; // Wb − Wa, computed directly.
+  final base = wx * edge + wc; // Wa on row 0.
+
+  // Each quantity as [constant, slope] in the variable t, and y as a function of t.
+  final List<double> wa, xa, ya;
+  final double Function(double t) rowOf;
+  final double t0, t1;
+  if (wy != 0) {
+    wa = [0, 1];
+    xa = [xx * edge + xc - xy * base / wy, xy / wy];
+    ya = [yx * edge + yc - yy * base / wy, yy / wy];
+    rowOf = (t) => (t - base) / wy;
+    final (a, b) = (base, wy * height + base);
+    (t0, t1) = a <= b ? (a, b) : (b, a);
+  } else {
+    wa = [base, 0];
+    xa = [xx * edge + xc, xy];
+    ya = [yx * edge + yc, yy];
+    rowOf = (t) => t;
+    (t0, t1) = (0, height);
+  }
+  final wb = [wa[0] + delta, wa[1]];
+  final nx = [xx * wa[0] - wx * xa[0], xx * wa[1] - wx * xa[1]];
+  final ny = [yx * wa[0] - wx * ya[0], yx * wa[1] - wx * ya[1]];
+
+  // Factored, so no large terms cancel: Wa, Wb, Nx and Ny are each one linear term.
+  bool ok(double t) {
+    final a = _evaluate(wa, t), b = _evaluate(wb, t);
+    if (a <= 0 || b <= 0) return false;
+    final x = _evaluate(nx, t), y = _evaluate(ny, t);
+    return overhang * math.sqrt(x * x + y * y) <= tolerance * a * b;
+  }
+
   final ab = _multiply(wa, wb);
   final margin = _subtract(
     _scale(_multiply(ab, ab), tolerance * tolerance),
     _scale(_add(_multiply(nx, nx), _multiply(ny, ny)), overhang * overhang),
   );
-  bool ok(double y) => _evaluate(wa, y) > 0 && _evaluate(wb, y) > 0 && _evaluate(margin, y) >= 0;
-
-  final cuts = <double>{0, height, ..._roots(margin, 0, height), ..._roots(wa, 0, height), ..._roots(wb, 0, height)}.toList()..sort();
+  final cuts = <double>{t0, t1, ..._roots(margin, t0, t1), ..._roots(wa, t0, t1), ..._roots(wb, t0, t1)}.toList()..sort();
   (double, double)? best;
   double? start;
   void close(double end) {
-    if (start != null && end - start! >= need && (best == null || end - start! > best!.$2 - best!.$1)) best = (start!, end);
+    if (start != null) {
+      final (r0, r1) = (rowOf(start!), rowOf(end));
+      final rows = r0 <= r1 ? (r0, r1) : (r1, r0);
+      final clamped = (rows.$1.clamp(0.0, height).toDouble(), rows.$2.clamp(0.0, height).toDouble());
+      if (clamped.$2 - clamped.$1 >= need && (best == null || clamped.$2 - clamped.$1 > best!.$2 - best!.$1)) best = clamped;
+    }
     start = null;
   }
 
@@ -53,7 +87,7 @@ import 'physics.dart';
       close(cuts[i]);
     }
   }
-  close(height);
+  close(t1);
   return best;
 }
 
