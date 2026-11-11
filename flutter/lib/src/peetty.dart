@@ -364,6 +364,18 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
       return lo <= hi ? (lo, hi) : null;
     }
 
+    // The solve allows rounding slack; the box it picks must still land inside
+    // the safe area on screen, checked at its projected corners to within a
+    // millionth of a logical pixel.
+    bool onScreen(double x0, double x1, double y0, double y1) {
+      for (final (x, y) in [(x0, y0), (x1, y0), (x0, y1), (x1, y1)]) {
+        if (wx * x + wy * y + wc <= 0) return false;
+        final p = MatrixUtils.transformPoint(transform, Offset(x, y));
+        if (!(p.dx >= left - 1e-6 && p.dx <= right + 1e-6 && p.dy >= top - 1e-6 && p.dy <= bottom + 1e-6)) return false;
+      }
+      return true;
+    }
+
     // The column start giving the most rows, by ternary search on the concave
     // height within the allowed starts; null when no start is allowed.
     double? bestStart(double width) {
@@ -380,20 +392,16 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
         }
       }
       final mid = (lo + hi) / 2;
-      // Plateaus can leave either end best.
-      return [first, mid, last].reduce((a, b) => rows(a, width).$3 >= rows(b, width).$3 ? a : b);
-    }
-
-    // The solve allows rounding slack; the box it picks must still land inside
-    // the safe area on screen, checked at its projected corners to within a
-    // millionth of a logical pixel.
-    bool onScreen(double x0, double x1, double y0, double y1) {
-      for (final (x, y) in [(x0, y0), (x1, y0), (x0, y1), (x1, y1)]) {
-        if (wx * x + wy * y + wc <= 0) return false;
-        final p = MatrixUtils.transformPoint(transform, Offset(x, y));
-        if (!(p.dx >= left - 1e-6 && p.dx <= right + 1e-6 && p.dy >= top - 1e-6 && p.dy <= bottom + 1e-6)) return false;
+      // Plateaus can leave either end as good as the middle. Prefer the middle on
+      // ties, as the ends may sit a rounding hair past a screen edge, and take the
+      // tallest start whose box actually lands on screen.
+      // On a flat stretch the search drifts to one end, so the range's own middle is tried too.
+      final candidates = [mid, (first + last) / 2, first, last]..sort((a, b) => rows(b, width).$3.compareTo(rows(a, width).$3));
+      for (final x0 in candidates) {
+        final (y0, y1, _) = rows(x0, width);
+        if (onScreen(x0, x0 + width, y0, y1)) return x0;
       }
-      return true;
+      return candidates.first;
     }
 
     bool fits(double width) {
