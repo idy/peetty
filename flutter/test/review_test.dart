@@ -573,6 +573,18 @@ void main() {
     expect(_state(tester).position, isNotNull);
   });
 
+  testWidgets('a sheared host finds the start where she fits, not the middle', (tester) async {
+    // X = x − 100 and Y = y + 0.5·(x − 100): only starts near x = 100 leave her enough rows.
+    final transform = Matrix4.identity()
+      ..setEntry(0, 3, -100)
+      ..setEntry(1, 0, 0.5)
+      ..setEntry(1, 3, -50);
+    // A figure needing about 400 rows: only starts within about 88 of x = 100 fit.
+    await tester.pumpWidget(transformed(transform, const Size(2000000, 600), 312.5));
+    await _until(tester, () => false, frames: 30);
+    expect(_state(tester).position, isNotNull);
+  });
+
   testWidgets('a host too short for her below a large inset leaves her nowhere to stand', (tester) async {
     await tester.pumpWidget(MediaQuery(
       data: const MediaQueryData(size: Size(800, 600), padding: EdgeInsets.only(top: 80)),

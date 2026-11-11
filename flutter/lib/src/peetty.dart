@@ -351,20 +351,21 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
     (double, double)? starts(double width) {
       var lo = 0.0, hi = size.width - width;
       for (final (hx, _, hc) in level) {
-        // Rounding allowance, relative to the bound's own size across this host.
-        final slack = 1e-12 * (hx.abs() * size.width + hc.abs());
+        // The start bounds are exact, so every start between them is valid; only a
+        // constant bound, which no start can change, gets a rounding allowance.
+        final slack = 1e-12 * hc.abs();
         if (hx == 0) {
           if (-hc > slack) return null;
         } else if (hx > 0) {
-          lo = math.max(lo, (-hc - slack) / hx);
+          lo = math.max(lo, -hc / hx);
         } else {
-          hi = math.min(hi, (hc + hx * width + slack) / -hx);
+          hi = math.min(hi, (hc + hx * width) / -hx);
         }
       }
       return lo <= hi ? (lo, hi) : null;
     }
 
-    // The solve allows rounding slack; the box it picks must still land inside
+    // The solve works in host units, where rounding adds up; the box it picks must still land inside
     // the safe area on screen, checked at its projected corners to within a
     // millionth of a logical pixel.
     bool onScreen(double x0, double x1, double y0, double y1) {
