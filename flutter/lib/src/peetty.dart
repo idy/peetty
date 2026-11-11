@@ -301,35 +301,44 @@ class PeettyState extends State<Peetty> with SingleTickerProviderStateMixin {
     final spare = size.width - figureWidth;
     if (spare < 0) return null;
     if (screen == null) return size.height < anchor.dy ? null : box(0, size.width, 0, size.height);
-    Offset toScreen(double x, double y) => MatrixUtils.transformPoint(transform, Offset(x, y));
-    final origin = toScreen(0, 0);
-    final alongX = toScreen(1, 0) - origin;
-    final alongY = toScreen(0, 1) - origin;
-    final bands = [
-      (alongX.dx, alongY.dx, origin.dx, _padding.left, screen.width - _padding.right),
-      (alongX.dy, alongY.dy, origin.dy, _padding.top, screen.height - _padding.bottom),
+    // A host point (x, y) lands on screen at (X/W, Y/W), each of X, Y and W linear
+    // in x and y, so perspective is covered too. Where W > 0 a screen bound such as
+    // X/W ≥ left is the half-plane X − left·W ≥ 0, and a box satisfies a half-plane
+    // exactly when its corners do. Each entry is (hx, hy, hc): hx·x + hy·y + hc ≥ 0.
+    final m = transform.storage;
+    final (xx, xy, xc) = (m[0], m[4], m[12]);
+    final (yx, yy, yc) = (m[1], m[5], m[13]);
+    final (wx, wy, wc) = (m[3], m[7], m[15]);
+    final left = _padding.left, right = screen.width - _padding.right;
+    final top = _padding.top, bottom = screen.height - _padding.bottom;
+    final planes = [
+      (xx - left * wx, xy - left * wy, xc - left * wc),
+      (right * wx - xx, right * wy - xy, right * wc - xc),
+      (yx - top * wx, yy - top * wy, yc - top * wc),
+      (bottom * wx - yx, bottom * wy - yy, bottom * wc - yc),
+      // In front of the viewer: past the horizon, projection flips.
+      (wx, wy, wc - 1e-6),
     ];
 
     // For columns [x0, x0 + width]: the rows [y0, y1] keeping the whole box inside
-    // both screen axes' safe bands, and their height (negative when none fit).
-    // Every bound is linear in x0, so the height is concave in x0 and in width.
+    // the safe area, and their height (negative when none fit). Every bound is
+    // linear in x0, so the height is concave in x0 and in width.
     (double, double, double) rows(double x0, double width) {
       final x1 = x0 + width;
       var y0 = 0.0, y1 = size.height;
       var penalty = double.infinity;
-      for (final (px, py, c, low, high) in bands) {
-        final omin = c + math.min(px * x0, px * x1), omax = c + math.max(px * x0, px * x1);
-        final from = low - omin, to = high - omax;
-        if (py.abs() <= 1e-12) {
-          // Rows do not move this coordinate: the columns alone must fit. A steep
+      for (final (hx, hy, hc) in planes) {
+        // The weakest corner column: hy·y ≥ need for every row of the box.
+        final need = -hc - math.min(hx * x0, hx * x1);
+        final scale = math.max(1.0, hx.abs() + hy.abs() + hc.abs());
+        if (hy.abs() <= 1e-12 * scale) {
+          // Rows do not move this bound: the columns alone must satisfy it. A steep
           // concave penalty keeps the search exact at the boundary.
-          penalty = math.min(penalty, size.height + 1e6 * math.min(-from, to));
-        } else if (py > 0) {
-          y0 = math.max(y0, from / py);
-          y1 = math.min(y1, to / py);
+          penalty = math.min(penalty, size.height - 1e6 * need / scale);
+        } else if (hy > 0) {
+          y0 = math.max(y0, need / hy);
         } else {
-          y0 = math.max(y0, to / py);
-          y1 = math.min(y1, from / py);
+          y1 = math.min(y1, need / hy);
         }
       }
       return (y0, y1, math.min(y1 - y0, penalty));

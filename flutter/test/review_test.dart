@@ -437,6 +437,41 @@ void main() {
     expect(tester.getTopRight(canvas).dx, lessThanOrEqualTo(200 + 1e-6));
   });
 
+  testWidgets('a host under a perspective transform uses its projected size', (tester) async {
+    // W = 1 + 0.005·x: a 250-wide figure at the left projects to about 111 pixels.
+    await tester.pumpWidget(MediaQuery(
+      data: const MediaQueryData(size: Size(200, 400)),
+      child: Directionality(
+        textDirection: TextDirection.ltr,
+        child: Stack(children: [
+          Positioned(
+            left: 0,
+            top: 0,
+            width: 1000,
+            height: 400,
+            child: Transform(
+              transform: Matrix4.identity()..setEntry(3, 0, 0.005),
+              child: Peetty(
+                figureData: _miru,
+                scale: 250 / (_miru.height * _miru.viewBox.width / _miru.viewBox.height),
+                random: _seeded(),
+                child: const SizedBox.expand(),
+              ),
+            ),
+          ),
+        ]),
+      ),
+    ));
+    final state = _state(tester);
+    expect(await _until(tester, () => state.action != FigureState.fall && state.position != null), isTrue);
+    final canvas = tester.renderObject<RenderBox>(find.byType(FigureCanvas));
+    for (final corner in [Offset.zero, Offset(canvas.size.width, 0), Offset(0, canvas.size.height * 0.9), Offset(canvas.size.width, canvas.size.height * 0.9)]) {
+      final point = canvas.localToGlobal(corner);
+      expect(point.dx, inInclusiveRange(-1e-6, 200 + 1e-6), reason: '$point');
+      expect(point.dy, inInclusiveRange(-1e-6, 400 + 1e-6), reason: '$point');
+    }
+  });
+
   testWidgets('a host too short for her below a large inset leaves her nowhere to stand', (tester) async {
     await tester.pumpWidget(MediaQuery(
       data: const MediaQueryData(size: Size(800, 600), padding: EdgeInsets.only(top: 80)),
