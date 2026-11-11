@@ -43,6 +43,8 @@ export interface JSONParseOptions {
   allowedKey?: (path: readonly string[], key: string) => boolean;
   allowedType?: (path: readonly string[], type: 'object' | 'array' | 'string' | 'number' | 'boolean' | 'null') => boolean;
   validateValue?: (path: readonly string[], value: unknown) => void;
+  /** Canonical serialized UTF-8 budget for a container and its entire subtree. */
+  maxBytes?: (path: readonly string[], array: boolean) => number | undefined;
   check?: () => void;
 }
 interface JSONFrame {
@@ -53,10 +55,27 @@ interface JSONFrame {
   field: string;
   limit: number;
   count: number;
+  bytes?: number;
+  byteLimit?: number;
+  valueBytes?: Map<string, number>;
 }
 interface StringToken { key: boolean; limit: number; size: number; pieces: string[]; pending: string; escape: boolean; unicode: string | undefined }
 const invalidJSON = (): never => { throw new Error('Invalid or unsupported profile data.'); };
 const ESCAPES: Record<string, string> = { '"': '"', '\\': '\\', '/': '/', b: '\b', f: '\f', n: '\n', r: '\r', t: '\t' };
+
+/** Called only for bounded scalar tokens, never for a container or whole archive. */
+function scalarJSONBytes(value: unknown): number {
+  const text = JSON.stringify(value) ?? 'null';
+  let bytes = 0;
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code < 0x80) bytes++;
+    else if (code < 0x800) bytes += 2;
+    else if (code >= 0xd800 && code <= 0xdbff && text.charCodeAt(i + 1) >= 0xdc00 && text.charCodeAt(i + 1) <= 0xdfff) { bytes += 4; i++; }
+    else bytes += 3;
+  }
+  return bytes;
+}
 
 /** A push parser shared by synchronous and asynchronous transport. Each feed is
  * consumed synchronously, so escape-heavy tokens never incur per-character awaits.
@@ -77,11 +96,30 @@ class JSONChunkParser {
     const frame = this.stack.at(-1);
     return frame ? [...frame.path, frame.array ? '*' : frame.field] : [];
   }
-  private accept(value: unknown): void {
+  private addBytes(delta: number): void {
+    for (const frame of this.stack) {
+      if (frame.bytes === undefined) continue;
+      frame.bytes += delta;
+      if (frame.bytes > frame.byteLimit!) invalidJSON();
+    }
+  }
+  private beginValue(): void {
+    const frame = this.stack.at(-1);
+    if (frame?.bytes === undefined) return;
+    if (frame.array) this.addBytes(frame.count ? 1 : 0);
+    else if (Object.hasOwn(frame.value, frame.field)) this.addBytes(-frame.valueBytes!.get(frame.field)!);
+    else this.addBytes(scalarJSONBytes(frame.field) + 1 + (frame.count ? 1 : 0));
+  }
+  private accept(value: unknown, containerBytes?: number, counted = false): void {
     this.options.validateValue?.(this.path(), value);
     const frame = this.stack.at(-1);
     if (!frame) { if (this.complete) invalidJSON(); this.root = value; this.complete = true; return; }
     if (frame.state !== 'value' && frame.state !== 'valueOrEnd') invalidJSON();
+    if (frame.bytes !== undefined) {
+      const bytes = containerBytes ?? scalarJSONBytes(value);
+      if (!counted) this.addBytes(bytes);
+      if (!frame.array) frame.valueBytes!.set(frame.field, bytes);
+    }
     const newItem = frame.array || !Object.hasOwn(frame.value, frame.field);
     if (newItem && frame.count >= frame.limit) invalidJSON();
     if (newItem) frame.count++;
@@ -89,10 +127,17 @@ class JSONChunkParser {
     else Object.defineProperty(frame.value, frame.field, { configurable: true, enumerable: true, writable: true, value });
     frame.state = 'commaOrEnd';
   }
-  private close(): void { const frame = this.stack.pop()!; this.accept(frame.value); }
+  private close(): void { const frame = this.stack.pop()!; this.accept(frame.value, frame.bytes, true); }
   private startString(key: boolean): void {
     const path = key ? this.stack.at(-1)!.path : this.path();
-    const limit = typeof this.maxTokenChars === 'number' ? this.maxTokenChars : this.maxTokenChars(path, key);
+    let limit = typeof this.maxTokenChars === 'number' ? this.maxTokenChars : this.maxTokenChars(path, key);
+    for (const frame of this.stack) {
+      if (frame.bytes === undefined || !Number.isFinite(frame.byteLimit)) continue;
+      // UTF-16 length is a lower bound on serialized UTF-8 bytes. Keys may
+      // replace an existing property, so their final size is checked at beginValue.
+      limit = Math.min(limit, (key ? frame.byteLimit! : frame.byteLimit! - frame.bytes) - 2);
+    }
+    if (limit < 0) invalidJSON();
     this.string = { key, limit, size: 0, pieces: [], pending: '', escape: false, unicode: undefined };
   }
   private append(value: string): void {
@@ -183,13 +228,19 @@ class JSONChunkParser {
           : char === 't' || char === 'f' ? 'boolean' : char === 'n' ? 'null' : 'number';
         if (!this.options.allowedType(this.path(), type)) invalidJSON();
       }
+      this.beginValue();
       if (char === '"') { this.startString(false); offset++; continue; }
       if (char === '{' || char === '[') {
         if (this.stack.length >= 128) invalidJSON();
         const array = char === '['; const path = this.path();
         const limit = this.options.collectionLimit?.(path, array) ?? Infinity;
         if (limit < 0) invalidJSON();
-        this.stack.push({ array, path, value: array ? [] : {}, state: array ? 'valueOrEnd' : 'keyOrEnd', field: '', limit, count: 0 });
+        const byteLimit = this.options.maxBytes?.(path, array);
+        if (byteLimit !== undefined && (!Number.isSafeInteger(byteLimit) || byteLimit < 2)) invalidJSON();
+        const trackBytes = byteLimit !== undefined || frame?.bytes !== undefined;
+        this.stack.push({ array, path, value: array ? [] : {}, state: array ? 'valueOrEnd' : 'keyOrEnd', field: '', limit, count: 0,
+          ...(trackBytes ? { bytes: 0, byteLimit: byteLimit ?? Infinity, ...(!array ? { valueBytes: new Map<string, number>() } : {}) } : {}) });
+        if (trackBytes) this.addBytes(2);
         offset++; continue;
       }
       if (!/[tfn0-9-]/.test(char)) invalidJSON();

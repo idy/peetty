@@ -346,6 +346,33 @@ function backupTokenLimit(path: readonly string[], key: boolean): number {
 }
 
 const BACKUP_HEADER_LIMIT = PROFILE_LIMITS.fileBytes; // Preserve the existing schema/file ceiling; no new smaller cap.
+function figurePath(path: readonly string[]): readonly string[] | undefined {
+  return path[0] === 'profiles' && path[1] === '*' && path[2] === 'figure' ? path.slice(3) : undefined;
+}
+function figureCollectionLimit(path: readonly string[], array: boolean): number {
+  const relative = figurePath(path)!;
+  const location = relative.join('.');
+  if (!array) {
+    if (location === 'palette') return FIGURE_LIMITS.maxPaletteEntries;
+    if (location === 'gradients') return FIGURE_LIMITS.maxGradients;
+    return Infinity; // The cumulative figure byte budget bounds extension data.
+  }
+  if (location === 'parts') return FIGURE_LIMITS.maxParts;
+  if (location === 'viewBox') return 4;
+  if (location === 'anchor') return 2;
+  if (relative.length === 2 && relative[0] === 'clips') return FIGURE_LIMITS.maxShapesPerPart;
+  if (location === 'parts.*.shapes') return FIGURE_LIMITS.maxShapesPerPart;
+  if (location === 'parts.*.pivot' || location === 'parts.*.look') return 2;
+  if (relative.length === 3 && relative[0] === 'skeleton' && relative[2] === 'pivot') return 2;
+  if (relative.length === 3 && relative[0] === 'gradients') {
+    if (relative[2] === 'stops') return 16;
+    if (['from', 'to', 'center', 'focus'].includes(relative[2]!)) return 2;
+  }
+  if (relative.length === 4 && relative[0] === 'sprite' && relative[1] === 'animations' && relative[3] === 'frames') return FIGURE_LIMITS.maxFrames;
+  if (relative.length === 3 && relative[0] === 'sounds' && relative[1] === 'events') return 8;
+  if (relative.length === 5 && relative[0] === 'sounds' && relative[1] === 'events' && relative[3] === '*' && relative[4] === 'notes') return 8;
+  return Infinity;
+}
 function backupObjectFields(path: readonly string[]): readonly string[] | undefined {
   switch (path.join('.')) {
     case '': return ['format', 'version', 'createdAt', 'activeProfileId', 'profiles', 'sessions'];
@@ -355,10 +382,11 @@ function backupObjectFields(path: readonly string[]): readonly string[] | undefi
     case 'sessions.*': return ['profileId', 'connection', 'rememberKey'];
     case 'profiles.*.connection': case 'sessions.*.connection': return ['id', 'baseUrl', 'apiKey', 'tools', 'effort', 'provider', 'headers', 'nonCredentialHeaders'];
     case 'profiles.*.connection.headers': case 'sessions.*.connection.headers': return undefined;
-    default: return path.includes('figure') ? undefined : [];
+    default: return figurePath(path) ? undefined : [];
   }
 }
 function backupCollectionLimit(path: readonly string[], array: boolean): number {
+  if (figurePath(path)) return figureCollectionLimit(path, array);
   const location = path.join('.');
   if (array) {
     switch (location) {
@@ -367,30 +395,16 @@ function backupCollectionLimit(path: readonly string[], array: boolean): number 
       case 'profiles.*.memories': return PROFILE_LIMITS.memories;
       case 'sessions': return PROFILE_LIMITS.fileBytes; // Existing backup schema ceiling.
       case 'profiles.*.connection.nonCredentialHeaders': case 'sessions.*.connection.nonCredentialHeaders': return BACKUP_HEADER_LIMIT;
-      default: {
-        if (!path.includes('figure')) return -1;
-        switch (path.at(-1)) {
-          case 'parts': return FIGURE_LIMITS.maxParts;
-          case 'shapes': return FIGURE_LIMITS.maxShapesPerPart;
-          case 'frames': return FIGURE_LIMITS.maxFrames;
-          case 'stops': return 16;
-          case 'notes': return 8;
-          case 'viewBox': return 4;
-          case 'anchor': case 'from': case 'to': case 'center': case 'focus': case 'pivot': case 'look': return 2;
-          default: return FIGURE_LIMITS.maxBytes;
-        }
-      }
+      default: return -1;
     }
   }
   if (location.endsWith('.connection.headers')) return BACKUP_HEADER_LIMIT;
   const fields = backupObjectFields(path);
   if (fields) return fields.length;
-  if (path.at(-1) === 'palette') return FIGURE_LIMITS.maxPaletteEntries;
-  if (path.at(-1) === 'gradients') return FIGURE_LIMITS.maxGradients;
-  return FIGURE_LIMITS.maxBytes;
+  return 0;
 }
 function backupAllowedType(path: readonly string[], type: string): boolean {
-  if (path.includes('figure')) return true; // Figure schema validation owns its supported shapes.
+  if (figurePath(path)) return true; // Figure schema validation owns its supported shapes.
   const location = path.join('.');
   if (location === '' || ['profiles.*', 'profiles.*.entries.*', 'profiles.*.memories.*', 'sessions.*',
     'profiles.*.connection', 'sessions.*.connection', 'profiles.*.connection.headers', 'sessions.*.connection.headers'].includes(location)) return type === 'object';
@@ -419,6 +433,7 @@ function validateBackupValue(path: readonly string[], value: unknown): void {
 }
 const BACKUP_PARSE_BOUNDS = {
   collectionLimit: backupCollectionLimit,
+  maxBytes: (path: readonly string[]) => figurePath(path)?.length === 0 ? FIGURE_LIMITS.maxBytes : undefined,
   allowedKey: (path: readonly string[], key: string) => backupObjectFields(path)?.includes(key) ?? true,
   allowedType: backupAllowedType,
   validateValue: validateBackupValue,
