@@ -33,8 +33,8 @@ jobs:
         run: |
           npm run build
           node scripts/verify-package.mjs
-          node --check site/shared/idy.js
-          node --check site/shared/header.js
+          node --check site/shared/sdk/idy-site.min.js
+          node --check site/shared/sdk/idy-site.js
           node --check site/translations.js
           node --check site/script.js
           npm run build:site -- --catalog-base https://peetty.idy.dev/figures/
