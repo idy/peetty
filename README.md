@@ -215,6 +215,8 @@ npm run check
 
 `npm run dev` serves the figure sheet at `http://127.0.0.1:4180/dev/figures.html` and the website at `http://127.0.0.1:4180/site/`, rebuilding on each change. `npm run build` writes `dist/index.js` (ESM), `dist/peetty.global.js` (a `Peetty` global for script tags), and the checked-in `cdn/` browser distribution without source maps. `npm run build:cdn` regenerates only the CDN files. `npm run build:site` assembles website assets from `cdn/` with portable catalogs; add `-- --catalog-base https://your-host.example/figures/` when an absolute legacy catalog is needed. `npm run figures` regenerates the preset JSON from its sources and mirrors the catalog into `flutter/assets/figures/`; `npm run check` type-checks and verifies that generated figure JSON and the checked-in CDN build are current.
 
+The website uses the shared Component Datasheet frame: self-hosted Archivo, a blue masthead, white/deep-navy sheets, 2px corners and fine rules. Vendor the complete Site SDK distribution, including `assets/` and licenses, and load it through relative URLs. Website styles are separate from the Peetty SDK's characters, movement, chat and settings; keep those product demonstrations intact when changing the site's frame.
+
 | Path | Purpose |
 | --- | --- |
 | `src/figure/types.ts` | Figure format types, bones, slots and states |
@@ -234,7 +236,7 @@ npm run check
 | `src/browser.ts` | CDN ES module entry with a catalog relative to its own URL |
 | `cdn/` | Checked-in browser distribution served directly by jsDelivr |
 | `scripts/cdn.mjs` | Generate and verify the browser distribution |
-| `site/` | peetty.idy.dev, with the shared idy.dev shell in `site/shared/` |
+| `site/` | peetty.idy.dev; complete idy.dev Site SDK 0.2.0 in `site/shared/sdk/`, with local website overrides in `site/styles.css` |
 | `.github/workflows/pages.yml` | Checks on every PR; builds and deploys `site/` to GitHub Pages from `main` |
 | `.github/workflows/package.yml` | Checks and publishes matching version tags to GitHub Packages |
 | `.github/workflows/codex-review.yml` | Shared Codex review for PRs, review requests, and linked-Issue updates |
